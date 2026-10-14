@@ -1,0 +1,225 @@
+package compiler
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+type Scope struct {
+	parent *Scope
+	names  map[string]*Object
+}
+
+func NewScope(parent *Scope) *Scope {
+	return &Scope{parent: parent, names: map[string]*Object{}}
+}
+
+func (s *Scope) Lookup(name string) *Object {
+	for ; s != nil; s = s.parent {
+		if o, ok := s.names[name]; ok {
+			return o
+		}
+	}
+	return nil
+}
+
+func (s *Scope) LookupLocal(name string) *Object { return s.names[name] }
+
+func (s *Scope) Insert(o *Object) *Object {
+	if prev, ok := s.names[o.Name]; ok {
+		return prev
+	}
+	s.names[o.Name] = o
+	return nil
+}
+
+type Package struct {
+	Path    string // import path ("main" for the program package)
+	Name    string
+	Dir     string
+	Files   []*File
+	Scope   *Scope
+	Imports []*Package
+
+	Funcs   []*Func
+	Globals []*Var
+	GlobalInits []*ValueSpec
+	Types   []*Named
+
+	CFiles  []CFile // C shims shipped with the package
+	Links   []string
+	CFlags  []string
+	LDFlags []string
+}
+
+type CFile struct {
+	Name string
+	Src  []byte
+}
+
+type Program struct {
+	Packages []*Package // dependency order, main last
+	Main     *Package
+	Funcs    []*Func
+	MainFunc *Func
+	InitFunc *Func // synthetic function holding package-level initializer calls
+
+	GoSites    []*GoStmt
+	MakeSites  []*CallExpr
+	NumDefers  int
+}
+
+// Loader finds and parses packages.
+type Loader struct {
+	Std     fs.FS // standard library root (contains std/<pkg>/*.sq)
+	MainDir string
+
+	pkgs    map[string]*Package
+	loading map[string]bool
+	order   []*Package
+}
+
+func (l *Loader) Load() (*Program, error) {
+	l.pkgs = map[string]*Package{}
+	l.loading = map[string]bool{}
+	mainPkg, err := l.load("main", l.MainDir, nil)
+	if err != nil {
+		return nil, err
+	}
+	if mainPkg.Name != "main" {
+		return nil, fmt.Errorf("%s: package %s is not a main package", l.MainDir, mainPkg.Name)
+	}
+	prog := &Program{Packages: l.order, Main: mainPkg}
+	return prog, nil
+}
+
+func (l *Loader) readDir(dir string, std bool) (names []string, read func(string) ([]byte, error), err error) {
+	if std {
+		ents, err := fs.ReadDir(l.Std, dir)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		return names, func(n string) ([]byte, error) { return fs.ReadFile(l.Std, path.Join(dir, n)) }, nil
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, e := range ents {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names, func(n string) ([]byte, error) { return os.ReadFile(filepath.Join(dir, n)) }, nil
+}
+
+func (l *Loader) load(importPath, dir string, std *bool) (*Package, error) {
+	if p, ok := l.pkgs[importPath]; ok {
+		return p, nil
+	}
+	if l.loading[importPath] {
+		return nil, fmt.Errorf("import cycle involving %q", importPath)
+	}
+	l.loading[importPath] = true
+	isStd := std != nil && *std
+	names, read, err := l.readDir(dir, isStd)
+	if err != nil {
+		return nil, fmt.Errorf("cannot find package %q: %v", importPath, err)
+	}
+	sort.Strings(names)
+	pkg := &Package{Path: importPath, Dir: dir}
+	var errs ErrorList
+	for _, n := range names {
+		switch {
+		case strings.HasSuffix(n, ".sq") && !strings.HasSuffix(n, "_test.sq"):
+			src, err := read(n)
+			if err != nil {
+				return nil, err
+			}
+			display := filepath.Join(dir, n)
+			if isStd {
+				display = "$SQUARK/" + path.Join(dir, n)
+			}
+			f, err := ParseFile(display, src)
+			if err != nil {
+				if el, ok := err.(ErrorList); ok {
+					errs = append(errs, el...)
+					continue
+				}
+				return nil, err
+			}
+			if pkg.Name == "" {
+				pkg.Name = f.Package
+			} else if pkg.Name != f.Package {
+				errs = append(errs, &Error{Pos{File: display, Line: 1, Col: 1}, fmt.Sprintf("package %s; expected %s", f.Package, pkg.Name)})
+			}
+			for _, pr := range f.Pragmas {
+				fields := strings.Fields(pr)
+				if len(fields) == 0 {
+					continue
+				}
+				switch fields[0] {
+				case "link":
+					pkg.Links = append(pkg.Links, fields[1:]...)
+				case "cflags":
+					pkg.CFlags = append(pkg.CFlags, fields[1:]...)
+				case "ldflags":
+					pkg.LDFlags = append(pkg.LDFlags, fields[1:]...)
+				}
+			}
+			pkg.Files = append(pkg.Files, f)
+		case strings.HasSuffix(n, ".c") || strings.HasSuffix(n, ".h"):
+			src, err := read(n)
+			if err != nil {
+				return nil, err
+			}
+			if strings.HasSuffix(n, ".c") {
+				pkg.CFiles = append(pkg.CFiles, CFile{Name: n, Src: src})
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	if len(pkg.Files) == 0 {
+		return nil, fmt.Errorf("no squark files in %s", dir)
+	}
+	// load imports
+	seen := map[string]bool{}
+	for _, f := range pkg.Files {
+		for _, imp := range f.Imports {
+			if seen[imp.Path] {
+				continue
+			}
+			seen[imp.Path] = true
+			var dep *Package
+			var err error
+			if strings.HasPrefix(imp.Path, "./") || strings.HasPrefix(imp.Path, "../") {
+				base := dir
+				if isStd {
+					return nil, fmt.Errorf("%s: relative import in standard library", imp.P)
+				}
+				dep, err = l.load(filepath.Clean(filepath.Join(base, imp.Path)), filepath.Join(base, imp.Path), nil)
+			} else {
+				yes := true
+				dep, err = l.load(imp.Path, path.Join("std", imp.Path), &yes)
+			}
+			if err != nil {
+				return nil, &Error{imp.P, err.Error()}
+			}
+			pkg.Imports = append(pkg.Imports, dep)
+		}
+	}
+	l.pkgs[importPath] = pkg
+	l.order = append(l.order, pkg)
+	delete(l.loading, importPath)
+	return pkg, nil
+}

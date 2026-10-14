@@ -1,0 +1,5 @@
+bin/
+bench/bin/
+*.db
+*.db-wal
+*.db-shm

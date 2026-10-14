@@ -1,0 +1,105 @@
+// Package bytes provides a fixed-capacity Buffer and byte-slice helpers.
+package bytes
+
+import (
+	"io"
+	"strconv"
+)
+
+// Buffer appends into storage supplied by the caller. It never grows: writes that do not fit
+// are truncated and reported with io.ErrShortBuffer.
+type Buffer struct {
+	buf      []byte
+	overflow bool
+}
+
+// NewBuffer returns a Buffer that writes into storage (its length is ignored, its capacity used).
+func NewBuffer(storage []byte) Buffer {
+	return Buffer{buf: storage[:0]}
+}
+
+func (b *Buffer) Len() int        { return len(b.buf) }
+func (b *Buffer) Cap() int        { return cap(b.buf) }
+func (b *Buffer) Available() int  { return cap(b.buf) - len(b.buf) }
+func (b *Buffer) Bytes() []byte   { return b.buf }
+func (b *Buffer) String() string  { return string(b.buf) }
+func (b *Buffer) Overflowed() bool { return b.overflow }
+
+func (b *Buffer) Reset() {
+	b.buf = b.buf[:0]
+	b.overflow = false
+}
+
+func (b *Buffer) Truncate(n int) { b.buf = b.buf[:n] }
+
+func (b *Buffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if n > cap(b.buf)-len(b.buf) {
+		n = cap(b.buf) - len(b.buf)
+		b.overflow = true
+	}
+	b.buf = append(b.buf, p[:n]...)
+	if n < len(p) {
+		return n, io.ErrShortBuffer
+	}
+	return n, nil
+}
+
+func (b *Buffer) WriteString(s string) (int, error) {
+	n := len(s)
+	if n > cap(b.buf)-len(b.buf) {
+		n = cap(b.buf) - len(b.buf)
+		b.overflow = true
+	}
+	b.buf = append(b.buf, s[:n]...)
+	if n < len(s) {
+		return n, io.ErrShortBuffer
+	}
+	return n, nil
+}
+
+func (b *Buffer) WriteByte(c byte) error {
+	if len(b.buf) == cap(b.buf) {
+		b.overflow = true
+		return io.ErrShortBuffer
+	}
+	b.buf = append(b.buf, c)
+	return nil
+}
+
+// WriteInt appends the decimal form of v.
+func (b *Buffer) WriteInt(v int) error {
+	var tmp [24]byte
+	_, err := b.Write(strconv.AppendInt(tmp[:0], v))
+	return err
+}
+
+// Equal reports whether a and b are the same bytes.
+func Equal(a, b []byte) bool {
+	return string(a) == string(b)
+}
+
+// IndexByte returns the index of the first c in s, or -1.
+func IndexByte(s []byte, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// Index returns the index of the first sep in s, or -1.
+func Index(s, sep []byte) int {
+	n := len(sep)
+	for i := 0; i+n <= len(s); i++ {
+		if string(s[i:i+n]) == string(sep) {
+			return i
+		}
+	}
+	return -1
+}
+
+func HasPrefix(s, prefix []byte) bool {
+	return len(s) >= len(prefix) && string(s[:len(prefix)]) == string(prefix)
+}

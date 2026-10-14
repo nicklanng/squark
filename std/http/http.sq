@@ -1,0 +1,439 @@
+// Package http is an HTTP/1.1 server. Each connection runs in its own goroutine whose read and
+// write buffers live on that goroutine's (statically sized) stack: no allocation per request.
+package http
+
+import (
+	"net"
+	"strconv"
+	"strings"
+)
+
+const (
+	// ReadBufferSize bounds request line + headers + body.
+	ReadBufferSize = 16384
+	// WriteBufferSize is the response staging buffer; larger bodies stream as chunks.
+	WriteBufferSize = 16384
+	headerBufferSize = 1024
+	MaxHeaders       = 32
+)
+
+type Header struct {
+	Name  string
+	Value string
+}
+
+// Request fields are views into the connection's read buffer, valid until the handler returns.
+type Request struct {
+	Method        string
+	Path          string
+	Query         string
+	Proto         string
+	Body          []byte
+	ContentLength int
+
+	headers   [MaxHeaders]Header
+	nheaders  int
+	keepAlive bool
+}
+
+// HeaderValue returns the first value of the named header (case-insensitive), or "".
+func (r *Request) HeaderValue(name string) string {
+	for i := 0; i < r.nheaders; i++ {
+		if strings.EqualFold(r.headers[i].Name, name) {
+			return r.headers[i].Value
+		}
+	}
+	return ""
+}
+
+// NumHeaders and HeaderAt iterate the request headers.
+func (r *Request) NumHeaders() int        { return r.nheaders }
+func (r *Request) HeaderAt(i int) Header  { return r.headers[i] }
+
+// QueryValue returns the raw (not unescaped) value of key in the query string.
+func (r *Request) QueryValue(key string) string {
+	q := r.Query
+	for len(q) > 0 {
+		pair := q
+		if i := strings.IndexByte(q, '&'); i >= 0 {
+			pair = q[:i]
+			q = q[i+1:]
+		} else {
+			q = ""
+		}
+		k, v, _ := strings.Cut(pair, "=")
+		if k == key {
+			return v
+		}
+	}
+	return ""
+}
+
+// ResponseWriter stages the response in the connection goroutine's write buffer.
+type ResponseWriter struct {
+	conn        net.Conn
+	buf         []byte
+	hdr         []byte
+	status      int
+	wroteHeader bool
+	chunked     bool
+	keepAlive   bool
+	head        bool
+	failed      bool
+	hasType     bool
+}
+
+// SetHeader adds a response header. Content-Length, Date and Connection are managed for you.
+func (w *ResponseWriter) SetHeader(name, value string) {
+	if w.wroteHeader {
+		return
+	}
+	if strings.EqualFold(name, "Content-Type") {
+		w.hasType = true
+	}
+	if len(w.hdr)+len(name)+len(value)+4 > cap(w.hdr) {
+		return
+	}
+	w.hdr = append(w.hdr, name...)
+	w.hdr = append(w.hdr, ':', ' ')
+	w.hdr = append(w.hdr, value...)
+	w.hdr = append(w.hdr, '\r', '\n')
+}
+
+// WriteHeader sets the status code (it is sent with the first flush).
+func (w *ResponseWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.status = code
+	}
+}
+
+func (w *ResponseWriter) Write(p []byte) (int, error) {
+	n := 0
+	for n < len(p) {
+		if len(w.buf) == cap(w.buf) {
+			w.flushChunk()
+		}
+		k := min(len(p)-n, cap(w.buf)-len(w.buf))
+		w.buf = append(w.buf, p[n:n+k]...)
+		n += k
+	}
+	return n, nil
+}
+
+func (w *ResponseWriter) WriteString(s string) (int, error) {
+	n := 0
+	for n < len(s) {
+		if len(w.buf) == cap(w.buf) {
+			w.flushChunk()
+		}
+		k := min(len(s)-n, cap(w.buf)-len(w.buf))
+		w.buf = append(w.buf, s[n:n+k]...)
+		n += k
+	}
+	return n, nil
+}
+
+func (w *ResponseWriter) WriteByte(c byte) error {
+	if len(w.buf) == cap(w.buf) {
+		w.flushChunk()
+	}
+	w.buf = append(w.buf, c)
+	return nil
+}
+
+func (w *ResponseWriter) WriteInt(v int) {
+	var tmp [24]byte
+	w.Write(strconv.AppendInt(tmp[:0], v))
+}
+
+// Status returns the status code that will be (or was) sent.
+func (w *ResponseWriter) Status() int { return w.status }
+
+//squark:extern sq_httpdate
+func httpDate(dst []byte) int
+
+func (w *ResponseWriter) statusLine(dst []byte) []byte {
+	dst = append(dst, "HTTP/1.1 "...)
+	dst = strconv.AppendInt(dst, w.status)
+	dst = append(dst, ' ')
+	dst = append(dst, StatusText(w.status)...)
+	dst = append(dst, "\r\nDate: "...)
+	var date [32]byte
+	n := httpDate(date[:])
+	dst = append(dst, date[:n]...)
+	dst = append(dst, "\r\n"...)
+	if !w.keepAlive {
+		dst = append(dst, "Connection: close\r\n"...)
+	}
+	if !w.hasType && w.status != 204 && w.status != 304 {
+		dst = append(dst, "Content-Type: text/plain; charset=utf-8\r\n"...)
+	}
+	return dst
+}
+
+// flushChunk sends the buffered body as a chunk, switching to chunked encoding if needed.
+func (w *ResponseWriter) flushChunk() {
+	var head [headerBufferSize + 256]byte
+	h := head[:0]
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.chunked = true
+		h = w.statusLine(h)
+		h = append(h, w.hdr...)
+		h = append(h, "Transfer-Encoding: chunked\r\n\r\n"...)
+	}
+	if len(w.buf) > 0 {
+		h = appendHex(h, len(w.buf))
+		h = append(h, "\r\n"...)
+		w.buf = append(w.buf, "\r\n"...)
+	}
+	if _, err := w.conn.Write2(h, w.buf); err != nil {
+		w.failed = true
+	}
+	w.buf = w.buf[:0]
+}
+
+func appendHex(dst []byte, v int) []byte {
+	const digits = "0123456789abcdef"
+	var tmp [16]byte
+	i := len(tmp)
+	for {
+		i--
+		tmp[i] = digits[v&15]
+		v >>= 4
+		if v == 0 {
+			break
+		}
+	}
+	return append(dst, tmp[i:]...)
+}
+
+// finish sends whatever remains of the response.
+func (w *ResponseWriter) finish() {
+	if w.chunked {
+		var tail [32]byte
+		t := tail[:0]
+		if len(w.buf) > 0 {
+			t = appendHex(t, len(w.buf))
+			t = append(t, "\r\n"...)
+			w.buf = append(w.buf, "\r\n0\r\n\r\n"...)
+		} else {
+			t = append(t, "0\r\n\r\n"...)
+		}
+		if _, err := w.conn.Write2(t, w.buf); err != nil {
+			w.failed = true
+		}
+		return
+	}
+	var head [headerBufferSize + 256]byte
+	h := w.statusLine(head[:0])
+	h = append(h, w.hdr...)
+	body := w.buf
+	if w.status == 204 || w.status == 304 {
+		body = w.buf[:0]
+	} else {
+		h = append(h, "Content-Length: "...)
+		h = strconv.AppendInt(h, len(w.buf))
+		h = append(h, "\r\n"...)
+	}
+	h = append(h, "\r\n"...)
+	if w.head {
+		body = w.buf[:0]
+	}
+	if _, err := w.conn.Write2(h, body); err != nil {
+		w.failed = true
+	}
+}
+
+// HandlerFunc handles one request.
+type HandlerFunc func(w *ResponseWriter, r *Request)
+
+// ListenAndServe listens on addr and serves each connection in its own goroutine.
+func ListenAndServe(addr string, h HandlerFunc) error {
+	l, err := net.Listen(addr)
+	if err != nil {
+		return err
+	}
+	return Serve(l, h)
+}
+
+func Serve(l net.Listener, h HandlerFunc) error {
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			if err.Code() == 24 || err.Code() == 23 || err.Code() == 53 || err.Code() == 54 {
+				continue // EMFILE / ENFILE / ECONNABORTED / ECONNRESET: keep serving
+			}
+			return err
+		}
+		go serveConn(c, h)
+	}
+}
+
+func writeError(c net.Conn, status string) {
+	c.WriteString("HTTP/1.1 ")
+	c.WriteString(status)
+	c.WriteString("\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+}
+
+// serveConn runs one keep-alive connection. At most 10000 run at once; further accepted
+// connections wait for a slot.
+//
+//squark:goroutines 10000
+func serveConn(c net.Conn, h HandlerFunc) {
+	var rbuf [ReadBufferSize]byte
+	var wbuf [WriteBufferSize]byte
+	var hbuf [headerBufferSize]byte
+	defer c.Close()
+	n := 0
+	for {
+		end := -1
+		for {
+			end = headerEnd(rbuf[:n])
+			if end >= 0 {
+				break
+			}
+			if n == len(rbuf) {
+				writeError(c, "431 Request Header Fields Too Large")
+				return
+			}
+			m, err := c.Read(rbuf[n:])
+			if err != nil || m == 0 {
+				return
+			}
+			n += m
+		}
+		var req Request
+		if !parseRequest(string(rbuf[:end]), &req) {
+			writeError(c, "400 Bad Request")
+			return
+		}
+		total := end + req.ContentLength
+		if total > len(rbuf) {
+			writeError(c, "413 Request Entity Too Large")
+			return
+		}
+		for n < total {
+			m, err := c.Read(rbuf[n:])
+			if err != nil || m == 0 {
+				return
+			}
+			n += m
+		}
+		req.Body = rbuf[end:total]
+		w := ResponseWriter{conn: c, buf: wbuf[:0], hdr: hbuf[:0], status: 200, keepAlive: req.keepAlive, head: req.Method == "HEAD"}
+		h(&w, &req)
+		w.finish()
+		if !w.keepAlive || w.failed {
+			return
+		}
+		// keep pipelined bytes
+		copy(rbuf[:], rbuf[total:n])
+		n -= total
+	}
+}
+
+// headerEnd returns the index just past "\r\n\r\n", or -1.
+func headerEnd(b []byte) int {
+	for i := 3; i < len(b); i++ {
+		if b[i] == '\n' && b[i-1] == '\r' && b[i-2] == '\n' && b[i-3] == '\r' {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+func parseRequest(head string, r *Request) bool {
+	line, rest, ok := strings.Cut(head, "\r\n")
+	if !ok {
+		return false
+	}
+	method, line2, ok1 := strings.Cut(line, " ")
+	target, proto, ok2 := strings.Cut(line2, " ")
+	if !ok1 || !ok2 || len(method) == 0 || len(target) == 0 {
+		return false
+	}
+	r.Method = method
+	r.Proto = proto
+	path, query, _ := strings.Cut(target, "?")
+	r.Path = path
+	r.Query = query
+	r.keepAlive = proto == "HTTP/1.1"
+	r.ContentLength = 0
+	for len(rest) > 0 {
+		hl, more, _ := strings.Cut(rest, "\r\n")
+		rest = more
+		if len(hl) == 0 {
+			break
+		}
+		name, value, ok := strings.Cut(hl, ":")
+		if !ok {
+			return false
+		}
+		value = strings.TrimSpace(value)
+		if r.nheaders < MaxHeaders {
+			r.headers[r.nheaders] = Header{Name: name, Value: value}
+			r.nheaders++
+		}
+		switch {
+		case strings.EqualFold(name, "Content-Length"):
+			cl, err := strconv.Atoi(value)
+			if err != nil || cl < 0 {
+				return false
+			}
+			r.ContentLength = cl
+		case strings.EqualFold(name, "Connection"):
+			if strings.EqualFold(value, "close") {
+				r.keepAlive = false
+			} else if strings.EqualFold(value, "keep-alive") {
+				r.keepAlive = true
+			}
+		case strings.EqualFold(name, "Transfer-Encoding"):
+			return false // chunked request bodies are not supported
+		}
+	}
+	return true
+}
+
+// StatusText returns the reason phrase for a status code.
+func StatusText(code int) string {
+	switch code {
+	case 200:
+		return "OK"
+	case 201:
+		return "Created"
+	case 202:
+		return "Accepted"
+	case 204:
+		return "No Content"
+	case 301:
+		return "Moved Permanently"
+	case 302:
+		return "Found"
+	case 304:
+		return "Not Modified"
+	case 400:
+		return "Bad Request"
+	case 401:
+		return "Unauthorized"
+	case 403:
+		return "Forbidden"
+	case 404:
+		return "Not Found"
+	case 405:
+		return "Method Not Allowed"
+	case 409:
+		return "Conflict"
+	case 413:
+		return "Request Entity Too Large"
+	case 422:
+		return "Unprocessable Entity"
+	case 429:
+		return "Too Many Requests"
+	case 500:
+		return "Internal Server Error"
+	case 503:
+		return "Service Unavailable"
+	}
+	return "Unknown"
+}

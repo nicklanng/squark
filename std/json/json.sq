@@ -1,0 +1,362 @@
+// Package json writes and reads JSON without allocating: encoding appends to caller buffers,
+// decoding is a pull parser whose strings are views of the input or of caller buffers.
+package json
+
+import (
+	"strconv"
+	"utf8"
+)
+
+var ErrSyntax = __error(1, "json: syntax error")
+var ErrType = __error(2, "json: unexpected value type")
+var ErrBuffer = __error(3, "json: string does not fit in buffer")
+
+const hex = "0123456789abcdef"
+
+// AppendString appends s as a quoted, escaped JSON string.
+func AppendString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x20 && c != '"' && c != '\\' {
+			continue
+		}
+		dst = append(dst, s[start:i]...)
+		switch c {
+		case '"':
+			dst = append(dst, '\\', '"')
+		case '\\':
+			dst = append(dst, '\\', '\\')
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		case '\r':
+			dst = append(dst, '\\', 'r')
+		case '\t':
+			dst = append(dst, '\\', 't')
+		default:
+			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0xF])
+		}
+		start = i + 1
+	}
+	dst = append(dst, s[start:]...)
+	return append(dst, '"')
+}
+
+// AppendInt appends a JSON number.
+func AppendInt(dst []byte, v int) []byte {
+	return strconv.AppendInt(dst, v)
+}
+
+// AppendBool appends true or false.
+func AppendBool(dst []byte, v bool) []byte {
+	if v {
+		return append(dst, "true"...)
+	}
+	return append(dst, "false"...)
+}
+
+// Decoder pulls values out of a JSON document.
+type Decoder struct {
+	data  []byte
+	pos   int
+	depth int
+	first bool
+	Err   error
+}
+
+func NewDecoder(data []byte) Decoder {
+	return Decoder{data: data}
+}
+
+func (d *Decoder) fail(err error) {
+	if d.Err == nil {
+		d.Err = err
+	}
+}
+
+func (d *Decoder) ws() {
+	for d.pos < len(d.data) {
+		c := d.data[d.pos]
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			return
+		}
+		d.pos++
+	}
+}
+
+func (d *Decoder) peek() byte {
+	d.ws()
+	if d.pos >= len(d.data) {
+		return 0
+	}
+	return d.data[d.pos]
+}
+
+// BeginObject consumes '{'.
+func (d *Decoder) BeginObject() bool {
+	if d.Err != nil || d.peek() != '{' {
+		d.fail(ErrSyntax)
+		return false
+	}
+	d.pos++
+	d.first = true
+	return true
+}
+
+// BeginArray consumes '['.
+func (d *Decoder) BeginArray() bool {
+	if d.Err != nil || d.peek() != '[' {
+		d.fail(ErrSyntax)
+		return false
+	}
+	d.pos++
+	d.first = true
+	return true
+}
+
+// More reports whether the current array has another element (and consumes the separator).
+func (d *Decoder) More() bool {
+	if d.Err != nil {
+		return false
+	}
+	c := d.peek()
+	if c == ']' {
+		d.pos++
+		d.first = false
+		return false
+	}
+	if !d.first {
+		if c != ',' {
+			d.fail(ErrSyntax)
+			return false
+		}
+		d.pos++
+	}
+	d.first = false
+	return true
+}
+
+// Field reads the next object key into keybuf, returning false at the end of the object.
+func (d *Decoder) Field(keybuf []byte) (string, bool) {
+	if d.Err != nil {
+		return "", false
+	}
+	c := d.peek()
+	if c == '}' {
+		d.pos++
+		d.first = false
+		return "", false
+	}
+	if !d.first {
+		if c != ',' {
+			d.fail(ErrSyntax)
+			return "", false
+		}
+		d.pos++
+	}
+	d.first = false
+	key, ok := d.String(keybuf)
+	if !ok {
+		return "", false
+	}
+	if d.peek() != ':' {
+		d.fail(ErrSyntax)
+		return "", false
+	}
+	d.pos++
+	return key, true
+}
+
+// String decodes a JSON string into buf and returns a view of buf.
+func (d *Decoder) String(buf []byte) (string, bool) {
+	if d.Err != nil {
+		return "", false
+	}
+	if d.peek() != '"' {
+		d.fail(ErrType)
+		return "", false
+	}
+	d.pos++
+	out := buf[:0]
+	for d.pos < len(d.data) {
+		c := d.data[d.pos]
+		d.pos++
+		if c == '"' {
+			return string(out), true
+		}
+		if c < 0x20 {
+			d.fail(ErrSyntax)
+			return "", false
+		}
+		if c != '\\' {
+			if len(out) == cap(out) {
+				d.fail(ErrBuffer)
+				return "", false
+			}
+			out = append(out, c)
+			continue
+		}
+		if d.pos >= len(d.data) {
+			break
+		}
+		e := d.data[d.pos]
+		d.pos++
+		var r rune
+		switch e {
+		case '"', '\\', '/':
+			r = rune(e)
+		case 'n':
+			r = '\n'
+		case 't':
+			r = '\t'
+		case 'r':
+			r = '\r'
+		case 'b':
+			r = 8
+		case 'f':
+			r = 12
+		case 'u':
+			r = d.hex4()
+			if r >= 0xD800 && r < 0xDC00 && d.pos+1 < len(d.data) && d.data[d.pos] == '\\' && d.data[d.pos+1] == 'u' {
+				d.pos += 2
+				lo := d.hex4()
+				if lo >= 0xDC00 && lo < 0xE000 {
+					r = 0x10000 + (r-0xD800)<<10 + (lo - 0xDC00)
+				} else {
+					r = utf8.RuneError
+				}
+			}
+		default:
+			d.fail(ErrSyntax)
+			return "", false
+		}
+		if cap(out)-len(out) < utf8.RuneLen(r) {
+			d.fail(ErrBuffer)
+			return "", false
+		}
+		out = utf8.AppendRune(out, r)
+	}
+	d.fail(ErrSyntax)
+	return "", false
+}
+
+func (d *Decoder) hex4() rune {
+	var r rune
+	for i := 0; i < 4; i++ {
+		if d.pos >= len(d.data) {
+			d.fail(ErrSyntax)
+			return utf8.RuneError
+		}
+		c := d.data[d.pos]
+		d.pos++
+		switch {
+		case c >= '0' && c <= '9':
+			r = r*16 + rune(c-'0')
+		case c >= 'a' && c <= 'f':
+			r = r*16 + rune(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			r = r*16 + rune(c-'A'+10)
+		default:
+			d.fail(ErrSyntax)
+			return utf8.RuneError
+		}
+	}
+	return r
+}
+
+// Int decodes an integer.
+func (d *Decoder) Int() (int, bool) {
+	if d.Err != nil {
+		return 0, false
+	}
+	d.ws()
+	start := d.pos
+	if d.pos < len(d.data) && d.data[d.pos] == '-' {
+		d.pos++
+	}
+	for d.pos < len(d.data) && d.data[d.pos] >= '0' && d.data[d.pos] <= '9' {
+		d.pos++
+	}
+	v, err := strconv.Atoi(string(d.data[start:d.pos]))
+	if err != nil {
+		d.fail(ErrType)
+		return 0, false
+	}
+	return v, true
+}
+
+// Bool decodes true or false.
+func (d *Decoder) Bool() (bool, bool) {
+	if d.Err != nil {
+		return false, false
+	}
+	d.ws()
+	rest := string(d.data[d.pos:])
+	if len(rest) >= 4 && rest[:4] == "true" {
+		d.pos += 4
+		return true, true
+	}
+	if len(rest) >= 5 && rest[:5] == "false" {
+		d.pos += 5
+		return false, true
+	}
+	d.fail(ErrType)
+	return false, false
+}
+
+// Skip skips one value of any type (iteratively; nesting is tracked with a counter).
+func (d *Decoder) Skip() bool {
+	if d.Err != nil {
+		return false
+	}
+	depth := 0
+	for {
+		c := d.peek()
+		switch {
+		case c == '"':
+			d.pos++
+			for d.pos < len(d.data) && d.data[d.pos] != '"' {
+				if d.data[d.pos] == '\\' {
+					d.pos++
+				}
+				d.pos++
+			}
+			d.pos++
+		case c == '{' || c == '[':
+			depth++
+			d.pos++
+			continue
+		case c == '}' || c == ']':
+			depth--
+			d.pos++
+		case c == ',' || c == ':':
+			d.pos++
+			continue
+		case c == 0:
+			d.fail(ErrSyntax)
+			return false
+		default:
+			for d.pos < len(d.data) {
+				c = d.data[d.pos]
+				if c == ',' || c == '}' || c == ']' || c == ' ' || c == '\n' || c == '\t' || c == '\r' {
+					break
+				}
+				d.pos++
+			}
+		}
+		if depth <= 0 {
+			if d.pos > len(d.data) {
+				d.fail(ErrSyntax)
+				return false
+			}
+			return true
+		}
+	}
+}
+
+// End reports whether only whitespace remains.
+func (d *Decoder) End() bool {
+	d.ws()
+	return d.Err == nil && d.pos == len(d.data)
+}

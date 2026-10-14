@@ -1,0 +1,43 @@
+package main
+
+import "os"
+
+type Point struct {
+	X, Y int
+}
+
+func (p *Point) Move(dx, dy int) {
+	p.X += dx
+	p.Y += dy
+}
+
+func sum(xs ...int) int {
+	total := 0
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+
+func main() {
+	println("hello, squark")
+	p := Point{X: 1, Y: 2}
+	p.Move(3, 4)
+	println("point:", p.X, p.Y)
+	var buf [16]int
+	s := buf[:0]
+	for i := range 10 {
+		s = append(s, i*i)
+	}
+	println("len", len(s), "cap", cap(s), "sum", sum(s...), sum(1, 2, 3))
+	m := make(map[string]int, 8)
+	m["a"] = 1
+	m["b"] += 41
+	v, ok := m["b"]
+	println("map", len(m), v, ok)
+	for i, r := range "héllo" {
+		print(i, ":", r, " ")
+	}
+	println()
+	os.Stdout.WriteString("written via os\n")
+}

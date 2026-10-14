@@ -1,0 +1,46 @@
+// Package time measures and waits.
+package time
+
+type Duration int
+
+const (
+	Nanosecond  Duration = 1
+	Microsecond          = 1000 * Nanosecond
+	Millisecond          = 1000 * Microsecond
+	Second               = 1000 * Millisecond
+	Minute               = 60 * Second
+	Hour                 = 60 * Minute
+)
+
+//squark:extern sq_nanotime
+func nanotime() int
+
+//squark:extern sq_unixnano
+func unixnano() int
+
+//squark:extern sq_sleep
+func sleep(ns int)
+
+// Time is a monotonic instant plus the wall clock reading when it was taken.
+type Time struct {
+	mono int
+	wall int
+}
+
+func Now() Time { return Time{mono: nanotime(), wall: unixnano()} }
+
+func (t Time) Sub(u Time) Duration   { return Duration(t.mono - u.mono) }
+func (t Time) Unix() int             { return t.wall / 1000000000 }
+func (t Time) UnixNano() int         { return t.wall }
+func (t Time) Add(d Duration) Time   { return Time{mono: t.mono + int(d), wall: t.wall + int(d)} }
+func (t Time) Before(u Time) bool    { return t.mono < u.mono }
+
+func Since(t Time) Duration { return Duration(nanotime() - t.mono) }
+
+// Sleep parks the calling goroutine for at least d.
+func Sleep(d Duration) { sleep(int(d)) }
+
+func (d Duration) Nanoseconds() int    { return int(d) }
+func (d Duration) Microseconds() int   { return int(d) / 1000 }
+func (d Duration) Milliseconds() int   { return int(d) / 1000000 }
+func (d Duration) Seconds() float64    { return float64(d) / 1e9 }

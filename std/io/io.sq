@@ -1,0 +1,11 @@
+// Package io holds the shared error values for readers and writers.
+package io
+
+// EOF is returned by Read when no more input is available.
+var EOF = __error(-1, "EOF")
+
+// ErrShortWrite means a write accepted fewer bytes than requested.
+var ErrShortWrite = __error(-2, "short write")
+
+// ErrShortBuffer means a caller-provided buffer was too small for the result.
+var ErrShortBuffer = __error(-3, "short buffer")

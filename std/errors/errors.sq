@@ -1,0 +1,19 @@
+// Package errors creates error values. A squark error is a value (code + static message),
+// so creating one never allocates.
+package errors
+
+// New returns an error with the given message. The message must be a string constant or
+// otherwise live in static memory; the compiler checks this at every call site.
+func New(msg string) error {
+	return __error(1, msg)
+}
+
+// WithCode returns an error carrying an integer code.
+func WithCode(code int, msg string) error {
+	return __error(code, msg)
+}
+
+// Is reports whether err is target.
+func Is(err, target error) bool {
+	return err == target
+}

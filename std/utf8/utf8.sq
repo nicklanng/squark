@@ -1,0 +1,47 @@
+// Package utf8 encodes and decodes UTF-8.
+package utf8
+
+const RuneError = 0xFFFD
+const MaxRune = 0x10FFFF
+
+// AppendRune appends the UTF-8 encoding of r to dst.
+func AppendRune(dst []byte, r rune) []byte {
+	switch {
+	case r >= 0 && r < 0x80:
+		return append(dst, byte(r))
+	case r >= 0 && r < 0x800:
+		return append(dst, byte(0xC0|r>>6), byte(0x80|r&0x3F))
+	case r >= 0xD800 && r <= 0xDFFF, r < 0, r > MaxRune:
+		r = RuneError
+	}
+	if r < 0x10000 {
+		return append(dst, byte(0xE0|r>>12), byte(0x80|(r>>6)&0x3F), byte(0x80|r&0x3F))
+	}
+	return append(dst, byte(0xF0|r>>18), byte(0x80|(r>>12)&0x3F), byte(0x80|(r>>6)&0x3F), byte(0x80|r&0x3F))
+}
+
+// RuneLen returns the number of bytes needed to encode r.
+func RuneLen(r rune) int {
+	switch {
+	case r < 0:
+		return -1
+	case r < 0x80:
+		return 1
+	case r < 0x800:
+		return 2
+	case r < 0x10000:
+		return 3
+	case r <= MaxRune:
+		return 4
+	}
+	return -1
+}
+
+// RuneCountInString counts the runes in s.
+func RuneCountInString(s string) int {
+	n := 0
+	for range s {
+		n++
+	}
+	return n
+}

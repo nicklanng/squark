@@ -1,0 +1,146 @@
+// Package net provides TCP listeners and connections. Blocking calls park only the calling
+// goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
+package net
+
+import (
+	"io"
+	"os"
+	"strconv"
+	"strings"
+)
+
+type Listener struct {
+	fd int
+}
+
+type Conn struct {
+	fd int
+}
+
+//squark:extern sq_listen_tcp
+func listenTCP(host string, port int, backlog int) int
+
+//squark:extern sq_accept
+func accept(fd int) int
+
+//squark:extern sq_dial_tcp
+func dialTCP(host string, port int) int
+
+//squark:extern sq_read
+func sysRead(fd int, b []byte) int
+
+//squark:extern sq_write
+func sysWrite(fd int, b []byte) int
+
+//squark:extern sq_write_str
+func sysWriteStr(fd int, s string) int
+
+//squark:extern sq_writev2
+func sysWritev2(fd int, a []byte, b []byte) int
+
+//squark:extern sq_close
+func sysClose(fd int) int
+
+var ErrBadAddress = __error(22, "invalid address (want host:port)")
+
+func splitHostPort(addr string) (string, int, error) {
+	i := strings.LastIndexByte(addr, ':')
+	if i < 0 {
+		return "", 0, ErrBadAddress
+	}
+	port, err := strconv.Atoi(addr[i+1:])
+	if err != nil || port < 0 || port > 65535 {
+		return "", 0, ErrBadAddress
+	}
+	host := addr[:i]
+	if host == "localhost" {
+		host = "127.0.0.1"
+	}
+	return host, port, nil
+}
+
+// Listen opens a TCP listener on addr ("host:port" or ":port").
+func Listen(addr string) (Listener, error) {
+	host, port, err := splitHostPort(addr)
+	if err != nil {
+		return Listener{fd: -1}, err
+	}
+	fd := listenTCP(host, port, 4096)
+	if fd < 0 {
+		return Listener{fd: -1}, os.Errno(-fd)
+	}
+	return Listener{fd: fd}, nil
+}
+
+func (l Listener) Accept() (Conn, error) {
+	fd := accept(l.fd)
+	if fd < 0 {
+		return Conn{fd: -1}, os.Errno(-fd)
+	}
+	return Conn{fd: fd}, nil
+}
+
+func (l Listener) Close() error {
+	if r := sysClose(l.fd); r < 0 {
+		return os.Errno(-r)
+	}
+	return nil
+}
+
+// Dial connects to a TCP address.
+func Dial(addr string) (Conn, error) {
+	host, port, err := splitHostPort(addr)
+	if err != nil {
+		return Conn{fd: -1}, err
+	}
+	fd := dialTCP(host, port)
+	if fd < 0 {
+		return Conn{fd: -1}, os.Errno(-fd)
+	}
+	return Conn{fd: fd}, nil
+}
+
+func (c Conn) Fd() int { return c.fd }
+
+func (c Conn) Read(p []byte) (int, error) {
+	n := sysRead(c.fd, p)
+	if n < 0 {
+		return 0, os.Errno(-n)
+	}
+	if n == 0 && len(p) > 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+func (c Conn) Write(p []byte) (int, error) {
+	n := sysWrite(c.fd, p)
+	if n < 0 {
+		return 0, os.Errno(-n)
+	}
+	return n, nil
+}
+
+func (c Conn) WriteString(s string) (int, error) {
+	n := sysWriteStr(c.fd, s)
+	if n < 0 {
+		return 0, os.Errno(-n)
+	}
+	return n, nil
+}
+
+// Write2 writes a then b, using a single writev where possible.
+func (c Conn) Write2(a, b []byte) (int, error) {
+	n := sysWritev2(c.fd, a, b)
+	if n < 0 {
+		return 0, os.Errno(-n)
+	}
+	return n, nil
+}
+
+func (c Conn) Close() error {
+	if r := sysClose(c.fd); r < 0 {
+		return os.Errno(-r)
+	}
+	return nil
+}

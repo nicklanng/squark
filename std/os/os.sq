@@ -1,0 +1,132 @@
+// Package os is a thin, heap-free interface to the operating system.
+package os
+
+import "io"
+
+// File is an open file descriptor. It is a plain value; copying it does not duplicate the descriptor.
+type File struct {
+	fd int
+}
+
+var Stdin = File{fd: 0}
+var Stdout = File{fd: 1}
+var Stderr = File{fd: 2}
+
+const (
+	O_RDONLY = 0
+	O_WRONLY = 1
+	O_RDWR   = 2
+	O_CREATE = 0x40
+	O_TRUNC  = 0x200
+	O_APPEND = 0x400
+)
+
+//squark:extern sq_write
+func sysWrite(fd int, b []byte) int
+
+//squark:extern sq_write_str
+func sysWriteStr(fd int, s string) int
+
+//squark:extern sq_read
+func sysRead(fd int, b []byte) int
+
+//squark:extern sq_close
+func sysClose(fd int) int
+
+//squark:extern sq_open
+func sysOpen(path string, flags int, mode int) int
+
+//squark:extern sq_strerror
+func strerror(errno int) string
+
+//squark:extern sq_exit
+func Exit(code int)
+
+//squark:extern sq_argc
+func argc() int
+
+//squark:extern sq_argv
+func argv(i int) string
+
+//squark:extern sq_getenv
+func Getenv(name string) string
+
+// Errno converts a positive errno value into an error.
+func Errno(n int) error {
+	return __error(n, strerror(n))
+}
+
+// NArgs returns the number of command-line arguments, including the program name.
+func NArgs() int { return argc() }
+
+// Arg returns command-line argument i ("" if out of range). Arg(0) is the program name.
+func Arg(i int) string { return argv(i) }
+
+func Open(path string) (File, error) { return OpenFile(path, O_RDONLY, 0) }
+
+func Create(path string) (File, error) {
+	return OpenFile(path, O_WRONLY|O_CREATE|O_TRUNC, 0o644)
+}
+
+func OpenFile(path string, flag int, perm int) (File, error) {
+	fd := sysOpen(path, flag, perm)
+	if fd < 0 {
+		return File{fd: -1}, Errno(-fd)
+	}
+	return File{fd: fd}, nil
+}
+
+// FromFd wraps an existing descriptor.
+func FromFd(fd int) File { return File{fd: fd} }
+
+func (f File) Fd() int { return f.fd }
+
+func (f File) Read(p []byte) (int, error) {
+	n := sysRead(f.fd, p)
+	if n < 0 {
+		return 0, Errno(-n)
+	}
+	if n == 0 && len(p) > 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+func (f File) Write(p []byte) (int, error) {
+	n := sysWrite(f.fd, p)
+	if n < 0 {
+		return 0, Errno(-n)
+	}
+	if n < len(p) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
+}
+
+func (f File) WriteString(s string) (int, error) {
+	n := sysWriteStr(f.fd, s)
+	if n < 0 {
+		return 0, Errno(-n)
+	}
+	return n, nil
+}
+
+func (f File) Close() error {
+	if r := sysClose(f.fd); r < 0 {
+		return Errno(-r)
+	}
+	return nil
+}
+
+// ReadFull reads into p until it is full or the file ends, returning the bytes read.
+func (f File) ReadFull(p []byte) (int, error) {
+	n := 0
+	for n < len(p) {
+		m, err := f.Read(p[n:])
+		n += m
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}

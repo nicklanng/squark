@@ -1,0 +1,170 @@
+// Package sqlite binds libsqlite3. SQLite manages its own memory; squark code never touches
+// the heap: column text is copied into caller-provided buffers.
+//
+//squark:link sqlite3
+//squark:cflags -I/opt/homebrew/opt/sqlite/include
+//squark:ldflags -L/opt/homebrew/opt/sqlite/lib
+package sqlite
+
+const (
+	OK   = 0
+	ROW  = 100
+	DONE = 101
+)
+
+const (
+	TypeInteger = 1
+	TypeFloat   = 2
+	TypeText    = 3
+	TypeBlob    = 4
+	TypeNull    = 5
+)
+
+type DB struct {
+	h rawptr
+}
+
+type Stmt struct {
+	h rawptr
+}
+
+// SQLite calls get a generous stack budget: the query planner and VDBE are not tiny.
+
+//squark:extern sq_sqlite_open
+//squark:stack 128K
+func open(path string, db *rawptr) int
+
+//squark:extern sq_sqlite_close
+//squark:stack 64K
+func closeDB(db rawptr) int
+
+//squark:extern sq_sqlite_exec
+//squark:stack 128K
+func exec(db rawptr, sql string) int
+
+//squark:extern sq_sqlite_prepare
+//squark:stack 128K
+func prepare(db rawptr, sql string, st *rawptr) int
+
+//squark:extern sq_sqlite_bind_int
+//squark:stack 16K
+func bindInt(st rawptr, i int, v int) int
+
+//squark:extern sq_sqlite_bind_text
+//squark:stack 16K
+func bindText(st rawptr, i int, s string) int
+
+//squark:extern sq_sqlite_bind_null
+//squark:stack 16K
+func bindNull(st rawptr, i int) int
+
+//squark:extern sq_sqlite_step
+//squark:stack 128K
+func step(st rawptr) int
+
+//squark:extern sq_sqlite_reset
+//squark:stack 64K
+func reset(st rawptr) int
+
+//squark:extern sq_sqlite_clear
+//squark:stack 16K
+func clearBindings(st rawptr) int
+
+//squark:extern sq_sqlite_finalize
+//squark:stack 64K
+func finalize(st rawptr) int
+
+//squark:extern sq_sqlite_column_int
+//squark:stack 16K
+func columnInt(st rawptr, i int) int
+
+//squark:extern sq_sqlite_column_type
+//squark:stack 16K
+func columnType(st rawptr, i int) int
+
+//squark:extern sq_sqlite_column_count
+//squark:stack 16K
+func columnCount(st rawptr) int
+
+//squark:extern sq_sqlite_column_text
+//squark:stack 16K
+func columnText(st rawptr, i int, buf []byte) int
+
+//squark:extern sq_sqlite_changes
+//squark:stack 16K
+func changes(db rawptr) int
+
+//squark:extern sq_sqlite_last_insert_rowid
+//squark:stack 16K
+func lastInsertRowID(db rawptr) int
+
+//squark:extern sq_sqlite_errstr
+//squark:stack 16K
+func errstr(rc int) string
+
+var ErrTruncated = __error(-1, "sqlite: column text larger than buffer")
+
+func check(rc int) error {
+	if rc == OK || rc == ROW || rc == DONE {
+		return nil
+	}
+	return __error(rc, errstr(rc))
+}
+
+// Open opens (creating if needed) a database file.
+func Open(path string) (DB, error) {
+	var h rawptr
+	rc := open(path, &h)
+	return DB{h: h}, check(rc)
+}
+
+func (db DB) Close() error { return check(closeDB(db.h)) }
+
+// Exec runs one or more SQL statements that return no rows.
+func (db DB) Exec(sql string) error { return check(exec(db.h, sql)) }
+
+// Prepare compiles a statement for repeated use.
+func (db DB) Prepare(sql string) (Stmt, error) {
+	var h rawptr
+	rc := prepare(db.h, sql, &h)
+	return Stmt{h: h}, check(rc)
+}
+
+func (db DB) Changes() int         { return changes(db.h) }
+func (db DB) LastInsertRowID() int { return lastInsertRowID(db.h) }
+
+// Bind* use 1-based parameter indexes, like SQLite. Text is copied by SQLite.
+func (s Stmt) BindInt(i int, v int) error     { return check(bindInt(s.h, i, v)) }
+func (s Stmt) BindText(i int, v string) error { return check(bindText(s.h, i, v)) }
+func (s Stmt) BindNull(i int) error           { return check(bindNull(s.h, i)) }
+
+// Step advances to the next row; it returns true while a row is available.
+func (s Stmt) Step() (bool, error) {
+	rc := step(s.h)
+	if rc == ROW {
+		return true, nil
+	}
+	return false, check(rc)
+}
+
+// Reset makes the statement ready to run again and clears its bindings.
+func (s Stmt) Reset() error {
+	err := check(reset(s.h))
+	clearBindings(s.h)
+	return err
+}
+
+func (s Stmt) Finalize() error { return check(finalize(s.h)) }
+
+func (s Stmt) ColumnCount() int     { return columnCount(s.h) }
+func (s Stmt) ColumnType(i int) int { return columnType(s.h, i) }
+func (s Stmt) ColumnInt(i int) int  { return columnInt(s.h, i) }
+
+// ColumnText copies column i (0-based) into buf and returns it as a view of buf.
+func (s Stmt) ColumnText(i int, buf []byte) (string, error) {
+	n := columnText(s.h, i, buf)
+	if n > cap(buf) {
+		return string(buf[:cap(buf)]), ErrTruncated
+	}
+	return string(buf[:n]), nil
+}

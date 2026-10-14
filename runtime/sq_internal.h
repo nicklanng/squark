@@ -1,0 +1,37 @@
+// Scheduler internals shared by the runtime and the generated pool storage (pools.c).
+#ifndef SQ_INTERNAL_H
+#define SQ_INTERNAL_H
+#include "sq_rt.h"
+
+typedef struct {
+#if defined(__aarch64__)
+	uint64_t x[12]; // x19..x28, fp, lr
+	uint64_t sp;
+	uint64_t d[8]; // d8..d15
+#elif defined(__x86_64__)
+	uint64_t rbx, rbp, r12, r13, r14, r15, rsp;
+#else
+#error "unsupported architecture"
+#endif
+} sq_ctx;
+
+enum { G_FREE, G_RUNNABLE, G_RUNNING, G_WAITING, G_DEAD };
+
+struct sq_g {
+	sq_ctx ctx;
+	sq_pool *pool;
+	void (*entry)(void *);
+	void *args;
+	uint8_t *stack_lo, *stack_hi;
+	sq_g *next;  // run queue / free list / wait queue link
+	int state;
+	int64_t id;
+	// channel operations
+	void *elem;
+	bool ok;
+	// timers
+	int64_t wake_at;
+	int64_t heap_index;
+};
+
+#endif
