@@ -1455,7 +1455,15 @@ sq_string sq_strerror(int64_t err) {
 	const char *s = strerrordesc_np((int)err);
 	if (!s) s = "unknown error";
 #else
-	const char *s = strerror((int)err); // macOS: a static string, no allocation
+	// macOS: a static string for every errno it knows; for others strerror formats "Unknown
+	// error: N" into a buffer it allocates on first use
+#if defined(ELAST)
+	if (err < 0 || err > ELAST) {
+		static const char unknown[] = "unknown error";
+		return (sq_string){(const uint8_t *)unknown, (int64_t)sizeof unknown - 1};
+	}
+#endif
+	const char *s = strerror((int)err);
 #endif
 	return (sq_string){(const uint8_t *)s, (int64_t)strlen(s)};
 }

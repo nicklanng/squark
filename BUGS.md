@@ -354,6 +354,16 @@ choice is given for each.
   call. — fixed: `strerrordesc_np` on glibc ≥ 2.32 (static, untranslated); test:
   `TestNoHeapAtRuntime` (fails with 1000 extra allocations if reverted)
 
+- [x] **R21. `os.Errno` of an unknown errno heap-allocated on macOS** (bug, found auditing every libc call)
+  macOS `strerror` formats "Unknown error: N" into a buffer it allocates on first use; `os.Errno(n)`
+  accepts any n. — fixed: errnos beyond `ELAST` give a static "unknown error" (as on Linux). Side
+  effect: the SDK's `ELAST` is 106, so errno 107 ("Capabilities insufficient" on newer macOS)
+  prints "unknown error". Audit: every libc function the runtime/std import was classified;
+  the non-syscall ones were measured on first call with all argument shapes used (errno 0..199,
+  libm edge cases): 0 allocations on macOS and Linux. `TestNoHeapAtRuntime` now also covers idle
+  parking with stack release, failed Dial/Listen, writes to closed sockets, unknown errnos, stdin
+  through a pipe, and 200 tasks over a channel
+
 ## P3: minor / polish
  — fixed: `spill` counts and drops HEAD body bytes instead of chunking; Content-Length = dropped + buffered; test: `TestHTTP` (HEAD then GET on the same connection)
 - [x] **P9. Error positions point at `(` / the operator instead of the expression start**
@@ -439,3 +449,4 @@ Append one line per work session: date, items closed, anything left half-done.
 - 2026-10-14: checked the no-heap claim at run time with an injected allocation counter: R19, R20
   found and fixed; `TestNoHeapAtRuntime` (macOS + Linux) now guards it. Exception, as documented:
   the `sqlite` package's C library allocates.
+- 2026-10-14: audited every libc call (both OSes); R21 found and fixed; no-heap test widened.

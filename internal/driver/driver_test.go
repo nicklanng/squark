@@ -724,7 +724,8 @@ func TestNoHeapAtRuntime(t *testing.T) {
 		return l.Addr().String()
 	}
 	counts := filepath.Join(dir, "counts")
-	cmd := exec.Command(bin, free(), free(), filepath.Join(dir, "file.txt"))
+	cmd := exec.Command(bin, free(), free(), filepath.Join(dir, "file.txt"), free())
+	cmd.Stdin = strings.NewReader("from stdin\n") // os/exec feeds this through a pipe
 	cmd.Env = append(os.Environ(), env+"="+lib, "HEAPCOUNT_FILE="+counts)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
