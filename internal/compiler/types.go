@@ -290,6 +290,7 @@ type Var struct {
 	ReadOnly bool // error constants, constant composites, arenas
 	ConstData bool // const X = T{...}: must be built from constants only
 	Shared    bool // shared var: one copy for every scheduler thread, read-only after initialization
+	Thread    bool // thread var: one copy per scheduler thread, like var, declared so on purpose
 
 	ArenaSize     int64 // for arenas
 	ArenaSizeExpr Expr

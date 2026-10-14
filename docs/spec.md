@@ -36,7 +36,8 @@ current.
 ## 1. Lexical elements
 
 - **Keywords:** Go's keywords except `fallthrough`, `goto`, `interface` and `select`, which are not
-  supported. Added keywords: `arena`, `extern`, `in`, `task`, `try`.
+  supported. Added keywords: `arena`, `extern`, `in`, `task`, `try`. `shared` and `thread` mark
+  a package-level `var` (§4) but stay ordinary identifiers elsewhere.
 - **Contextual words** (identifiers elsewhere):
   - `pool` and `stack` after a signature.
   - `from` and `static` after results.
@@ -235,8 +236,22 @@ shared var crcTable = makeTable()   // may call functions, read files, query SQL
 Its initializer runs once, on the first scheduler thread and in order with the other package
 initializers, before any other thread starts. Afterwards it is read-only, with the same rules as
 constants. Its type is limited to numbers, strings, bools, errors and arrays or structs of them,
-because nothing a shared slice, map or pointer refers to could be kept read-only. A plain `var` is
-one copy per scheduler thread.
+because nothing a shared slice, map or pointer refers to could be kept read-only.
+
+A plain `var` is one copy per scheduler thread: under `threads N` a counter counts one thread's
+work and a cache holds one thread's entries. `squark build`, `run` and `check` list the package
+variables a threaded program changes after start-up, since their values can differ between
+threads:
+
+```
+note: with threads, each scheduler thread has its own copy of these package variables:
+  main.sq:12: hits: changed in handle
+```
+
+`thread var` declares one copy per thread on purpose (`thread var db sqlite.DB`, each thread's own
+connection); it behaves exactly like `var` and is left out of the list. So the list shows only the
+variables nobody has decided about: make each `thread var`, or move it to a shared channel.
+Standard library packages aren't listed; their per-thread state is per thread by design.
 
 A shared channel connects the scheduler threads: `shared var jobs chan Job cap 64` (declared
 without a value) is one channel for all of them. Send, receive, `close`, `len` and `range` work
@@ -424,8 +439,8 @@ func handle(w *http.ResponseWriter, r *http.Request) {
   thread. `threads auto` is the usual choice: one thread per core, and `SQUARK_THREADS=N` in the
   environment overrides the count at run time (like `GOMAXPROCS`). `SQUARK_THREADS` also
   overrides `threads N`, except that with a `budget` it can't go above N, the count the budget
-  was proven for. It has no effect on programs without the directive. Each shard runs `main` with its own package variables, goroutine pools, timers and
-  poller; goroutines never move between shards, so rule 10 holds within each and nothing needs
+  was proven for. It has no effect on programs without the directive. Each shard runs `main`
+  with its own package variables (see `thread var`, §4), goroutine pools, timers and poller; goroutines never move between shards, so rule 10 holds within each and nothing needs
   locks. Error constants are shared (they're read-only). Listening on an address from every shard
   works: on Linux each shard gets its own socket (`SO_REUSEPORT`) and the kernel spreads
   connections; on macOS the shards share one socket. `runtime.Shard()` and `runtime.Shards()`
@@ -437,7 +452,7 @@ func handle(w *http.ResponseWriter, r *http.Request) {
   all wait on shared channels sleeps until another shard wakes them, so a deadlock across shards
   hangs instead of reporting `all goroutines are asleep`. Externs are called from whichever shard
   runs the goroutine, so C libraries must be thread-safe (libc and SQLite are; each shard opens
-  its own SQLite connection, since package variables are per shard).
+  its own SQLite connection, since package variables are per shard: `thread var db sqlite.DB`).
 - `workers N` (1 to 1024, or `auto` for one per core) starts N processes before any squark code
   runs; each has its own package variables, goroutines and connections. Listening sockets use
   `SO_REUSEPORT`, so the kernel spreads connections across the workers (on Linux; macOS sends them

@@ -1,0 +1,49 @@
+package main
+
+// The note `squark check` prints with threads: package variables each thread has its own copy of,
+// that the program changes. TestPerThreadNote checks which are listed.
+
+import (
+	"runtime"
+	"strings"
+
+	"./counter"
+)
+
+threads auto
+
+type Stats struct{ Hits int }
+
+func (s *Stats) bump() { s.Hits++ }
+
+var stats Stats             // listed: changed by a pointer method
+var jobs chan int cap 4     // listed: sent on
+var seen map[int]int cap 8  // listed: passed to fill, which changes it
+var cell int                // listed: address taken
+var buf [16]byte            // listed: sliced
+var limit = 10              // not listed: only read
+var thread int              // not listed: only read (and `thread` is still an identifier)
+thread var mine int         // not listed: per thread on purpose
+shared var all chan int cap 4 // not listed: one channel for every thread
+
+func fill(m map[int]int) { m[1] = 1 }
+
+func set(p *int) { *p = 1 }
+
+func main() {
+	stats.bump()
+	fill(seen)
+	set(&cell)
+	b := buf[:]
+	b[0] = 'x'
+	mine++
+	counter.Add(limit + thread)
+	if runtime.Shard() == 0 {
+		jobs <- 1
+		close(jobs)
+		for j := range jobs {
+			all <- j
+		}
+		println(<-all, strings.Contains("abc", "b"))
+	}
+}

@@ -56,6 +56,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		fmt.Fprint(os.Stderr, res.Notes)
 		if *verbose || res.Memory.Budget > 0 {
 			fmt.Fprint(os.Stderr, driver.FormatMemory(res.Memory))
 		}
@@ -73,6 +74,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		fmt.Fprint(os.Stderr, res.Notes)
 		if *verbose {
 			fmt.Fprint(os.Stderr, driver.FormatMemory(res.Memory))
 		}
@@ -101,10 +103,12 @@ func main() {
 			os.Exit(1)
 		}
 	case "check":
-		if err := driver.Check(dir); err != nil {
+		notes, err := driver.CheckNotes(dir)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		fmt.Fprint(os.Stderr, notes)
 	case "doc":
 		pkg := ""
 		if fs.NArg() > 1 {

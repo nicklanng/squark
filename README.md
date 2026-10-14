@@ -167,6 +167,14 @@ so nothing needs locks. Threads share only constants, `shared var` data (read-on
 and shared channels (`shared var jobs chan Job cap 64`). `SQUARK_THREADS=N` overrides the count at
 run time, like `GOMAXPROCS`. Without the directive a program runs on one thread.
 
+Since every package variable is per thread, the compiler lists the ones a threaded program
+changes, so a counter that quietly counts a quarter of the requests doesn't go unnoticed. Declare
+them `thread var` once that's what you mean:
+
+```go
+thread var db sqlite.DB   // each thread has its own connection
+```
+
 ### Memory budgets
 
 ```go

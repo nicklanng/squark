@@ -39,7 +39,7 @@ type Store struct {
 	del    sqlite.Stmt
 }
 
-var store Store
+thread var store Store // each scheduler thread opens its own connection
 
 func openStore(path string) error {
 	db, err := sqlite.Open(path)

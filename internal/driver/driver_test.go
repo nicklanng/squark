@@ -1223,3 +1223,35 @@ func TestThreadsEnv(t *testing.T) {
 		t.Errorf("threads 2 with a budget, SQUARK_THREADS=5: %s threads, stderr %q", got, warn)
 	}
 }
+
+// TestPerThreadNote: with threads, the front end lists the package variables each scheduler thread
+// has its own copy of and the program changes (testdata/perthread says which should be listed).
+func TestPerThreadNote(t *testing.T) {
+	note, err := CheckNotes("../../testdata/perthread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"stats: changed by method bump in main",
+		"jobs: sent on in main (a channel",
+		"seen: passed to a function in main (a map",
+		"cell: address taken in main",
+		"buf: sliced (a writable view) in main",
+		"Total: written in Add",
+	} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note lacks %q:\n%s", want, note)
+		}
+	}
+	for _, not := range []string{"limit", "thread:", "mine", "all:", "strings"} {
+		if strings.Contains(note, not) {
+			t.Errorf("note lists %q:\n%s", not, note)
+		}
+	}
+	// without a threads directive there is one copy of everything: no note
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte("package main\n\nvar n int\n\nfunc main() {\n\tn++\n\tprintln(n)\n}\n"), 0o644)
+	if note, err := CheckNotes(dir); err != nil || note != "" {
+		t.Errorf("no threads: note %q, err %v", note, err)
+	}
+}

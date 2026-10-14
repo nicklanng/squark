@@ -13,7 +13,7 @@ import (
 
 threads 4
 
-var served int
+thread var served int
 
 // read by every shard: TestThreadsRace checks the reads don't race with its initialization
 shared var greeting = "shard"

@@ -435,6 +435,7 @@ type TypeSpec struct {
 type GenDecl struct {
 	Tok     Tok // CONST, VAR, TYPE
 	Shared  bool // shared var: one copy for every scheduler thread, read-only after initialization
+	Thread  bool // thread var: one copy per scheduler thread (as var), on purpose
 	Values  []*ValueSpec
 	Types   []*TypeSpec
 	P       Pos

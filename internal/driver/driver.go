@@ -47,6 +47,7 @@ type Result struct {
 	Pools  []PoolReport
 	CBytes int
 	Memory *MemoryReport
+	Notes  string // e.g. the package variables each scheduler thread has its own copy of
 }
 
 // MemoryReport is the worst-case memory a program can use, computed at build time.
@@ -102,6 +103,7 @@ func Build(opt Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	notes := perThreadNote(prog)
 	out, err := compiler.Generate(prog, order)
 	if err != nil {
 		return nil, err
@@ -306,6 +308,7 @@ func Build(opt Options) (*Result, error) {
 		return nil, fmt.Errorf("link failed:\n%s", stderr.String())
 	}
 	res.Binary = absOut
+	res.Notes = notes
 	mem := &MemoryReport{Budget: prog.Budget, Workers: prog.Workers, Threads: prog.Threads, Pools: res.Pools}
 	mem.Code, mem.Static, err = segmentSizes(absOut)
 	if err != nil {
@@ -459,13 +462,40 @@ func undefinedSymbols(obj string) ([]string, error) {
 
 // Check runs only the front end.
 func Check(dir string) error {
+	_, err := CheckNotes(dir)
+	return err
+}
+
+// CheckNotes runs only the front end and returns its notes (see Result.Notes).
+func CheckNotes(dir string) (string, error) {
 	l := &compiler.Loader{Std: squark.Files, MainDir: dir}
 	prog, err := l.Load()
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = compiler.Compile(prog)
-	return err
+	if _, err = compiler.Compile(prog); err != nil {
+		return "", err
+	}
+	return perThreadNote(prog), nil
+}
+
+// perThreadNote lists, for a program written for threads, the package variables it changes after
+// start-up: each scheduler thread has its own copy, so their values can differ between threads.
+func perThreadNote(prog *compiler.Program) string {
+	if !prog.ThreadsSet {
+		return ""
+	}
+	vars := compiler.PerThreadVars(prog)
+	if len(vars) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("note: with threads, each scheduler thread has its own copy of these package variables:\n")
+	for _, v := range vars {
+		fmt.Fprintf(&b, "  %s:%d: %s: %s\n", v.Var.Pos.File, v.Var.Pos.Line, v.Var.Name, v.Reason)
+	}
+	b.WriteString("  (declare them `thread var` if that's intended; share between threads with a shared var channel)\n")
+	return b.String()
 }
 
 // Doc lists the exported functions of the program's packages (or of the named package) with

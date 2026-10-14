@@ -117,12 +117,15 @@ func (p *parser) file(path string) *File {
 	}
 	for p.tok.tok != EOF {
 		if p.tok.tok == IDENT {
-			if p.tok.lit == "shared" && p.peek().tok == VAR {
-				// shared var x = expr: one copy for all scheduler threads, read-only after init
+			if (p.tok.lit == "shared" || p.tok.lit == "thread") && p.peek().tok == VAR {
+				// shared var x = expr: one copy for all scheduler threads, read-only after init;
+				// thread var x: one copy per thread, like var, said on purpose
 				pragmas := p.tok.pragmas
+				shared := p.tok.lit == "shared"
 				p.next()
 				d := p.genDecl()
-				d.Shared = true
+				d.Shared = shared
+				d.Thread = !shared
 				d.Pragmas = pragmas
 				p.semi()
 				f.Decls = append(f.Decls, d)

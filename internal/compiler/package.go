@@ -40,6 +40,7 @@ func (s *Scope) Insert(o *Object) *Object {
 
 type Package struct {
 	Path    string // import path ("main" for the program package)
+	Std     bool   // a standard library package
 	Name    string
 	Dir     string
 	Files   []*File
@@ -151,7 +152,7 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 		return nil, fmt.Errorf("cannot find package %q: %v", importPath, err)
 	}
 	sort.Strings(names)
-	pkg := &Package{Path: importPath, Dir: dir}
+	pkg := &Package{Path: importPath, Dir: dir, Std: isStd}
 	var errs ErrorList
 	for _, n := range names {
 		switch {

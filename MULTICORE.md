@@ -67,6 +67,11 @@ Design decisions to settle first (record the answers here):
       and `SQUARK_THREADS=N` overrides at run time, like GOMAXPROCS (capped at N when a budget was
       proven for N). Programs without the directive stay single-threaded, since each thread runs
       its own copy of `main`. Test: `TestThreadsEnv`.
+- [x] Silent per-thread package variables — **decided 2026-10-14:** under `threads`, build, run
+      and check print a note listing package variables of the program's own packages that are
+      changed after start-up (written, `++`, element/field writes, `&`, slicing, pointer methods,
+      channel ops, maps/vectors/channels passed on). `thread var` says "per thread on purpose" and
+      drops a variable from the note. Test: `TestPerThreadNote` (testdata/perthread).
 - [x] Which externs are safe to call from any shard (C libraries with global state). — **decided
       2026-10-14:** externs run on whichever shard calls them, and C libraries must be thread-safe
       (documented in spec §9); per-shard package variables mean each shard has its own handles
@@ -174,3 +179,4 @@ first thing to consider instead.
 - 2026-10-14: 2.8a (constant composites) and 2.8b (shared var) done. Next: 2.9 cross-shard channels.
 - 2026-10-14: 2.9 done; stage 2 complete. Next: stage 3 (blocking C calls off the scheduler).
 - 2026-10-14: `SQUARK_THREADS` override added (opt in with `threads auto`, then auto by default).
+- 2026-10-14: per-thread variable note and `thread var`.
