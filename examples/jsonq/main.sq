@@ -278,14 +278,14 @@ func byCount(a, b Tally) bool {
 func add(v *[..maxKeys]Tally, index map[string]int, key string, count, amount int) error {
 	i, ok := index[key]
 	if !ok {
-		i = len(*v)
-		if !(*v).TryPush(Tally{Key: key}) { // v.TryPush and v[i] don't work through a pointer
+		i = len(v)
+		if !v.TryPush(Tally{Key: key}) {
 			return ErrManyKeys
 		}
 		index[key] = i
 	}
-	(*v)[i].Count += count
-	(*v)[i].Amount += amount
+	v[i].Count += count
+	v[i].Amount += amount
 	return nil
 }
 

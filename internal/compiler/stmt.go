@@ -653,7 +653,8 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 		c.stmt(s.Body)
 		return
 	}
-	c.toView(s.X)
+	s.X = c.derefVec(s.X)
+	c.toViewRead(s.X)
 	xt := s.X.info().T
 	var kt, vt Type
 	switch u := xt.Underlying().(type) {

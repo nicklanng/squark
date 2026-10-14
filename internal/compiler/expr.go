@@ -155,6 +155,33 @@ func (c *Checker) expr1(x Expr, hint Type) {
 
 // toView turns a storage expression ([..N]T, map ... cap N, chan ... cap N) into its view
 // ([]T, map[K]V, chan T). Storage must be addressable: the view points into it.
+// derefVec makes a pointer to a vector usable where the vector is (index, slice, len, range,
+// Push...), as Go does for pointers to arrays: it returns *x, typed as the (addressable) vector.
+func (c *Checker) derefVec(x Expr) Expr {
+	p, ok := x.info().T.Underlying().(*Pointer)
+	if !ok {
+		return x
+	}
+	if _, ok := p.Elem.Underlying().(*VecType); !ok {
+		return x
+	}
+	d := &StarExpr{X: x, P: x.Pos()}
+	d.T, d.Mode = p.Elem, ModeVar
+	return d
+}
+
+// toViewRead is toView for reading only (len, cap, index, range): a vector that isn't in a
+// variable (a call's result, say) is copied into a temporary and viewed there. Elements read
+// through it aren't addressable, so nothing can keep a reference to the temporary.
+func (c *Checker) toViewRead(x Expr) {
+	xi := x.info()
+	if _, ok := xi.T.Underlying().(*VecType); ok && xi.Mode != ModeVar && xi.View == nil {
+		xi.View, xi.T, xi.Mode, xi.Temp = xi.T, viewOf(xi.T), ModeValue, true
+		return
+	}
+	c.toView(x)
+}
+
 func (c *Checker) toView(x Expr) bool {
 	xi := x.info()
 	v := viewOf(xi.T)
@@ -772,6 +799,10 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 		return
 	}
 	name := e.Sel.Name
+	if isVecMethod(name) {
+		e.X = c.derefVec(e.X)
+		xi = e.X.info()
+	}
 	t := xi.T
 	if _, ok := t.Underlying().(*ErrorType); ok {
 		switch name {
@@ -930,7 +961,15 @@ func (c *Checker) index(e *IndexExpr) {
 		c.invalid(e)
 		return
 	}
-	c.toView(e.X)
+	e.X = c.derefVec(e.X)
+	c.toViewRead(e.X)
+	if e.X.info().Temp {
+		defer func() {
+			if e.Mode == ModeVar {
+				e.Mode = ModeValue // an element of a temporary copy
+			}
+		}()
+	}
 	xi := e.X.info()
 	t := xi.T.Underlying()
 	if p, ok := t.(*Pointer); ok {
@@ -993,6 +1032,7 @@ func (c *Checker) sliceExpr(e *SliceExpr) {
 		c.invalid(e)
 		return
 	}
+	e.X = c.derefVec(e.X)
 	if _, ok := e.X.info().T.Underlying().(*VecType); ok {
 		c.toView(e.X)
 	}

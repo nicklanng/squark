@@ -154,7 +154,11 @@ for i, x := range v {}
 w := [..4]Point{{1, 2}, {3, 4}}   // literal: len 2, cap 4
 ```
 
-`Push`, `TryPush`, `Pop` and `Clear` need an addressable vector.
+`Push`, `TryPush`, `Pop` and `Clear` need an addressable vector. `len`, `cap`, indexing and
+`range` also work on a vector that isn't in a variable (a call's result), reading a copy; its
+elements can't then be assigned or have their address taken. A pointer to a vector works like the
+vector (`p.Push(x)`, `len(p)`, `p[i]`), as a pointer to an array does. Vectors aren't comparable
+(`==`), nor is a struct or array containing one.
 
 ## 4. Declarations
 

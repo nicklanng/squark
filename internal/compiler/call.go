@@ -387,6 +387,8 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 			c.invalid(e)
 			return
 		}
+		e.Args[0] = c.derefVec(x)
+		x = e.Args[0]
 		xi := x.info()
 		if isUntyped(xi.T) && isString(xi.T) {
 			c.convertUntyped(x, tString, name)
@@ -399,7 +401,7 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 			}
 			return
 		}
-		c.toView(x)
+		c.toViewRead(x)
 		xi = x.info()
 		t := xi.T.Underlying()
 		if p, ok := t.(*Pointer); ok {

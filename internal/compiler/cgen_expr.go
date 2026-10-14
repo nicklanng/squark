@@ -77,6 +77,11 @@ func (g *gen) view(x Expr) string {
 	s := g.tmp()
 	switch u := xi.View.Underlying().(type) {
 	case *VecType:
+		if xi.Temp { // not in a variable: copy it into one that lives as long as the statement
+			t := g.tmp()
+			g.hoist(fmt.Sprintf("%s %s;", st, t))
+			return fmt.Sprintf("({ %s = %s; %s *%s = &%s; (%s){%s->a, %s->len, %s->len}; })", t, raw, st, s, t, g.ctype(xi.T), s, s, s)
+		}
 		return fmt.Sprintf("({ %s *%s = &(%s); (%s){%s->a, %s->len, %s->len}; })", st, s, raw, g.ctype(xi.T), s, s, s)
 	case *MapStore:
 		kind := "SQ_KEY_BYTES"

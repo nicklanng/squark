@@ -443,10 +443,10 @@ language as a user would. Repros below are minimal; the examples carry workaroun
   by (fd, filter) and is fine.
 - [x] **E3. `string(s) in a` doesn't copy when `s` is already a string** (bug: spec says it
   copies) — fixed: the checker attaches the arena to string→string conversions too (lifetime and codegen already handled it); test: `testdata/run/arena_string_copy.sq` The result still views the original bytes. Workaround: `string([]byte(s) in a)`.
-- [ ] **E4. A pointer to a vector doesn't dereference** (bug: arrays do) With `v *[..4]int`,
+- [x] **E4. A pointer to a vector doesn't dereference** (bug: arrays do) — fixed: `derefVec` wraps the operand of index, slice, len/cap, range and the vector methods in an implicit `*`; examples/jsonq uses it; test: `testdata/run/vec_access.sq` With `v *[..4]int`,
   `v.Push(x)`, `len(v)` and `v[i]` are errors; `(*v).Push(x)` works.
-- [ ] **E5. `len`, index and `range` reject a non-addressable vector** (bug: spec says they work on
-  storage) `len(fresh().hist)`, `fresh().hist[0]`, `range fresh().hist` fail with "must be stored
+- [x] **E5. `len`, index and `range` reject a non-addressable vector** (bug: spec says they work on
+  storage) — fixed: `toViewRead` lets these read a temporary copy (hoisted for the statement); its elements aren't addressable, and other uses still need a variable; tests: `testdata/run/vec_access.sq`, `testdata/errors/vec_temp.sq` `len(fresh().hist)`, `fresh().hist[0]`, `range fresh().hist` fail with "must be stored
   in a variable to be used as a []int"; arrays in the same place work.
 - [ ] **E6. `len` of a package-level array isn't constant at package level** (go-diff) `var a
   [5]int; const N = len(a)` and `task t() pool len(a)` fail with "used before its type is known

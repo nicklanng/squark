@@ -12,6 +12,7 @@ type ExprInfo struct {
 	Const constant.Value // non-nil for constant expressions
 	Mode  Mode
 	View  Type // non-nil: the expression is storage (this type) used as a view (T)
+	Temp  bool // the view is of a temporary copy (a vector that isn't in a variable; read-only uses)
 }
 
 func (e *ExprInfo) info() *ExprInfo { return e }

@@ -1,0 +1,15 @@
+package main
+
+type Board struct{ hist [..4]int }
+
+func fresh() Board { return Board{} }
+
+func sum(xs []int) int { return len(xs) }
+
+func main() {
+	p := &fresh().hist[0] // ERROR "cannot take address of fresh().hist[0]"
+	_ = p
+	fresh().hist[0] = 1 // ERROR "cannot assign to fresh().hist[0]"
+	println(sum(fresh().hist)) // ERROR "must be stored in a variable"
+	fresh().hist.Push(1) // ERROR "cannot call Push on fresh().hist (not addressable)"
+}
