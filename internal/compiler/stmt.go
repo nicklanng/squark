@@ -88,6 +88,8 @@ func (c *Checker) stmt(s Stmt) {
 		c.closeScope()
 	case *SwitchStmt:
 		c.switchStmt(s)
+	case *SelectStmt:
+		c.selectStmt(s)
 	case *ForStmt:
 		c.openScope()
 		if s.Init != nil {
@@ -484,8 +486,19 @@ func stmtLabel(s Stmt) string {
 		return s.Label
 	case *SwitchStmt:
 		return s.Label
+	case *SelectStmt:
+		return s.Label
 	}
 	return ""
+}
+
+// isSwitchLike reports whether t is a switch or select: break leaves it, continue doesn't.
+func isSwitchLike(t Stmt) bool {
+	switch t.(type) {
+	case *SwitchStmt, *SelectStmt:
+		return true
+	}
+	return false
 }
 
 func (c *Checker) branch(s *BranchStmt) {
@@ -495,10 +508,10 @@ func (c *Checker) branch(s *BranchStmt) {
 			if stmtLabel(t) != s.Label.Name {
 				continue
 			}
-		} else if _, isSwitch := t.(*SwitchStmt); isSwitch && s.Tok == CONTINUE {
+		} else if isSwitchLike(t) && s.Tok == CONTINUE {
 			continue
 		}
-		if _, isSwitch := t.(*SwitchStmt); isSwitch && s.Tok == CONTINUE {
+		if isSwitchLike(t) && s.Tok == CONTINUE {
 			c.errorf(s.P, "invalid continue label %s", s.Label.Name)
 			return
 		}
@@ -508,9 +521,73 @@ func (c *Checker) branch(s *BranchStmt) {
 	if s.Label != nil {
 		c.errorf(s.P, "invalid %s label %s", s.Tok, s.Label.Name)
 	} else if s.Tok == BREAK {
-		c.errorf(s.P, "break is not in a loop or switch")
+		c.errorf(s.P, "break is not in a loop, switch or select")
 	} else {
 		c.errorf(s.P, "continue is not in a loop")
+	}
+}
+
+func isTimeAfter(f *Func) bool {
+	return f != nil && f.Pkg != nil && f.Pkg.Path == "time" && f.Name == "After"
+}
+
+// recvOf returns the receive x is, if it is one.
+func recvOf(x Expr) *UnaryExpr {
+	if u, ok := unparen(x).(*UnaryExpr); ok && u.Op == ARROW {
+		return u
+	}
+	return nil
+}
+
+func (c *Checker) selectStmt(s *SelectStmt) {
+	c.breakable = append(c.breakable, s)
+	defer func() { c.breakable = c.breakable[:len(c.breakable)-1] }()
+	hasDefault := false
+	var timeout *CommClause
+	for _, cc := range s.Cases {
+		c.openScope()
+		var recv *UnaryExpr
+		switch comm := cc.Comm.(type) {
+		case nil:
+			if hasDefault {
+				c.errorf(cc.P, "multiple defaults in select")
+			}
+			hasDefault = true
+		case *SendStmt:
+			c.stmt(comm)
+		case *ExprStmt:
+			recv = recvOf(comm.X)
+		case *AssignStmt:
+			if len(comm.Rhs) == 1 && len(comm.Lhs) <= 2 && (comm.Tok == ASSIGN || comm.Tok == DEFINE) {
+				recv = recvOf(comm.Rhs[0])
+			}
+		}
+		if cc.Comm != nil && recv == nil {
+			if _, ok := cc.Comm.(*SendStmt); !ok {
+				c.errorf(cc.Comm.Pos(), "select case must be a send or a receive (case ch <- v:, case v := <-ch:, case v, ok := <-ch:)")
+			}
+		}
+		if recv != nil {
+			cc.Recv = recv
+			after, _ := unparen(recv.X).(*CallExpr)
+			c.afterCall = after
+			c.stmt(cc.Comm)
+			c.afterCall = nil
+			if after != nil && isTimeAfter(after.Callee) {
+				if _, ok := cc.Comm.(*ExprStmt); !ok {
+					c.errorf(cc.Comm.Pos(), "time.After's case has no value to receive: write case <-time.After(d): (time.Now() gives the time)")
+				}
+				if timeout != nil {
+					c.errorf(cc.P, "multiple time.After cases in select (previous at %s:%d)", shortFile(timeout.P.File), timeout.P.Line)
+				}
+				timeout = cc
+				if len(after.Args) == 1 {
+					cc.Timeout = after.Args[0]
+				}
+			}
+		}
+		c.stmtList(cc.Body)
+		c.closeScope()
 	}
 }
 
@@ -764,6 +841,13 @@ func (c *Checker) isTerminating(s Stmt) bool {
 			}
 		}
 		return hasDefault
+	case *SelectStmt: // no default needed: a select waits until a case runs
+		for _, cc := range s.Cases {
+			if !c.isTerminatingList(cc.Body) || hasBreakList(cc.Body, s, true) {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }
@@ -798,6 +882,12 @@ func hasBreak(s Stmt, target Stmt, top bool) bool {
 	case *RangeStmt:
 		return hasBreak(s.Body, target, false)
 	case *SwitchStmt:
+		for _, cc := range s.Cases {
+			if hasBreakList(cc.Body, target, false) {
+				return true
+			}
+		}
+	case *SelectStmt:
 		for _, cc := range s.Cases {
 			if hasBreakList(cc.Body, target, false) {
 				return true

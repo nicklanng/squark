@@ -152,6 +152,7 @@ func (t time.Time) Before(u time.Time) bool
 func Now() time.Time
 func Since(t time.Time) time.Duration
 func Sleep(d time.Duration)
+func After(d time.Duration) chan time.Time static
 
 package net
 

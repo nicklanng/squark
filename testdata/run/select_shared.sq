@@ -1,0 +1,69 @@
+package main
+
+// select across scheduler threads: 4 threads × 2 workers select over shared channels and a
+// timeout; shard 0 produces jobs and sums the results, then closes quit, which ends every worker
+// on every thread.
+
+import (
+	"runtime"
+	"time"
+)
+
+threads 4
+
+shared var jobs chan int cap 8
+shared var results chan int cap 8
+shared var quit chan int cap 0
+
+thread var done chan int cap 2
+thread var total chan int cap 1
+
+task worker() pool 2 {
+	idle := 0
+	for {
+		select {
+		case j := <-jobs:
+			select {
+			case results <- j * 2:
+			case <-time.After(5 * time.Second):
+				panic("results stuck")
+			}
+		case <-quit:
+			done <- idle
+			return
+		case <-time.After(2 * time.Millisecond):
+			idle++
+		}
+	}
+}
+
+task producer() pool 1 {
+	for i := 1; i <= 2000; i++ {
+		select {
+		case jobs <- i:
+		case <-time.After(5 * time.Second):
+			panic("jobs stuck")
+		}
+	}
+}
+
+task collector() pool 1 {
+	sum := 0
+	for i := 0; i < 2000; i++ {
+		sum += <-results
+	}
+	close(quit)
+	total <- sum
+}
+
+func main() {
+	go worker()
+	go worker()
+	if runtime.Shard() == 0 {
+		go producer()
+		go collector()
+		println(<-total)
+	}
+	<-done
+	<-done
+}

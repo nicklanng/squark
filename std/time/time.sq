@@ -37,6 +37,14 @@ func Since(t Time) Duration { return Duration(nanotime() - t.mono) }
 // Sleep parks the calling goroutine for at least d.
 func Sleep(d Duration) { sleep(int(d)) }
 
+// After is for select only: `case <-time.After(d):` runs if no other case is ready within d.
+// (squark has no heap to make a channel per call, so the compiler turns the case into a timer;
+// anywhere else, After is an error.)
+func After(d Duration) chan Time {
+	var c chan Time
+	return c
+}
+
 func (d Duration) Nanoseconds() int    { return int(d) }
 func (d Duration) Microseconds() int   { return int(d) / 1000 }
 func (d Duration) Milliseconds() int   { return int(d) / 1000000 }

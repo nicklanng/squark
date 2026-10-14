@@ -1,0 +1,11 @@
+package main
+
+var ptrs chan *int cap 1
+
+func main() {
+	x := 1
+	select {
+	case ptrs <- &x: // ERROR "sent on a channel"
+	default:
+	}
+}

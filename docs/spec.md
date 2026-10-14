@@ -35,9 +35,10 @@ current.
 
 ## 1. Lexical elements
 
-- **Keywords:** Go's keywords except `fallthrough`, `goto`, `interface` and `select`, which are not
+- **Keywords:** Go's keywords except `fallthrough`, `goto` and `interface`, which are not
   supported. Added keywords: `arena`, `extern`, `in`, `task`, `try`. `shared` and `thread` mark
-  a package-level `var` (§4) but stay ordinary identifiers elsewhere.
+  a package-level `var` (§4) but stay ordinary identifiers elsewhere; so does `select`, which
+  starts a select statement only when followed by `{`.
 - **Contextual words** (identifiers elsewhere):
   - `pool` and `stack` after a signature.
   - `from` and `static` after results.
@@ -326,8 +327,13 @@ accept numbers, strings, bools, pointers, errors and `[]byte`), `new`/`make` (ar
 
 As in Go, except:
 
-- No `goto`, `fallthrough` or `select`. Labels are allowed only on `for` and `switch`, for labeled
-  `break`/`continue`.
+- No `goto` or `fallthrough`. Labels are allowed only on `for`, `switch` and `select`, for
+  labeled `break`/`continue`.
+- `select` works as in Go: it waits until one of its sends or receives can proceed (a random one
+  if several can), `default` runs if none can, nil channels are never ready, and `break` leaves
+  it. Cases may mix per-thread and shared channels. For a timeout, `case <-time.After(d):` runs
+  if no other case is ready within d; since there is no heap to make a channel per call,
+  `time.After` is allowed only there, without a received value (`time.Now()` gives the time).
 - `defer` is not allowed inside loops. Its arguments must live until the function returns.
 - `go f(args)`: `f` must be a task. Arguments must not reference stack or arena memory.
 - Channel sends: the value must not reference stack or arena memory.
@@ -380,6 +386,7 @@ must not outlive the memory it points to:
 | `threads auto can't be checked against the budget` | `threads N` with the number of cores you deploy on |
 | `shared var X: T can't be shared` | share numbers, strings, bools, errors or arrays/structs of them; keep everything else per thread |
 | `a shared channel's elements can't hold references` | send an index, ID or fixed-size array instead of a string or slice |
+| `time.After can only be used as a select case` | `select { case <-time.After(d): ... }`; to just wait, `time.Sleep(d)` |
 | `only extern functions can be blocking` | drop `blocking`; squark code waits by parking already (channels, I/O, sleeps) |
 | `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (error constants, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |
 | `defer inside a loop` | move the loop body into a function and defer there |

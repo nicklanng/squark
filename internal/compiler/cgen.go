@@ -50,6 +50,7 @@ type gen struct {
 	hoisted  []string
 	topDecls []string
 	labelIDs map[Stmt]int
+	selRecv  map[*UnaryExpr][2]string // a select case's receive: the value and ok the select delivered
 	nextLbl  int
 	file     string
 

@@ -1238,6 +1238,16 @@ func (l *lifetime) stmt(s Stmt) {
 			l.stmt(s.Else)
 		}
 		l.depth--
+	case *SelectStmt:
+		l.depth++
+		for _, cc := range s.Cases {
+			var list []Stmt
+			if cc.Comm != nil {
+				list = append(list, cc.Comm)
+			}
+			l.block(append(list, cc.Body...))
+		}
+		l.depth--
 	case *SwitchStmt:
 		l.depth++
 		if s.Init != nil {

@@ -1,0 +1,34 @@
+package main
+
+import "time"
+
+var c chan int cap 1
+
+func main() {
+	x := 1
+	select {
+	case x + 1: // ERROR "select case must be a send or a receive"
+	}
+	select {
+	default:
+	default: // ERROR "multiple defaults in select"
+	}
+	t := time.After(time.Second) // ERROR "time.After can only be used as a select case"
+	_ = t
+	select {
+	case v := <-time.After(time.Second): // ERROR "time.After's case has no value to receive"
+		_ = v
+	}
+	select {
+	case <-time.After(time.Second):
+	case <-time.After(time.Minute): // ERROR "multiple time.After cases in select"
+	}
+	select {
+	case v := <-c:
+		continue // ERROR "continue is not in a loop"
+		_ = v
+	}
+	var select int // still an ordinary name
+	select = x
+	println(select)
+}

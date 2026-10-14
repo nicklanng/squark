@@ -274,7 +274,6 @@ docs/design.md      the language design and its rationale
 
 - Interfaces and generics.
 - Provenance contracts on function types. Indirect calls use whole-program inference instead.
-- `select`.
 - One SQLite connection per thread: a slow query no longer stalls its thread, but the thread's
   other goroutines that need the database wait for it (a small pool per thread would let them in).
 - Arena exhaustion panics. A `try`-able allocation form would make it recoverable.

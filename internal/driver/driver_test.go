@@ -1150,28 +1150,36 @@ func TestThreadsRace(t *testing.T) {
 }
 
 // TestSharedChanRace runs testdata/run/shared_chan.sq (4 threads exchanging values over shared
-// channels) under ThreadSanitizer: the channel locks and cross-shard wakeups must be race-free.
+// channels) and select_shared.sq (select over them, with timeouts) under ThreadSanitizer: the
+// channel locks, select claims and cross-shard wakeups must be race-free.
 func TestSharedChanRace(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow")
 	}
-	dir := t.TempDir()
-	src, err := os.ReadFile("../../testdata/run/shared_chan.sq")
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.WriteFile(filepath.Join(dir, "main.sq"), src, 0o644)
-	bin := filepath.Join(dir, "prog")
-	if _, err := Build(Options{Dir: dir, Output: bin, Sanitize: "thread"}); err != nil {
-		t.Skipf("no ThreadSanitizer build here: %v", err)
-	}
-	for i := 0; i < 5; i++ {
-		cmd := exec.Command(bin)
-		cmd.Env = append(os.Environ(), "TSAN_OPTIONS=halt_on_error=0 report_signal_unsafe=0")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		if err := cmd.Run(); err != nil || stdout.String() != "1001000\n100\n" || strings.Contains(stderr.String(), "ThreadSanitizer") {
-			t.Fatalf("run %d: %v, output %q\n%s", i, err, stdout.String(), stderr.String())
+	// shared channels, and select over them with timeouts (select_shared.sq)
+	for _, name := range []string{"shared_chan", "select_shared"} {
+		dir := t.TempDir()
+		src, err := os.ReadFile("../../testdata/run/" + name + ".sq")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := os.ReadFile("../../testdata/run/" + name + ".out")
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(dir, "main.sq"), src, 0o644)
+		bin := filepath.Join(dir, "prog")
+		if _, err := Build(Options{Dir: dir, Output: bin, Sanitize: "thread"}); err != nil {
+			t.Skipf("no ThreadSanitizer build here: %v", err)
+		}
+		for i := 0; i < 5; i++ {
+			cmd := exec.Command(bin)
+			cmd.Env = append(os.Environ(), "TSAN_OPTIONS=halt_on_error=0 report_signal_unsafe=0")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil || stdout.String() != string(want) || strings.Contains(stderr.String(), "ThreadSanitizer") {
+				t.Fatalf("%s run %d: %v, output %q\n%s", name, i, err, stdout.String(), stderr.String())
+			}
 		}
 	}
 }

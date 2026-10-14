@@ -41,6 +41,7 @@ struct sq_g {
 	void *tsan_fiber;   // ThreadSanitizer builds only: this goroutine's fiber
 	void *shard;        // the shard (scheduler thread) that runs this goroutine
 	void (*blk_fn)(void *); // a blocking extern call a helper thread runs for it (argument in elem)
+	struct sq_waiter *sel_timer; // in a select with a timeout: the timer's waiter
 };
 
 enum { WAKE_NONE, WAKE_FD, WAKE_TIMER };

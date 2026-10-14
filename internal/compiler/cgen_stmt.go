@@ -91,6 +91,8 @@ func (g *gen) stmt1(s Stmt) {
 		g.ifStmt(s)
 	case *SwitchStmt:
 		g.switchStmt(s)
+	case *SelectStmt:
+		g.selectStmt(s)
 	case *ForStmt:
 		g.forStmt(s)
 	case *RangeStmt:
@@ -279,6 +281,11 @@ func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
 			return
 		}
 	case *UnaryExpr:
+		if sr, ok := g.selRecv[r]; ok && r.CommaOk {
+			g.storeTarget(lhs[0], targets[0], sr[0])
+			g.storeTarget(lhs[1], targets[1], sr[1])
+			return
+		}
 		if r.CommaOk {
 			et := r.X.info().T.Underlying().(*Chan).Elem
 			v, ok := g.tmp(), g.tmp()
@@ -602,6 +609,91 @@ func (g *gen) ifStmt(s *IfStmt) {
 	if wrap {
 		g.close()
 	}
+}
+
+// selectStmt evaluates the channels and sent values once, in source order, lets sq_select pick a
+// case, and runs it; a receive case's assignment reads the value sq_select delivered (selRecv).
+func (g *gen) selectStmt(s *SelectStmt) {
+	id := g.label(s)
+	g.open()
+	g.lineDirective(s.P)
+	n := 0
+	for _, cc := range s.Cases {
+		if cc.Comm != nil && cc.Timeout == nil {
+			n++
+		}
+	}
+	cs, ws := g.tmp(), g.tmp()
+	if n > 0 {
+		g.line("sq_scase %s[%d]; sq_waiter %s[%d];", cs, n, ws, n)
+	} else {
+		g.line("sq_scase *%s = NULL; sq_waiter *%s = NULL;", cs, ws)
+	}
+	if g.selRecv == nil {
+		g.selRecv = map[*UnaryExpr][2]string{}
+	}
+	timeout, block := "-1", true
+	index := map[*CommClause]int{}
+	i := 0
+	for _, cc := range s.Cases {
+		switch {
+		case cc.Comm == nil:
+			block = false
+		case cc.Timeout != nil:
+			timeout = g.tmp()
+			g.line("int64_t %s = %s;", timeout, g.coerce(cc.Timeout, tInt))
+			g.line("if (%s < 0) %s = 0;", timeout, timeout)
+		case cc.Recv != nil:
+			et := cc.Recv.T
+			v := g.tmp()
+			g.line("%s %s;", g.ctype(et), v)
+			g.line("%s[%d] = (sq_scase){.c = %s, .elem = &%s};", cs, i, g.expr(cc.Recv.X), v)
+			g.selRecv[cc.Recv] = [2]string{v, fmt.Sprintf("%s[%d].ok", cs, i)}
+			index[cc] = i
+			i++
+		default:
+			send := cc.Comm.(*SendStmt)
+			et := send.Chan.info().T.Underlying().(*Chan).Elem
+			ch, v := g.tmp(), g.tmp()
+			g.line("sq_chan *%s = %s;", ch, g.expr(send.Chan))
+			g.line("%s %s = %s;", g.ctype(et), v, g.coerce(send.Value, et))
+			g.line("%s[%d] = (sq_scase){.c = %s, .elem = &%s, .send = true};", cs, i, ch, v)
+			index[cc] = i
+			i++
+		}
+	}
+	sel := g.tmp()
+	g.line("int64_t %s = sq_select(%s, %s, %d, %t, %s, __FILE__, __LINE__);", sel, cs, ws, n, block, timeout)
+	first := true
+	for _, cc := range s.Cases {
+		var cond string
+		switch {
+		case cc.Comm == nil:
+			cond = sel + " == -1"
+		case cc.Timeout != nil:
+			cond = fmt.Sprintf("%s == %d", sel, n)
+		default:
+			cond = fmt.Sprintf("%s == %d", sel, index[cc])
+		}
+		kw := "} else if"
+		if first {
+			kw, first = "if", false
+		}
+		g.line("%s (%s) {", kw, cond)
+		g.ind++
+		g.open()
+		if cc.Recv != nil && cc.Timeout == nil {
+			g.stmt(cc.Comm)
+		}
+		g.stmts(cc.Body)
+		g.close()
+		g.ind--
+	}
+	if !first {
+		g.line("}")
+	}
+	g.line("sq_brk%d:;", id)
+	g.close()
 }
 
 func (g *gen) switchStmt(s *SwitchStmt) {

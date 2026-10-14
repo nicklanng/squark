@@ -1,0 +1,13 @@
+a 7
+b hello
+nothing ready
+timeout waited true
+sent 0
+full 1
+full 2
+0 -1
+n 404
+nil never ready
+fair true true 100
+one case per select: 1 2
+closed 0 false

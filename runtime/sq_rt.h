@@ -148,11 +148,32 @@ void sq_go(sq_pool *pool, void (*entry)(void *), const void *args, size_t argsiz
 void sq_gosched(void);
 
 // ---- channels ----
+// A goroutine waiting on a channel queues a waiter: one for a send or receive, one per case of a
+// select (the generated code provides them, on the goroutine's stack).
+typedef struct sq_waiter {
+	sq_g *g;
+	void *elem;              // the value to send, or where a received value goes
+	struct sq_waiter *next;
+	void *sel;               // the select this waiter belongs to (NULL: a plain send or receive)
+	int64_t index;           // its case
+	bool ok;                 // the operation completed (false: the channel was closed)
+	bool remote;             // woken through its shard's remote queue (shared channels involved)
+	struct sq_chan *lock;    // scratch: select's lock order
+} sq_waiter;
+
+// One case of a select: a send of *elem, or a receive into *elem (ok: not closed).
+typedef struct sq_scase {
+	struct sq_chan *c;
+	void *elem;
+	bool send;
+	bool ok;
+} sq_scase;
+
 typedef struct sq_chan {
 	uint8_t *buf;
 	int64_t elemsize, cap, len, head;
 	bool closed;
-	sq_g *recvq_head, *recvq_tail, *sendq_head, *sendq_tail;
+	sq_waiter *recvq_head, *recvq_tail, *sendq_head, *sendq_tail;
 	bool shared;        // shared var ... chan: used by every scheduler thread, under mu
 	pthread_mutex_t mu;
 } sq_chan;
@@ -162,6 +183,9 @@ void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line);
 bool sq_chan_recv(sq_chan *c, void *out);
 void sq_chan_close(sq_chan *c, const char *file, int line);
 int64_t sq_chan_len_locked(sq_chan *c);
+// sq_select runs a select over n channel cases (ws: n waiters for it). It returns the case that
+// fired, -1 for default (block false: nothing was ready), or n when timeout_ns (>= 0) passed first.
+int64_t sq_select(sq_scase *cs, sq_waiter *ws, int64_t n, bool block, int64_t timeout_ns, const char *file, int line);
 
 // Blocking externs (extern ... blocking): the call runs on a helper thread while the goroutine
 // waits, so the other goroutines of its scheduler thread keep running.

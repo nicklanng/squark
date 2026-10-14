@@ -168,6 +168,11 @@ func (w *ptWalker) stmt(s Stmt) {
 		w.expr(s.Cond)
 		w.stmt(s.Body)
 		w.stmt(s.Else)
+	case *SelectStmt:
+		for _, cc := range s.Cases {
+			w.stmt(cc.Comm)
+			w.stmts(cc.Body)
+		}
 	case *SwitchStmt:
 		w.stmt(s.Init)
 		w.expr(s.Tag)

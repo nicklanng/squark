@@ -647,6 +647,9 @@ func (p *parser) stmt() Stmt {
 	case SEMICOLON:
 		return &EmptyStmt{P: pos}
 	}
+	if p.atSelect() {
+		return p.selectStmt("")
+	}
 	if p.tok.tok == IDENT {
 		// label?
 		id := p.ident()
@@ -658,7 +661,10 @@ func (p *parser) stmt() Stmt {
 			case SWITCH:
 				return &LabeledStmt{Label: id, P: pos, Stmt: p.switchStmt(id.Name)}
 			}
-			p.errorf(pos, "labels are only supported on for and switch statements")
+			if p.atSelect() {
+				return &LabeledStmt{Label: id, P: pos, Stmt: p.selectStmt(id.Name)}
+			}
+			p.errorf(pos, "labels are only supported on for, switch and select statements")
 			return &EmptyStmt{P: pos}
 		}
 		x := p.binaryRest(p.postfix(p.operandRest(id)), 1)
@@ -670,6 +676,31 @@ func (p *parser) stmt() Stmt {
 		return p.simpleStmtRest(x)
 	}
 	return p.simpleStmt()
+}
+
+// atSelect reports whether a select statement starts here: select is an ordinary identifier
+// elsewhere.
+func (p *parser) atSelect() bool {
+	return p.tok.tok == IDENT && p.tok.lit == "select" && p.peek().tok == LBRACE
+}
+
+func (p *parser) selectStmt(label string) Stmt {
+	s := &SelectStmt{P: p.tok.pos, Label: label}
+	p.next()
+	p.expect(LBRACE)
+	for p.tok.tok == CASE || p.tok.tok == DEFAULT {
+		cc := &CommClause{P: p.tok.pos}
+		if p.got(CASE) {
+			cc.Comm = p.simpleStmt()
+		} else {
+			p.next()
+		}
+		p.expect(COLON)
+		cc.Body = p.stmtList()
+		s.Cases = append(s.Cases, cc)
+	}
+	p.expect(RBRACE)
+	return s
 }
 
 func (p *parser) simpleStmt() Stmt {

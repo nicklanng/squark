@@ -85,6 +85,9 @@ func (c *Checker) call(e *CallExpr) {
 			return
 		}
 	}
+	if isTimeAfter(e.Callee) && e != c.afterCall {
+		c.errorf(e.P, "time.After can only be used as a select case (case <-time.After(d):): it has no channel to return")
+	}
 	owner := c.fn
 	if owner == nil {
 		owner = c.prog.InitFunc // package-level initializers

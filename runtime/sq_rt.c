@@ -164,6 +164,7 @@ typedef struct sq_shard {
 	int wake_fd;              // Linux: eventfd
 	int64_t shared_parked;    // this shard's goroutines waiting for other threads (shared channels, locks, blocking calls)
 	sq_g *detach_g;           // a goroutine detaching (sq_detach), handed to a helper once switched out
+	uint64_t rand;            // select's random start
 	struct {
 		int fd;
 		int entry; // in listen_table
@@ -181,6 +182,7 @@ static _Thread_local sq_shard *sq_self = &sq_shard0;
 static atomic_int_fast64_t live_shards;
 
 static void heap_remove(sq_g *g);
+static void heap_up(int64_t i);
 static void err_write(const char *s);
 static void stack_report(void);
 static bool stackcheck;
@@ -687,107 +689,6 @@ static sq_g *q_pop(sq_g **head, sq_g **tail) {
 	return g;
 }
 
-static void chan_send_shared(sq_chan *c, const void *elem, const char *file, int line);
-static bool chan_recv_shared(sq_chan *c, void *outp);
-static void chan_close_shared(sq_chan *c, const char *file, int line);
-
-void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line) {
-	if (c && c->shared) {
-		chan_send_shared(c, elem, file, line);
-		return;
-	}
-	if (!c) {
-		sq_self->total_parked++;
-		sq_park(); // send on nil channel blocks forever
-	}
-	if (c->closed) sq_panic_cstr("send on closed channel", file, line);
-	sq_g *r = q_pop(&c->recvq_head, &c->recvq_tail);
-	if (r) {
-		memcpy(r->elem, elem, (size_t)c->elemsize);
-		r->ok = true;
-		sq_self->total_parked--;
-		sq_ready(r);
-		return;
-	}
-	if (c->len < c->cap) {
-		int64_t tail = (c->head + c->len) % c->cap;
-		memcpy(c->buf + tail * c->elemsize, elem, (size_t)c->elemsize);
-		c->len++;
-		return;
-	}
-	sq_g *g = sq_self->cur_g;
-	g->elem = (void *)elem;
-	g->ok = false;
-	q_push(&c->sendq_head, &c->sendq_tail, g);
-	sq_self->total_parked++;
-	sq_park();
-	if (!g->ok) sq_panic_cstr("send on closed channel", file, line);
-}
-
-bool sq_chan_recv(sq_chan *c, void *outp) {
-	if (c && c->shared) return chan_recv_shared(c, outp);
-	if (!c) {
-		sq_self->total_parked++;
-		sq_park();
-	}
-	if (c->len > 0) {
-		memcpy(outp, c->buf + c->head * c->elemsize, (size_t)c->elemsize);
-		c->head = (c->head + 1) % c->cap;
-		c->len--;
-		sq_g *s = q_pop(&c->sendq_head, &c->sendq_tail);
-		if (s) {
-			int64_t tail = (c->head + c->len) % c->cap;
-			memcpy(c->buf + tail * c->elemsize, s->elem, (size_t)c->elemsize);
-			c->len++;
-			s->ok = true;
-			sq_self->total_parked--;
-			sq_ready(s);
-		}
-		return true;
-	}
-	sq_g *s = q_pop(&c->sendq_head, &c->sendq_tail);
-	if (s) {
-		memcpy(outp, s->elem, (size_t)c->elemsize);
-		s->ok = true;
-		sq_self->total_parked--;
-		sq_ready(s);
-		return true;
-	}
-	if (c->closed) {
-		memset(outp, 0, (size_t)c->elemsize);
-		return false;
-	}
-	sq_g *g = sq_self->cur_g;
-	g->elem = outp;
-	g->ok = false;
-	q_push(&c->recvq_head, &c->recvq_tail, g);
-	sq_self->total_parked++;
-	sq_park();
-	if (!g->ok) memset(outp, 0, (size_t)c->elemsize);
-	return g->ok;
-}
-
-void sq_chan_close(sq_chan *c, const char *file, int line) {
-	if (c && c->shared) {
-		chan_close_shared(c, file, line);
-		return;
-	}
-	if (!c) sq_panic_cstr("close of nil channel", file, line);
-	if (c->closed) sq_panic_cstr("close of closed channel", file, line);
-	c->closed = true;
-	sq_g *g;
-	while ((g = q_pop(&c->recvq_head, &c->recvq_tail))) {
-		g->ok = false;
-		sq_self->total_parked--;
-		sq_ready(g);
-	}
-	while ((g = q_pop(&c->sendq_head, &c->sendq_tail))) {
-		g->ok = false;
-		sq_self->total_parked--;
-		sq_ready(g);
-	}
-}
-
 // Shared channels (shared var ... chan): every scheduler thread may use them, so each operation
 // holds the channel's mutex, and a waiter that belongs to another shard is handed to that shard
 // (ready_shared) instead of this one's run queue. A waiter's stack stays put while it is parked,
@@ -1018,93 +919,309 @@ int64_t sq_chan_len_locked(sq_chan *c) {
 	return n;
 }
 
-static void chan_send_shared(sq_chan *c, const void *elem, const char *file, int line) {
-	pthread_mutex_lock(&c->mu);
-	if (c->closed) {
-		pthread_mutex_unlock(&c->mu);
-		sq_panic_cstr("send on closed channel", file, line);
+// ---------------------------------------------------------------------------
+// channel operations. A waiting goroutine queues waiters on its own stack: one for a send or
+// receive, one per case for select. A select's waiters can be claimed once (its fired index, by
+// compare-and-swap), so whichever operation, close or timer gets there first completes the
+// select; the others drop its waiters, and the selecting goroutine removes the rest when it wakes.
+// Shared channels (shared var ... chan) are locked around every step; local ones belong to one
+// scheduler thread and need no lock.
+
+typedef struct sq_sel {
+	_Atomic int64_t fired; // -1 until a case fires
+} sq_sel;
+
+static void chan_lock(sq_chan *c) {
+	if (c->shared) pthread_mutex_lock(&c->mu);
+}
+
+static void chan_unlock(sq_chan *c) {
+	if (c->shared) pthread_mutex_unlock(&c->mu);
+}
+
+static void wq_push(sq_waiter **head, sq_waiter **tail, sq_waiter *w) {
+	w->next = NULL;
+	if (*tail) (*tail)->next = w; else *head = w;
+	*tail = w;
+}
+
+// claim reports whether w's operation may complete now (claiming its select if it has one).
+static bool claim(sq_waiter *w) {
+	if (!w->sel) return true;
+	int64_t none = -1;
+	return atomic_compare_exchange_strong(&((sq_sel *)w->sel)->fired, &none, w->index);
+}
+
+// wq_take pops the first waiter that can still complete; waiters of selects that already fired
+// are dropped.
+static sq_waiter *wq_take(sq_waiter **head, sq_waiter **tail) {
+	sq_waiter *w;
+	while ((w = *head)) {
+		*head = w->next;
+		if (!*head) *tail = NULL;
+		w->next = NULL;
+		if (claim(w)) return w;
 	}
-	sq_g *r = q_pop(&c->recvq_head, &c->recvq_tail);
+	return NULL;
+}
+
+static void wq_remove(sq_waiter **head, sq_waiter **tail, sq_waiter *w) {
+	sq_waiter *prev = NULL;
+	for (sq_waiter *p = *head; p; prev = p, p = p->next) {
+		if (p != w) continue;
+		if (prev) prev->next = p->next; else *head = p->next;
+		if (*tail == p) *tail = prev;
+		return;
+	}
+}
+
+// wake makes a waiter's goroutine runnable once its operation is done. Called without channel
+// locks; w is read before the goroutine can run again (only one waker claims it).
+static void wake(sq_waiter *w) {
+	sq_g *g = w->g;
+	if (w->remote) {
+		ready_shared(g);
+		return;
+	}
+	sq_self->total_parked--;
+	sq_ready(g);
+}
+
+// chan_try_send completes a send if it can without waiting; *wk is then a waiter to wake.
+static bool chan_try_send(sq_chan *c, const void *elem, sq_waiter **wk) {
+	sq_waiter *r = wq_take(&c->recvq_head, &c->recvq_tail);
 	if (r) {
 		memcpy(r->elem, elem, (size_t)c->elemsize);
 		r->ok = true;
-		pthread_mutex_unlock(&c->mu);
-		ready_shared(r);
-		return;
+		*wk = r;
+		return true;
 	}
 	if (c->len < c->cap) {
 		int64_t tail = (c->head + c->len) % c->cap;
 		memcpy(c->buf + tail * c->elemsize, elem, (size_t)c->elemsize);
 		c->len++;
-		pthread_mutex_unlock(&c->mu);
-		return;
+		return true;
 	}
-	sq_g *g = sq_self->cur_g;
-	g->elem = (void *)elem;
-	g->ok = false;
-	q_push(&c->sendq_head, &c->sendq_tail, g);
-	park_shared(&c->mu);
-	if (!g->ok) sq_panic_cstr("send on closed channel", file, line);
+	return false;
 }
 
-static bool chan_recv_shared(sq_chan *c, void *outp) {
-	pthread_mutex_lock(&c->mu);
+// chan_try_recv completes a receive if it can without waiting (a closed, empty channel gives the
+// zero value and *ok false); *wk is then a waiter to wake.
+static bool chan_try_recv(sq_chan *c, void *out, bool *ok, sq_waiter **wk) {
 	if (c->len > 0) {
-		memcpy(outp, c->buf + c->head * c->elemsize, (size_t)c->elemsize);
+		memcpy(out, c->buf + c->head * c->elemsize, (size_t)c->elemsize);
 		c->head = (c->head + 1) % c->cap;
 		c->len--;
-		sq_g *s = q_pop(&c->sendq_head, &c->sendq_tail);
-		if (s) {
+		sq_waiter *s = wq_take(&c->sendq_head, &c->sendq_tail);
+		if (s) { // a waiting sender's value takes the freed slot
 			int64_t tail = (c->head + c->len) % c->cap;
 			memcpy(c->buf + tail * c->elemsize, s->elem, (size_t)c->elemsize);
 			c->len++;
 			s->ok = true;
+			*wk = s;
 		}
-		pthread_mutex_unlock(&c->mu);
-		if (s) ready_shared(s);
+		*ok = true;
 		return true;
 	}
-	sq_g *s = q_pop(&c->sendq_head, &c->sendq_tail);
+	sq_waiter *s = wq_take(&c->sendq_head, &c->sendq_tail);
 	if (s) {
-		memcpy(outp, s->elem, (size_t)c->elemsize);
+		memcpy(out, s->elem, (size_t)c->elemsize);
 		s->ok = true;
-		pthread_mutex_unlock(&c->mu);
-		ready_shared(s);
+		*wk = s;
+		*ok = true;
 		return true;
 	}
 	if (c->closed) {
-		pthread_mutex_unlock(&c->mu);
-		memset(outp, 0, (size_t)c->elemsize);
-		return false;
+		memset(out, 0, (size_t)c->elemsize);
+		*ok = false;
+		return true;
 	}
-	sq_g *g = sq_self->cur_g;
-	g->elem = outp;
-	g->ok = false;
-	q_push(&c->recvq_head, &c->recvq_tail, g);
-	park_shared(&c->mu);
-	if (!g->ok) memset(outp, 0, (size_t)c->elemsize);
-	return g->ok;
+	return false;
 }
 
-static void chan_close_shared(sq_chan *c, const char *file, int line) {
-	pthread_mutex_lock(&c->mu);
+// chan_park parks the running goroutine after queueing w on c (c's lock held if shared).
+static void chan_park(sq_chan *c) {
+	if (c->shared) {
+		park_shared(&c->mu);
+		return;
+	}
+	sq_self->total_parked++;
+	sq_park();
+}
+
+static SQ_NORETURN void park_forever(void) { // a nil channel
+	sq_self->total_parked++;
+	sq_park();
+	__builtin_unreachable();
+}
+
+void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line) {
+	if (!c) park_forever();
+	chan_lock(c);
 	if (c->closed) {
-		pthread_mutex_unlock(&c->mu);
+		chan_unlock(c);
+		sq_panic_cstr("send on closed channel", file, line);
+	}
+	sq_waiter *wk = NULL;
+	if (chan_try_send(c, elem, &wk)) {
+		chan_unlock(c);
+		if (wk) wake(wk);
+		return;
+	}
+	sq_waiter w = {.g = sq_self->cur_g, .elem = (void *)elem, .remote = c->shared};
+	wq_push(&c->sendq_head, &c->sendq_tail, &w);
+	chan_park(c);
+	if (!w.ok) sq_panic_cstr("send on closed channel", file, line);
+}
+
+bool sq_chan_recv(sq_chan *c, void *outp) {
+	if (!c) park_forever();
+	chan_lock(c);
+	bool ok;
+	sq_waiter *wk = NULL;
+	if (chan_try_recv(c, outp, &ok, &wk)) {
+		chan_unlock(c);
+		if (wk) wake(wk);
+		return ok;
+	}
+	sq_waiter w = {.g = sq_self->cur_g, .elem = outp, .remote = c->shared};
+	wq_push(&c->recvq_head, &c->recvq_tail, &w);
+	chan_park(c);
+	if (!w.ok) memset(outp, 0, (size_t)c->elemsize);
+	return w.ok;
+}
+
+void sq_chan_close(sq_chan *c, const char *file, int line) {
+	if (!c) sq_panic_cstr("close of nil channel", file, line);
+	chan_lock(c);
+	if (c->closed) {
+		chan_unlock(c);
 		sq_panic_cstr("close of closed channel", file, line);
 	}
 	c->closed = true;
-	sq_g *waiters = NULL, *g;
-	while ((g = q_pop(&c->recvq_head, &c->recvq_tail)) || (g = q_pop(&c->sendq_head, &c->sendq_tail))) {
-		g->ok = false;
-		g->next = waiters; // q_pop cleared nothing; relink into a private list
-		waiters = g;
+	sq_waiter *woken = NULL, *w;
+	while ((w = wq_take(&c->recvq_head, &c->recvq_tail)) || (w = wq_take(&c->sendq_head, &c->sendq_tail))) {
+		w->ok = false;
+		w->next = woken;
+		woken = w;
 	}
-	pthread_mutex_unlock(&c->mu);
-	while (waiters) {
-		g = waiters;
-		waiters = g->next;
-		ready_shared(g);
+	chan_unlock(c);
+	while (woken) {
+		w = woken;
+		woken = w->next; // before waking: w is on the waiter's stack
+		wake(w);
 	}
+}
+
+static uint64_t sel_rand(void) { // xorshift, per shard: select's fairness
+	uint64_t x = sq_self->rand;
+	if (!x) x = 0x9e3779b97f4a7c15ull ^ (uint64_t)sq_nanotime() ^ ((uint64_t)sq_self->id << 32);
+	x ^= x << 13;
+	x ^= x >> 7;
+	x ^= x << 17;
+	sq_self->rand = x;
+	return x;
+}
+
+int64_t sq_select(sq_scase *cs, sq_waiter *ws, int64_t n, bool block, int64_t timeout_ns, const char *file, int line) {
+	// lock the shared channels once each, in address order (another select may lock them too)
+	int64_t nl = 0;
+	for (int64_t i = 0; i < n; i++) {
+		sq_chan *c = cs[i].c;
+		if (!c || !c->shared) continue;
+		int64_t k = nl++;
+		while (k > 0 && ws[k - 1].lock > c) {
+			ws[k].lock = ws[k - 1].lock;
+			k--;
+		}
+		ws[k].lock = c;
+	}
+	for (int64_t k = 0; k < nl; k++) {
+		if (k == 0 || ws[k].lock != ws[k - 1].lock) pthread_mutex_lock(&ws[k].lock->mu);
+	}
+#define UNLOCK_ALL() \
+	for (int64_t k = 0; k < nl; k++) \
+		if (k == 0 || ws[k].lock != ws[k - 1].lock) pthread_mutex_unlock(&ws[k].lock->mu)
+
+	// a case that is ready now, starting from a random one
+	int64_t start = n > 0 ? (int64_t)(sel_rand() % (uint64_t)n) : 0;
+	for (int64_t j = 0; j < n; j++) {
+		int64_t i = (start + j) % n;
+		sq_chan *c = cs[i].c;
+		if (!c) continue; // a nil channel is never ready
+		sq_waiter *wk = NULL;
+		if (cs[i].send) {
+			if (c->closed) {
+				UNLOCK_ALL();
+				sq_panic_cstr("send on closed channel", file, line);
+			}
+			if (!chan_try_send(c, cs[i].elem, &wk)) continue;
+		} else if (!chan_try_recv(c, cs[i].elem, &cs[i].ok, &wk)) {
+			continue;
+		}
+		UNLOCK_ALL();
+		if (wk) wake(wk);
+		return i;
+	}
+	if (!block) {
+		UNLOCK_ALL();
+		return -1;
+	}
+
+	// wait on every case (and the timer)
+	sq_g *g = sq_self->cur_g;
+	sq_sel sel;
+	atomic_init(&sel.fired, -1);
+	bool remote = nl > 0;
+	for (int64_t i = 0; i < n; i++) {
+		sq_chan *c = cs[i].c;
+		if (!c) continue;
+		sq_chan *lk = ws[i].lock;
+		ws[i] = (sq_waiter){.g = g, .elem = cs[i].elem, .sel = &sel, .index = i, .remote = remote, .lock = lk};
+		if (cs[i].send) wq_push(&c->sendq_head, &c->sendq_tail, &ws[i]);
+		else wq_push(&c->recvq_head, &c->recvq_tail, &ws[i]);
+	}
+	sq_waiter tw = {.g = g, .sel = &sel, .index = n, .remote = remote};
+	if (timeout_ns >= 0) {
+		g->sel_timer = &tw;
+		g->wait_fd = -1;
+		g->wake_at = sq_nanotime() + timeout_ns;
+		g->heap_index = sq_self->ntimers;
+		sq_self->timer_heap[sq_self->ntimers++] = g;
+		heap_up(g->heap_index);
+	}
+	if (remote) {
+		sq_self->shared_parked++;
+		g->state = G_WAITING; // before unlocking: a waker may queue it at once
+		UNLOCK_ALL();
+		TSAN_SWITCH(sq_self->tsan_sched);
+		sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
+	} else {
+		sq_self->total_parked++;
+		sq_park();
+	}
+#undef UNLOCK_ALL
+
+	// woken: one case fired; take the other waiters off their channels
+	int64_t fired = atomic_load(&sel.fired);
+	g->sel_timer = NULL;
+	heap_remove(g);
+	for (int64_t i = 0; i < n; i++) {
+		sq_chan *c = cs[i].c;
+		if (!c || i == fired) continue;
+		chan_lock(c);
+		if (cs[i].send) wq_remove(&c->sendq_head, &c->sendq_tail, &ws[i]);
+		else wq_remove(&c->recvq_head, &c->recvq_tail, &ws[i]);
+		chan_unlock(c);
+	}
+	if (fired == n) return n; // the timeout
+	if (cs[fired].send) {
+		if (!ws[fired].ok) sq_panic_cstr("send on closed channel", file, line);
+	} else {
+		cs[fired].ok = ws[fired].ok;
+		if (!ws[fired].ok) memset(cs[fired].elem, 0, (size_t)cs[fired].c->elemsize);
+	}
+	return fired;
 }
 
 // ---------------------------------------------------------------------------
@@ -1447,6 +1564,11 @@ static void fire_timers(void) {
 	int64_t now = sq_nanotime();
 	while (sq_self->ntimers > 0 && sq_self->timer_heap[0]->wake_at <= now) {
 		sq_g *g = heap_pop();
+		if (g->sel_timer) { // a select's timeout: it fires unless a case already did
+			sq_waiter *w = g->sel_timer;
+			if (claim(w)) wake(w);
+			continue;
+		}
 		g->wake = WAKE_TIMER;
 		g->wait_fd = -1;
 		sq_ready(g);

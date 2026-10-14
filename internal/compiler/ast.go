@@ -353,6 +353,24 @@ type RangeStmt struct {
 	ID         int
 }
 
+// SelectStmt is select { case ...: ... }: it waits until one of its channel operations can
+// proceed and runs that case.
+type SelectStmt struct {
+	P     Pos
+	Label string
+	Cases []*CommClause
+}
+
+// CommClause is one case of a select.
+type CommClause struct {
+	P    Pos
+	Comm Stmt // *SendStmt, *ExprStmt (<-c) or *AssignStmt (v[, ok] = or := <-c); nil: default
+	Body []Stmt
+	// set by the checker
+	Recv    *UnaryExpr // the receive, in a receive case
+	Timeout Expr       // case <-time.After(d): d
+}
+
 type DeclStmt struct {
 	Decl *GenDecl
 }
@@ -385,6 +403,7 @@ func (s *BlockStmt) Pos() Pos    { return s.P }
 func (s *IfStmt) Pos() Pos       { return s.P }
 func (s *CaseClause) Pos() Pos   { return s.P }
 func (s *SwitchStmt) Pos() Pos   { return s.P }
+func (s *SelectStmt) Pos() Pos   { return s.P }
 func (s *ForStmt) Pos() Pos      { return s.P }
 func (s *RangeStmt) Pos() Pos    { return s.P }
 func (s *DeclStmt) Pos() Pos     { return s.Decl.P }
@@ -392,6 +411,7 @@ func (s *LabeledStmt) Pos() Pos  { return s.P }
 func (s *EmptyStmt) Pos() Pos    { return s.P }
 func (s *ArenaStmt) Pos() Pos    { return s.P }
 func (*ExprStmt) stmt()          {}
+func (*SelectStmt) stmt()        {}
 func (*SendStmt) stmt()          {}
 func (*IncDecStmt) stmt()        {}
 func (*AssignStmt) stmt()        {}

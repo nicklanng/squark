@@ -43,6 +43,7 @@ type Checker struct {
 	scope     *Scope
 	depth     int
 	breakable []Stmt
+	afterCall *CallExpr // a select case's time.After(d), the one place it may appear
 	labels    map[string]Pos // labels seen in the current function
 	loopDepth int
 	iota      int64 // -1 when not in a const decl

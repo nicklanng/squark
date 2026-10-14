@@ -287,6 +287,9 @@ func (g *gen) unaryExpr(e *UnaryExpr) string {
 		}
 		return "(&" + g.expr(e.X) + ")"
 	case ARROW:
+		if r, ok := g.selRecv[e]; ok {
+			return r[0]
+		}
 		v := g.tmp()
 		return fmt.Sprintf("({ %s %s; sq_chan_recv(%s, &%s); %s; })", g.ctype(e.T), v, g.expr(e.X), v, v)
 	case SUB:
