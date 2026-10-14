@@ -1,0 +1,9 @@
+package main
+
+func main() {
+	a := [4]int{-1: 5} // ERROR "index -1 must be non-negative integer constant"
+	b := [...]int{-2: 1, 3} // ERROR "index -2 must be non-negative integer constant"
+	c := []int{-3: 1} // ERROR "index -3 must be non-negative integer constant"
+	d := [4]int{2: 1, 0: 2}
+	println(len(a), len(b), len(c), d[0])
+}

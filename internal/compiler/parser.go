@@ -8,6 +8,7 @@ import (
 type parser struct {
 	lx      *lexer
 	tok     lexToken
+	ahead   *lexToken // one token of lookahead (see peek)
 	errs    ErrorList
 	exprLev int // < 0: in control clause (composite literals not allowed)
 }
@@ -34,7 +35,22 @@ func ParseFile(path string, src []byte) (f *File, err error) {
 	return f, nil
 }
 
-func (p *parser) next() { p.tok = p.lx.Next() }
+func (p *parser) next() {
+	if p.ahead != nil {
+		p.tok, p.ahead = *p.ahead, nil
+		return
+	}
+	p.tok = p.lx.Next()
+}
+
+// peek returns the token after p.tok.
+func (p *parser) peek() lexToken {
+	if p.ahead == nil {
+		t := p.lx.Next()
+		p.ahead = &t
+	}
+	return *p.ahead
+}
 
 func (p *parser) errorf(pos Pos, format string, args ...any) {
 	p.errs = append(p.errs, &Error{pos, fmt.Sprintf(format, args...)})
@@ -100,6 +116,24 @@ func (p *parser) file(path string) *File {
 		p.semi()
 	}
 	for p.tok.tok != EOF {
+		if p.tok.tok == IDENT {
+			switch p.tok.lit {
+			case "budget", "link", "cflags", "ldflags", "pool":
+				d := &Directive{Name: p.tok.lit, P: p.tok.pos}
+				p.next()
+				if d.Name == "pool" {
+					// pool pkg.task N: resize a task's pool for this program
+					d.Target = p.ident().Name
+					if p.got(PERIOD) {
+						d.Target += "." + p.ident().Name
+					}
+				}
+				d.Value = p.sizeExpr()
+				f.Directives = append(f.Directives, d)
+				p.semi()
+				continue
+			}
+		}
 		f.Decls = append(f.Decls, p.topDecl())
 	}
 	return f
@@ -115,12 +149,75 @@ func (p *parser) importSpec() *ImportSpec {
 	return s
 }
 
+// sizeExpr parses a constant expression in a clause (pool N, stack N, arena x N) where a
+// following '{' must not be taken as a composite literal.
+func (p *parser) sizeExpr() Expr {
+	old := p.exprLev
+	p.exprLev = -1
+	x := p.binaryRest(p.unary(), 1)
+	p.exprLev = old
+	return x
+}
+
+// clauses parses trailing `pool N` / `stack N` clauses after a signature.
+func (p *parser) clauses(d *FuncDecl) {
+	for p.tok.tok == IDENT && (p.tok.lit == "pool" || p.tok.lit == "stack") {
+		name := p.tok.lit
+		pos := p.tok.pos
+		p.next()
+		x := p.sizeExpr()
+		switch name {
+		case "pool":
+			if d.Kind != KindTask {
+				p.errorf(pos, "only tasks have a pool size")
+			}
+			d.Pool = x
+		case "stack":
+			d.Stack = x
+		}
+	}
+}
+
 func (p *parser) topDecl() any {
 	pragmas := p.tok.pragmas
 	switch p.tok.tok {
 	case FUNC:
 		d := p.funcDecl()
 		d.Pragmas = pragmas
+		p.semi()
+		return d
+	case TASK:
+		d := p.funcDecl()
+		d.Pragmas = pragmas
+		p.semi()
+		return d
+	case EXTERN:
+		pos := p.tok.pos
+		p.next()
+		sym := ""
+		if p.tok.tok == STRING {
+			sym = p.tok.lit
+			p.next()
+		}
+		if p.tok.tok != FUNC {
+			p.errorf(p.tok.pos, "expected func after extern")
+			panic(bailout{})
+		}
+		d := p.funcDecl()
+		d.Kind = KindExtern
+		d.ExternSym = sym
+		d.P = pos
+		d.Pragmas = pragmas
+		if d.Body != nil {
+			p.errorf(pos, "extern function %s must not have a body", d.Name.Name)
+		}
+		p.semi()
+		return d
+	case ARENA:
+		pos := p.tok.pos
+		p.next()
+		d := &ArenaDecl{P: pos, Name: p.ident()}
+		d.Size = p.sizeExpr()
 		p.semi()
 		return d
 	case VAR, CONST, TYPE:
@@ -134,17 +231,28 @@ func (p *parser) topDecl() any {
 }
 
 func (p *parser) funcDecl() *FuncDecl {
-	d := &FuncDecl{P: p.expect(FUNC)}
+	d := &FuncDecl{P: p.tok.pos}
+	if p.tok.tok == TASK {
+		d.Kind = KindTask
+		p.next()
+	} else {
+		p.expect(FUNC)
+	}
 	if p.tok.tok == LPAREN {
 		p.next()
 		f := &Field{}
-		f.Names = []*Ident{p.ident()}
+		if p.tok.tok == MUL || (p.tok.tok == IDENT && p.peek().tok == RPAREN) {
+			f.Names = []*Ident{{Name: "_", P: p.tok.pos}} // unnamed receiver: func (T) M()
+		} else {
+			f.Names = []*Ident{p.ident()}
+		}
 		f.Type = p.typ()
 		p.expect(RPAREN)
 		d.Recv = f
 	}
 	d.Name = p.ident()
 	d.Type = p.signature(d.P)
+	p.clauses(d)
 	if p.tok.tok == LBRACE {
 		d.Body = p.block()
 	}
@@ -156,15 +264,59 @@ func (p *parser) signature(pos Pos) *FuncType {
 	ft.Params = p.params()
 	if p.tok.tok == LPAREN {
 		ft.Results = p.params()
-	} else if p.startsType() {
+	} else if p.startsType() && !p.atClause() {
 		ft.Results = []*Field{{Type: p.typ()}}
+	}
+	// result provenance: `from a, b` or `static`
+	if len(ft.Results) == 0 && p.tok.tok == IDENT && (p.tok.lit == "from" || p.tok.lit == "static") {
+		p.errorf(p.tok.pos, "%s must follow results: it says where the results point", p.tok.lit)
+		panic(bailout{})
+	}
+	if len(ft.Results) > 0 && p.tok.tok == IDENT {
+		switch p.tok.lit {
+		case "from":
+			p.next()
+			ft.From = append(ft.From, p.ident())
+			for p.got(COMMA) {
+				ft.From = append(ft.From, p.ident())
+			}
+		case "static":
+			p.next()
+			ft.ResultStatic = true
+		}
 	}
 	return ft
 }
 
+// atClause reports whether the next tokens start a clause after the parameters (`pool N`, `stack N`,
+// `from p` or `static`) rather than a result type that happens to have one of those names.
+func (p *parser) atClause() bool {
+	if p.tok.tok != IDENT {
+		return false
+	}
+	switch p.tok.lit {
+	case "pool", "stack":
+		switch t := p.peek(); t.tok {
+		case INT, LPAREN:
+			return true
+		case IDENT:
+			return !isClauseWord(t.lit)
+		}
+	case "from":
+		return p.peek().tok == IDENT
+	case "static":
+		return true
+	}
+	return false
+}
+
+func isClauseWord(s string) bool {
+	return s == "pool" || s == "stack" || s == "from" || s == "static"
+}
+
 func (p *parser) startsType() bool {
 	switch p.tok.tok {
-	case IDENT, LBRACK, MUL, FUNC, STRUCT, CHAN, MAP, LPAREN:
+	case IDENT, LBRACK, MUL, FUNC, STRUCT, CHAN, MAP, LPAREN, ARENA:
 		return true
 	}
 	return false
@@ -177,6 +329,8 @@ func (p *parser) params() []*Field {
 		name     *Ident
 		typ      Expr
 		variadic bool
+		static   bool
+		into     *Ident
 	}
 	var list []entry
 	for p.tok.tok != RPAREN {
@@ -202,6 +356,15 @@ func (p *parser) params() []*Field {
 			default:
 				e.name = id
 				e.typ = p.typ()
+				// `name static T`: the qualifier parses as a type name first
+				if st, ok := e.typ.(*Ident); ok && st.Name == "static" && p.startsType() {
+					e.static = true
+					e.typ = p.typ()
+				}
+				if p.tok.tok == IDENT && p.tok.lit == "into" {
+					p.next()
+					e.into = p.ident()
+				}
 			}
 		} else {
 			e.typ = p.typ()
@@ -238,7 +401,7 @@ func (p *parser) params() []*Field {
 			continue
 		}
 		pending = append(pending, e.name)
-		fields = append(fields, &Field{Names: pending, Type: e.typ, Variadic: e.variadic})
+		fields = append(fields, &Field{Names: pending, Type: e.typ, Variadic: e.variadic, Static: e.static, Into: e.into})
 		pending = nil
 	}
 	if len(pending) > 0 {
@@ -312,6 +475,13 @@ func (p *parser) typ() Expr {
 		if p.got(RBRACK) {
 			return &ArrayType{P: pos, Elem: p.typ()}
 		}
+		if p.got(DOTDOT) {
+			p.exprLev++
+			n := p.expr()
+			p.exprLev--
+			p.expect(RBRACK)
+			return &VecTypeExpr{P: pos, Len: n, Elem: p.typ()}
+		}
 		if p.tok.tok == ELLIPSIS {
 			epos := p.tok.pos
 			p.next()
@@ -328,13 +498,26 @@ func (p *parser) typ() Expr {
 		return &StarExpr{P: pos, X: p.typ()}
 	case CHAN:
 		p.next()
-		return &ChanType{P: pos, Elem: p.typ()}
+		ct := &ChanType{P: pos, Elem: p.typ()}
+		if p.tok.tok == IDENT && p.tok.lit == "cap" {
+			p.next()
+			ct.Cap = p.sizeExpr()
+		}
+		return ct
+	case ARENA:
+		p.next()
+		return &ArenaTypeExpr{P: pos}
 	case MAP:
 		p.next()
 		p.expect(LBRACK)
 		k := p.typ()
 		p.expect(RBRACK)
-		return &MapType{P: pos, Key: k, Value: p.typ()}
+		mt := &MapType{P: pos, Key: k, Value: p.typ()}
+		if p.tok.tok == IDENT && p.tok.lit == "cap" {
+			p.next()
+			mt.Cap = p.sizeExpr()
+		}
+		return mt
 	case FUNC:
 		p.next()
 		return p.signature(pos)
@@ -401,6 +584,12 @@ func (p *parser) stmt() Stmt {
 		return p.block()
 	case IF:
 		return p.ifStmt()
+	case ARENA:
+		p.next()
+		s := &ArenaStmt{P: pos, Name: p.ident()}
+		s.Size = p.sizeExpr()
+		s.Body = p.block()
+		return s
 	case FOR:
 		return p.forStmt("")
 	case SWITCH:
@@ -451,6 +640,11 @@ func (p *parser) stmt() Stmt {
 			return &EmptyStmt{P: pos}
 		}
 		x := p.binaryRest(p.postfix(p.operandRest(id)), 1)
+		if p.tok.tok == IN {
+			ipos := p.tok.pos
+			p.next()
+			x = &InExpr{X: x, Arena: p.unary(), P: ipos}
+		}
 		return p.simpleStmtRest(x)
 	}
 	return p.simpleStmt()
@@ -665,7 +859,14 @@ func (p *parser) exprList() []Expr {
 }
 
 func (p *parser) expr() Expr {
-	return p.binaryRest(p.unary(), 1)
+	x := p.binaryRest(p.unary(), 1)
+	if p.tok.tok == IN {
+		pos := p.tok.pos
+		p.next()
+		a := p.unary()
+		x = &InExpr{X: x, Arena: a, P: pos}
+	}
+	return x
 }
 
 func (p *parser) binaryRest(x Expr, prec1 int) Expr {
@@ -693,6 +894,9 @@ func (p *parser) unary() Expr {
 	case MUL:
 		p.next()
 		return &StarExpr{P: pos, X: p.unary()}
+	case TRY:
+		p.next()
+		return &TryExpr{P: pos, X: p.unary()}
 	}
 	return p.postfix(p.operand())
 }
@@ -845,6 +1049,8 @@ func exprString(x Expr) string {
 		return "*" + exprString(e.X)
 	case *ParenExpr:
 		return "(" + exprString(e.X) + ")"
+	case *InExpr:
+		return exprString(e.X) + " in " + exprString(e.Arena)
 	case *IndexExpr:
 		return exprString(e.X) + "[" + exprString(e.Index) + "]"
 	case *SliceExpr:

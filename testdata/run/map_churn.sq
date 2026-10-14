@@ -1,0 +1,107 @@
+package main
+
+// maps: deleting during range visits every remaining entry exactly once, and heavy insert/delete
+// churn (tombstones, compaction) agrees with a simple reference model
+
+var m map[int]int cap 1000
+
+var small map[int]int cap 48
+
+// reference model for small: keys 0..199
+var present [200]bool
+var value [200]int
+
+var seed uint64 = 12345
+
+func rnd(n int) int {
+	seed = seed*6364136223846793005 + 1442695040888963407
+	return int((seed >> 33) % uint64(n))
+}
+
+var names map[string]int cap 8
+
+func main() {
+	for i := range 1000 {
+		m[i] = i
+	}
+	visited := 0
+	for k := range m {
+		visited++
+		if k%2 == 0 {
+			delete(m, k)
+		}
+	}
+	println("delete evens:", visited, len(m))
+	sum := 0
+	for k, v := range m {
+		if k != v || k%2 == 0 {
+			println("bad entry", k, v)
+		}
+		sum += k
+	}
+	println("odd sum:", sum)
+
+	// deleting entries other than the current one: those not reached yet are not produced
+	seen := 0
+	for k := range m {
+		seen++
+		delete(m, k)
+		delete(m, k+2) // a later odd key, if still there
+	}
+	println("delete ahead:", seen > 0, len(m))
+
+	visited = 0
+	for i := range 1000 {
+		m[i] = i
+	}
+	for k := range m {
+		visited++
+		delete(m, k)
+	}
+	println("delete all:", visited, len(m))
+
+	// churn against the reference model
+	for step := range 200000 {
+		k := rnd(200)
+		switch rnd(3) {
+		case 0:
+			if present[k] || len(small) < 48 {
+				small[k] = step
+				present[k] = true
+				value[k] = step
+			}
+		case 1:
+			delete(small, k)
+			present[k] = false
+		default:
+			v, ok := small[k]
+			if ok != present[k] || ok && v != value[k] {
+				println("mismatch at step", step, "key", k)
+				return
+			}
+		}
+	}
+	n := 0
+	for k := range small {
+		if !present[k] {
+			println("extra key", k)
+		}
+		n++
+	}
+	count := 0
+	for k := range 200 {
+		if present[k] {
+			count++
+		}
+	}
+	println("churn:", n == count, len(small) == count)
+
+	// string keys
+	names["a"] = 1
+	names["b"] = 2
+	names["c"] = 3
+	delete(names, "b")
+	names["d"] = 4
+	_, hasB := names["b"]
+	println("strings:", len(names), names["a"], hasB, names["c"], names["d"])
+}

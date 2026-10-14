@@ -1,0 +1,9 @@
+package main
+
+func main() {
+	var v [..2]int
+	v.Push(1)
+	v.Push(2)
+	println("full")
+	v.Push(3)
+}

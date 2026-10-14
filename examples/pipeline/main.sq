@@ -1,0 +1,124 @@
+// pipeline: a worker pool fed by channels. Channel storage is declared at package level, so it
+// lives in static memory and any goroutine may use it.
+package main
+
+import "time"
+
+type Job struct {
+	ID    int
+	Input int
+}
+
+type Result struct {
+	ID     int
+	Output int
+	Worker int
+}
+
+var jobs chan Job cap 16
+var results chan Result cap 16
+var done chan bool cap 0
+
+// collatz counts the steps to reach 1.
+func collatz(n int) int {
+	steps := 0
+	for n != 1 {
+		if n%2 == 0 {
+			n /= 2
+		} else {
+			n = 3*n + 1
+		}
+		steps++
+	}
+	return steps
+}
+
+task worker(id int) pool 8 {
+	for j := range jobs {
+		results <- Result{ID: j.ID, Output: collatz(j.Input), Worker: id}
+	}
+}
+
+task producer(n int) pool 1 {
+	defer close(jobs)
+	for i := 1; i <= n; i++ {
+		jobs <- Job{ID: i, Input: i * 7919}
+	}
+}
+
+task collector(n int) pool 1 {
+	best := Result{}
+	perWorker := [4]int{}
+	for i := 0; i < n; i++ {
+		r := <-results
+		perWorker[r.Worker]++
+		if r.Output > best.Output {
+			best = r
+		}
+	}
+	println("longest chain: job", best.ID, "steps", best.Output)
+	total := 0
+	for _, c := range perWorker {
+		total += c
+	}
+	println("results collected:", total)
+	done <- true
+}
+
+task ticker() pool 1 {
+	for i := 0; i < 3; i++ {
+		time.Sleep(2 * time.Millisecond)
+		println("tick", i)
+	}
+}
+
+func classify(n int) string {
+	switch {
+	case n < 0:
+		return "negative"
+	case n == 0:
+		return "zero"
+	case n%2 == 0:
+		return "even"
+	}
+	return "odd"
+}
+
+func divmod(a, b int) (q, r int) {
+	q = a / b
+	r = a % b
+	return
+}
+
+func main() {
+	start := time.Now()
+	go ticker()
+	for w := 0; w < 4; w++ {
+		go worker(w)
+	}
+	go producer(1000)
+	go collector(1000)
+	<-done
+
+	q, r := divmod(17, 5)
+	println("17/5 =", q, "rem", r, classify(-3), classify(0), classify(4), classify(7))
+
+	a := Job{ID: 1, Input: 2}
+	b := Job{ID: 1, Input: 2}
+	println("struct equality:", a == b, a != Job{ID: 2})
+
+outer:
+	for i := 0; i < 5; i++ {
+		for j := 0; j < 5; j++ {
+			if i*j == 6 {
+				println("found", i, j)
+				break outer
+			}
+			if j > i {
+				continue outer
+			}
+		}
+	}
+	time.Sleep(10 * time.Millisecond)
+	println("elapsed > 10ms:", time.Since(start) > 10*time.Millisecond)
+}

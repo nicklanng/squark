@@ -1,0 +1,11 @@
+package main
+
+var g *int
+var gv [..4]int
+
+func keep(p *int) *[..4]int { g = p; return &gv }
+
+func main() {
+	x := 1234
+	(*keep(&x)).Clear() // ERROR "cannot escape into static memory (keep keeps argument 1 in static memory)"
+}

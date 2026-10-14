@@ -63,13 +63,32 @@ func (c *Checker) expr1(x Expr, hint Type) {
 	case *BasicLit:
 		switch e.Kind {
 		case INT:
-			v := constant.MakeFromLiteral(e.Lit, gotoken.INT, 0)
+			lit, mult := e.Lit, int64(1)
+			switch lit[len(lit)-1] {
+			case 'K':
+				mult = 1 << 10
+			case 'M':
+				mult = 1 << 20
+			case 'G':
+				mult = 1 << 30
+			}
+			if mult > 1 {
+				lit = lit[:len(lit)-1]
+			}
+			v := constant.MakeFromLiteral(lit, gotoken.INT, 0)
+			if mult > 1 {
+				v = constant.BinaryOp(v, gotoken.MUL, constant.MakeInt64(mult))
+			}
 			if v.Kind() == constant.Unknown {
 				c.errorf(e.P, "invalid integer literal %s", e.Lit)
 			}
 			e.T, e.Const = tUntypedInt, v
 		case FLOAT:
-			e.T, e.Const = tUntypedFloat, constant.MakeFromLiteral(e.Lit, gotoken.FLOAT, 0)
+			v := constant.MakeFromLiteral(e.Lit, gotoken.FLOAT, 0)
+			if v.Kind() == constant.Unknown {
+				c.errorf(e.P, "invalid floating-point literal %s", e.Lit)
+			}
+			e.T, e.Const = tUntypedFloat, v
 		case CHAR:
 			r := []rune(e.Lit)
 			e.T, e.Const = tUntypedRune, constant.MakeInt64(int64(r[0]))
@@ -120,6 +139,10 @@ func (c *Checker) expr1(x Expr, hint Type) {
 	case *KeyValueExpr:
 		c.errorf(e.Pos(), "unexpected key:value expression")
 		c.invalid(e)
+	case *TryExpr:
+		c.tryExpr(e)
+	case *InExpr:
+		c.inExpr(e, hint)
 	case *ArrayType, *MapType, *ChanType, *StructType, *FuncType:
 		t := c.typExpr(x)
 		x.info().T = t
@@ -127,6 +150,156 @@ func (c *Checker) expr1(x Expr, hint Type) {
 	default:
 		c.errorf(x.Pos(), "unexpected expression")
 		c.invalid(x)
+	}
+}
+
+// toView turns a storage expression ([..N]T, map ... cap N, chan ... cap N) into its view
+// ([]T, map[K]V, chan T). Storage must be addressable: the view points into it.
+func (c *Checker) toView(x Expr) bool {
+	xi := x.info()
+	v := viewOf(xi.T)
+	if v == nil || xi.View != nil {
+		return false
+	}
+	if xi.Mode != ModeVar {
+		c.errorf(x.Pos(), "%s (%s) must be stored in a variable to be used as a %s", exprString(x), xi.T, v)
+		return false
+	}
+	xi.View = xi.T
+	xi.T = v
+	xi.Mode = ModeValue
+	if p, ok := x.(*ParenExpr); ok {
+		c.toView(p.X)
+	}
+	return true
+}
+
+// isStorageCopy reports whether t is storage that must not be copied (maps and channels hold
+// pointers into themselves).
+func isStorageCopy(t Type) bool {
+	switch t.Underlying().(type) {
+	case *MapStore, *ChanStore:
+		return true
+	}
+	return false
+}
+
+// storageIn returns the map or channel storage that t holds by value inside a struct field, array
+// or vector element, or nil. Once used, that storage points into itself, so a copy would alias it.
+func storageIn(t Type) Type {
+	return storageInSeen(t, map[Type]bool{})
+}
+
+func storageInSeen(t Type, seen map[Type]bool) Type {
+	if seen[t] {
+		return nil
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *MapStore, *ChanStore:
+		return t
+	case *Array:
+		return storageInSeen(u.Elem, seen)
+	case *VecType:
+		return storageInSeen(u.Elem, seen)
+	case *Struct:
+		for _, f := range u.Fields {
+			if s := storageInSeen(f.Type, seen); s != nil {
+				return s
+			}
+		}
+	}
+	return nil
+}
+
+// freshValue reports whether x builds a new value rather than reading an existing one. Storage in a
+// new value has not been used yet, so copying it is safe.
+func freshValue(x Expr) bool {
+	switch x := unparen(x).(type) {
+	case *CompositeLit:
+		return true
+	case *CallExpr:
+		return x.Builtin == "" && !x.Conversion
+	}
+	return false
+}
+
+// checkNestedStorageCopy reports copying x (of type t, a struct or array holding map or channel
+// storage) out of an existing variable. Top-level storage is handled by isStorageCopy.
+func (c *Checker) checkNestedStorageCopy(x Expr, t Type, into string) bool {
+	if isStorageCopy(t) || freshValue(x) {
+		return true
+	}
+	if s := storageIn(t); s != nil {
+		c.errorf(x.Pos(), "cannot copy %s%s: %s contains %s storage; use a pointer (*%s) instead", exprString(x), into, t, s, t)
+		return false
+	}
+	return true
+}
+
+// inExpr checks `x in a`: operations in x that need memory allocate from arena a.
+func (c *Checker) inExpr(e *InExpr, hint Type) {
+	if c.valueExpr(e.Arena, nil) {
+		if _, ok := e.Arena.info().T.Underlying().(*ArenaType); !ok {
+			c.errorf(e.Arena.Pos(), "%s is not an arena (type %s)", exprString(e.Arena), e.Arena.info().T)
+		}
+	}
+	saved := c.allocArena
+	c.allocArena = e.Arena
+	c.exprHint(e.X, hint)
+	c.allocArena = saved
+	e.ExprInfo = *e.X.info()
+	if e.Mode == ModeVar {
+		e.Mode = ModeValue
+	}
+}
+
+// tryExpr checks `try call`: the call's last result must be an error, which is returned from the
+// enclosing function (whose last result must also be error) when non-nil.
+func (c *Checker) tryExpr(e *TryExpr) {
+	c.expr(e.X)
+	xi := e.X.info()
+	if xi.Mode == ModeInvalid {
+		c.invalid(e)
+		return
+	}
+	if _, ok := unparen(e.X).(*CallExpr); !ok {
+		c.errorf(e.P, "try needs a function call")
+		c.invalid(e)
+		return
+	}
+	var results []Type
+	switch t := xi.T.(type) {
+	case *Tuple:
+		results = t.Types
+	default:
+		if xi.Mode != ModeNoValue {
+			results = []Type{t}
+		}
+	}
+	if len(results) == 0 {
+		c.errorf(e.P, "try needs a call whose last result is an error; %s returns nothing", exprString(e.X))
+		c.invalid(e)
+		return
+	}
+	if _, ok := results[len(results)-1].Underlying().(*ErrorType); !ok {
+		c.errorf(e.P, "try needs a call whose last result is an error; %s returns %s", exprString(e.X), results[len(results)-1])
+		c.invalid(e)
+		return
+	}
+	if c.sig == nil || len(c.sig.Results) == 0 {
+		c.errorf(e.P, "try can only be used in a function whose last result is error")
+	} else if _, ok := c.sig.Results[len(c.sig.Results)-1].Type.Underlying().(*ErrorType); !ok {
+		c.errorf(e.P, "try can only be used in a function whose last result is error")
+	}
+	rest := results[:len(results)-1]
+	switch len(rest) {
+	case 0:
+		e.T, e.Mode = tInvalid, ModeNoValue
+	case 1:
+		e.T, e.Mode = rest[0], ModeValue
+	default:
+		e.T, e.Mode = &Tuple{Types: rest}, ModeValue
 	}
 }
 
@@ -210,8 +383,15 @@ func (c *Checker) assignable(x Expr, t Type, context string) bool {
 	if isUntyped(xi.T) {
 		return c.convertUntyped(x, t, context)
 	}
+	if v := viewOf(xi.T); v != nil && assignableType(v, t) {
+		return c.toView(x)
+	}
 	if assignableType(xi.T, t) {
-		return true
+		if isStorageCopy(t) {
+			c.errorf(x.Pos(), "cannot copy %s (%s): pass or store a view (%s) instead", exprString(x), xi.T, viewOf(t))
+			return false
+		}
+		return c.checkNestedStorageCopy(x, t, "")
 	}
 	c.errorf(x.Pos(), "cannot use %s (type %s) as type %s in %s", exprString(x), xi.T, t, context)
 	return false
@@ -234,7 +414,7 @@ func assignableType(v, t Type) bool {
 
 func nilable(t Type) bool {
 	switch u := t.Underlying().(type) {
-	case *Pointer, *Slice, *Map, *Chan, *Signature, *ErrorType:
+	case *Pointer, *Slice, *Map, *Chan, *Signature, *ErrorType, *ArenaType:
 		return true
 	case *Basic:
 		return u.Kind == Rawptr
@@ -281,6 +461,34 @@ func (c *Checker) convertUntyped(x Expr, t Type, context string) bool {
 		setType(x, t)
 		return true
 	}
+	// untyped non-constant number: a shift of an untyped constant by a variable (1 << n), maybe
+	// inside arithmetic; the shifted constant takes the context's type
+	switch u := unparen(x).(type) {
+	case *BinaryExpr:
+		if u.Op == SHL || u.Op == SHR {
+			if !isInteger(t) {
+				c.errorf(x.Pos(), "invalid operation: shifted operand %s (type %s) must be integer", exprString(u.X), t)
+				return false
+			}
+			if !c.convertUntyped(u.X, t, context) {
+				return false
+			}
+		} else if !isComparison(u.Op) {
+			for _, o := range []Expr{u.X, u.Y} {
+				if isUntyped(o.info().T) && !c.convertUntyped(o, t, context) {
+					return false
+				}
+			}
+		}
+		setType(x, t)
+		return true
+	case *UnaryExpr:
+		if isUntyped(u.X.info().T) && !c.convertUntyped(u.X, t, context) {
+			return false
+		}
+		setType(x, t)
+		return true
+	}
 	if !isUntyped(t) && basicKind(xi.T) == basicKind(defaultType(xi.T)) {
 		setType(x, t)
 		return true
@@ -315,7 +523,10 @@ func (c *Checker) defaultUntyped(x Expr) {
 	if xi.Mode == ModeInvalid || !isUntyped(xi.T) || isNilType(xi.T) {
 		return
 	}
-	c.convertUntyped(x, defaultType(xi.T), "assignment")
+	d := defaultType(xi.T)
+	if !c.convertUntyped(x, d, "assignment") {
+		setType(x, d) // already reported; don't let the error spread to uses of a variable
+	}
 }
 
 // ---- composite literals ----
@@ -348,6 +559,10 @@ func (c *Checker) compositeLit(e *CompositeLit, hint Type) {
 						if v, ok := constant.Int64Val(constant.ToInt(kv.Key.info().Const)); ok {
 							idx = v
 						}
+					}
+					if idx < 0 { // reported by indexedElts, which skips the element the same way
+						idx = 0
+						continue
 					}
 				}
 				idx++
@@ -429,6 +644,8 @@ func (c *Checker) compositeLit(e *CompositeLit, hint Type) {
 		c.indexedElts(e.Elts, u.Elem, u.Len)
 	case *Slice:
 		c.indexedElts(e.Elts, u.Elem, -1)
+	case *VecType:
+		c.indexedElts(e.Elts, u.Elem, u.Len)
 	case *Map:
 		c.errorf(e.P, "map literals are not supported; use make(map[K]V, capacity) and assign entries")
 	default:
@@ -455,6 +672,13 @@ func (c *Checker) indexedElts(elts []Expr, elem Type, length int64) int64 {
 			}
 			v = kv.Value
 			kv.T = elem
+			if idx < 0 {
+				c.errorf(kv.Key.Pos(), "index %s must be non-negative integer constant", exprString(kv.Key))
+				c.exprHint(v, elem)
+				c.assignable(v, elem, "array or slice literal")
+				idx = 0
+				continue
+			}
 		}
 		if length >= 0 && idx >= length {
 			c.errorf(v.Pos(), "index %d out of bounds [0:%d]", idx, length)
@@ -562,6 +786,47 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 		}
 		return
 	}
+	if vt, ok := t.Underlying().(*VecType); ok && isVecMethod(name) {
+		var sig *Signature
+		switch name {
+		case "Push":
+			sig = &Signature{Params: []*Var{{Type: vt.Elem}}}
+		case "TryPush":
+			sig = &Signature{Params: []*Var{{Type: vt.Elem}}, Results: []*Var{{Type: tBool}}}
+		case "Pop":
+			sig = &Signature{Results: []*Var{{Type: vt.Elem}}}
+		case "Clear":
+			sig = &Signature{}
+		default:
+			c.errorf(e.Sel.P, "%s.%s undefined (vectors have Push, TryPush, Pop and Clear)", exprString(e.X), name)
+			c.invalid(e)
+			return
+		}
+		if xi.Mode != ModeVar {
+			c.errorf(e.Pos(), "cannot call %s on %s (not addressable)", name, exprString(e.X))
+		}
+		e.Kind = SelBuiltinMethod
+		e.T, e.Mode = sig, ModeValue
+		if !callee {
+			c.errorf(e.Sel.P, "method values are not supported; call %s(...) directly", exprString(e))
+		}
+		return
+	}
+	if _, ok := t.Underlying().(*ArenaType); ok {
+		switch name {
+		case "Used", "Left", "Cap":
+			e.Kind = SelBuiltinMethod
+			e.T = &Signature{Results: []*Var{{Type: tInt}}}
+			e.Mode = ModeValue
+			if !callee {
+				c.errorf(e.Sel.P, "method values are not supported; call %s() directly", exprString(e))
+			}
+			return
+		}
+		c.errorf(e.Sel.P, "%s.%s undefined (type arena has methods Used, Left and Cap)", exprString(e.X), name)
+		c.invalid(e)
+		return
+	}
 	st, named, viaPtr := lookupFieldOrMethod(t)
 	if st != nil {
 		for i, f := range st.Fields {
@@ -612,8 +877,16 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 			return
 		}
 	}
-	c.errorf(e.Sel.P, "%s.%s undefined (type %s has no field or method %s)", exprString(e.X), name, t, name)
+	if _, ok := t.Underlying().(*VecType); ok {
+		c.errorf(e.Sel.P, "%s.%s undefined (vectors have Push, TryPush, Pop and Clear)", exprString(e.X), name)
+	} else {
+		c.errorf(e.Sel.P, "%s.%s undefined (type %s has no field or method %s)", exprString(e.X), name, t, name)
+	}
 	c.invalid(e)
+}
+
+func isVecMethod(name string) bool {
+	return name == "Push" || name == "TryPush" || name == "Pop" || name == "Clear"
 }
 
 // ---- index & slice ----
@@ -649,6 +922,7 @@ func (c *Checker) index(e *IndexExpr) {
 		c.invalid(e)
 		return
 	}
+	c.toView(e.X)
 	xi := e.X.info()
 	t := xi.T.Underlying()
 	if p, ok := t.(*Pointer); ok {
@@ -679,8 +953,8 @@ func (c *Checker) index(e *IndexExpr) {
 			n = int64(len(constant.StringVal(xi.Const)))
 		}
 		c.checkIndex(e.Index, n)
-		if xi.Const != nil && e.Index.info().Const != nil {
-			i, _ := constant.Int64Val(e.Index.info().Const)
+		if xi.Const != nil && e.Index.info().Const != nil && isInteger(e.Index.info().T) {
+			i, _ := constant.Int64Val(constant.ToInt(e.Index.info().Const))
 			if i >= 0 && i < n {
 				e.Const = constant.MakeInt64(int64(constant.StringVal(xi.Const)[i]))
 				e.T, e.Mode = tUint8, ModeConst
@@ -710,6 +984,9 @@ func (c *Checker) sliceExpr(e *SliceExpr) {
 	if !c.valueExpr(e.X, nil) {
 		c.invalid(e)
 		return
+	}
+	if _, ok := e.X.info().T.Underlying().(*VecType); ok {
+		c.toView(e.X)
 	}
 	xi := e.X.info()
 	length := int64(-1)
@@ -814,6 +1091,9 @@ func (c *Checker) unary(e *UnaryExpr, hint Type) {
 	if !c.valueExpr(e.X, nil) {
 		c.invalid(e)
 		return
+	}
+	if e.Op == ARROW {
+		c.toView(e.X)
 	}
 	xi := e.X.info()
 	if e.Op == ARROW {
@@ -941,9 +1221,12 @@ func (c *Checker) binary(e *BinaryExpr) {
 	case ADD:
 		ok = isNumeric(t) || isString(t)
 		if ok && isString(t) && (x.Const == nil || y.Const == nil) {
-			c.errorf(e.P, "string concatenation would allocate on the heap; build the string in a buffer (e.g. bytes.Buffer) instead")
-			c.invalid(e)
-			return
+			if c.allocArena == nil {
+				c.errorf(e.P, "string concatenation needs memory: allocate it in an arena (%s in a), or build the string in a buffer", exprString(e))
+				c.invalid(e)
+				return
+			}
+			e.InArena = c.allocArena
 		}
 	case SUB, MUL, QUO:
 		ok = isNumeric(t)
@@ -957,7 +1240,7 @@ func (c *Checker) binary(e *BinaryExpr) {
 		c.invalid(e)
 		return
 	}
-	if (e.Op == QUO || e.Op == REM) && y.Const != nil && isInteger(t) && constant.Sign(y.Const) == 0 {
+	if (e.Op == QUO || e.Op == REM) && y.Const != nil && constant.Sign(y.Const) == 0 {
 		c.errorf(e.P, "invalid operation: division by zero")
 		c.invalid(e)
 		return
@@ -1015,6 +1298,8 @@ func (c *Checker) comparison(e *BinaryExpr) {
 		_, isSlice := t.Underlying().(*Slice)
 		_, isMap := t.Underlying().(*Map)
 		_, isFunc := t.Underlying().(*Signature)
+		_, isArena := t.Underlying().(*ArenaType)
+		isFunc = isFunc || isArena // like functions, arenas compare only with nil
 		if (isSlice || isMap || isFunc) && !isNilType(x.T) && !isNilType(y.T) && !(isNilLit(e.X) || isNilLit(e.Y)) {
 			c.errorf(e.P, "invalid operation: %s (%s can only be compared to nil)", exprString(e), t)
 			c.invalid(e)
@@ -1032,7 +1317,7 @@ func (c *Checker) comparison(e *BinaryExpr) {
 			return
 		}
 	}
-	e.T, e.Mode = tBool, ModeValue
+	e.T, e.Mode = tUntypedBool, ModeValue // as in Go: x > 1 can be assigned to a named bool type
 	if x.Const != nil && y.Const != nil {
 		e.Const = constant.MakeBool(constant.Compare(x.Const, goOps[e.Op], y.Const))
 		e.T, e.Mode = tUntypedBool, ModeConst
@@ -1071,8 +1356,18 @@ func (c *Checker) shift(e *BinaryExpr) {
 		c.convertUntyped(e.Y, tUint, "shift count")
 	}
 	if x.Const != nil && isUntyped(x.T) && y.Const == nil {
-		// untyped constant shifted by a variable amount: use int
-		c.convertUntyped(e.X, tInt, "shift")
+		// untyped constant shifted by a variable amount: as in Go, the shift is untyped and takes
+		// its type from the context (var m uint64 = 1 << n), int by default; see convertUntyped
+		if iv := constant.ToInt(x.Const); iv.Kind() == constant.Int && basicKind(x.T) == UntypedFloat {
+			x.Const, x.T = iv, tUntypedInt
+		}
+		if !isInteger(x.T) {
+			c.errorf(e.P, "invalid operation: shifted operand %s (type %s) must be integer", exprString(e.X), x.T)
+			c.invalid(e)
+			return
+		}
+		e.T, e.Mode = x.T, ModeValue
+		return
 	}
 	if x.Const != nil && isUntyped(x.T) && basicKind(x.T) == UntypedFloat {
 		if iv := constant.ToInt(x.Const); iv.Kind() == constant.Int {
@@ -1089,11 +1384,6 @@ func (c *Checker) shift(e *BinaryExpr) {
 		s, _ := constant.Uint64Val(y.Const)
 		v := constant.Shift(x.Const, goOps[e.Op], uint(s))
 		if !isUntyped(e.T) {
-			if isUnsigned(e.T) && e.Op == SHL {
-				bits := uint(sizeofBasic(basicKind(e.T)) * 8)
-				mask := constant.BinaryOp(constant.Shift(constant.MakeInt64(1), gotoken.SHL, bits), gotoken.SUB, constant.MakeInt64(1))
-				v = constant.BinaryOp(v, gotoken.AND, mask)
-			}
 			nv, ok := representable(v, e.T)
 			if !ok {
 				c.errorf(e.P, "constant %s overflows %s", v, e.T)

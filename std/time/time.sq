@@ -12,14 +12,11 @@ const (
 	Hour                 = 60 * Minute
 )
 
-//squark:extern sq_nanotime
-func nanotime() int
+extern "sq_nanotime" func nanotime() int stack 8K
 
-//squark:extern sq_unixnano
-func unixnano() int
+extern "sq_unixnano" func unixnano() int stack 8K
 
-//squark:extern sq_sleep
-func sleep(ns int)
+extern "sq_sleep" func sleep(ns int) stack 8K
 
 // Time is a monotonic instant plus the wall clock reading when it was taken.
 type Time struct {

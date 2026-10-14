@@ -1,0 +1,19 @@
+package main
+
+var global map[string]int cap 8
+
+func get() [..4]int {
+	var v [..4]int
+	return v
+}
+
+func main() {
+	var m map[string]int cap 8
+	m2 := m // ERROR "cannot copy map[string]int cap 8 storage into m2"
+	var view map[string]int = m
+	_ = view
+	s := make([]byte, 16) // ERROR "make needs an arena"
+	ch := make(chan int, 4) // ERROR "declare storage at package level: var ch chan int cap N"
+	get().Push(1) // ERROR "cannot call Push on get() (not addressable)"
+	_, _, _ = m2, s, ch
+}

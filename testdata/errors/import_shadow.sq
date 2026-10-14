@@ -1,0 +1,7 @@
+package main
+
+import "strings"
+
+var strings = 3 // ERROR "strings already declared through import of \"strings\""
+
+func main() { println(strings) }

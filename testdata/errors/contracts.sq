@@ -1,0 +1,38 @@
+package main
+
+type Node struct{ next *Node }
+
+var keep string
+
+// honest contracts
+func prefix(b []byte) []byte from b { return b[:1] }
+func link(a *Node, b *Node into a) { a.next = b }
+func remember(s static string) { keep = s }
+func name() string static { return "squark" }
+
+// contracts that leave out what the body does
+func first(a, b []byte) []byte from a { // ERROR "returns a reference into b, but its signature does not say so: add `from b`"
+	if len(a) > 0 {
+		return a
+	}
+	return b
+}
+
+func attach(a *Node, b *Node) { a.next = b }
+
+func attach3(a *Node, b *Node) *Node from a { // ERROR "stores b inside a, but its signature does not say so: declare the parameter as `b T into a`"
+	a.next = b
+	return a
+}
+
+func main() {
+	var buf [4]byte
+	_ = prefix(buf[:])
+	var x, y Node
+	link(&x, &y)
+	remember("ok")
+	_ = name()
+	_ = first(buf[:], buf[:])
+	attach(&x, &y)
+	_ = attach3(&x, &y)
+}

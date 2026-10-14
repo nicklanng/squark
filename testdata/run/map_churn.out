@@ -1,0 +1,6 @@
+delete evens: 1000 500
+odd sum: 250000
+delete ahead: true 0
+delete all: 1000 0
+churn: true true
+strings: 3 1 false 3 4

@@ -12,6 +12,13 @@ func (c *Checker) stmt(s Stmt) {
 	case *ExprStmt:
 		c.expr(s.X)
 		x := unparen(s.X)
+		for { // f(x + y) in a: a call whose arguments allocate in a
+			ie, ok := x.(*InExpr)
+			if !ok {
+				break
+			}
+			x = unparen(ie.X)
+		}
 		switch x := x.(type) {
 		case *CallExpr:
 			if x.Conversion {
@@ -26,6 +33,7 @@ func (c *Checker) stmt(s Stmt) {
 			if x.Op != ARROW {
 				c.errorf(x.P, "%s is not used", exprString(x))
 			}
+		case *TryExpr:
 		default:
 			if s.X.info().Mode != ModeInvalid {
 				c.errorf(s.X.Pos(), "%s is not used", exprString(s.X))
@@ -36,6 +44,7 @@ func (c *Checker) stmt(s Stmt) {
 			c.expr(s.Value)
 			return
 		}
+		c.toView(s.Chan)
 		ch, ok := s.Chan.info().T.Underlying().(*Chan)
 		if !ok {
 			c.errorf(s.P, "invalid operation: cannot send to non-channel %s", exprString(s.Chan))
@@ -104,7 +113,24 @@ func (c *Checker) stmt(s Stmt) {
 	case *DeclStmt:
 		c.declStmt(s.Decl)
 	case *LabeledStmt:
+		if prev, ok := c.labels[s.Label.Name]; ok && c.labels != nil {
+			c.errorf(s.Label.P, "label %s already defined at %s:%d", s.Label.Name, shortFile(prev.File), prev.Line)
+		} else if c.labels != nil {
+			c.labels[s.Label.Name] = s.Label.P
+		}
 		c.stmt(s.Stmt)
+	case *ArenaStmt:
+		n, ok := c.constSize(s.Size, "arena size")
+		if ok && n < 16 {
+			c.errorf(s.Size.Pos(), "arena size must be at least 16 bytes")
+		}
+		c.openScope()
+		v := c.declareVar(s.Name, tArena)
+		v.ReadOnly = true
+		v.ArenaSize = n
+		s.Name.Obj.Var = v
+		c.stmt(s.Body)
+		c.closeScope()
 	default:
 		c.errorf(s.Pos(), "unexpected statement")
 	}
@@ -126,6 +152,14 @@ func (c *Checker) checkAssignTarget(x Expr) bool {
 	if xi.Mode == ModeInvalid {
 		return false
 	}
+	if id, ok := unparen(x).(*Ident); ok && id.Obj != nil && id.Obj.Var != nil && id.Obj.Var.ReadOnly {
+		c.errorf(x.Pos(), "cannot assign to %s (it is a constant)", id.Name)
+		return false
+	}
+	if se, ok := unparen(x).(*SelectorExpr); ok && se.Kind == SelQualified && se.Sel.Obj != nil && se.Sel.Obj.Var != nil && se.Sel.Obj.Var.ReadOnly {
+		c.errorf(x.Pos(), "cannot assign to %s (it is a constant)", exprString(x))
+		return false
+	}
 	if xi.Mode == ModeVar || xi.Mode == ModeMapIndex {
 		if id, ok := unparen(x).(*Ident); ok && id.Obj != nil && id.Obj.Var != nil && id.Obj.Var.Param && c.fn != nil {
 			// params are assignable locals
@@ -143,7 +177,8 @@ func (c *Checker) checkAssignTarget(x Expr) bool {
 }
 
 // lhsTypes returns the types produced by the right-hand side of an n-ary assignment.
-func (c *Checker) rhsTypes(lhsN int, rhs []Expr, hints []Type) []Type {
+// rhsTypes checks the right side of an assignment or declaration whose left side starts at pos.
+func (c *Checker) rhsTypes(pos Pos, lhsN int, rhs []Expr, hints []Type) []Type {
 	if len(rhs) == 1 && lhsN > 1 {
 		x := rhs[0]
 		switch u := unparen(x).(type) {
@@ -171,16 +206,16 @@ func (c *Checker) rhsTypes(lhsN int, rhs []Expr, hints []Type) []Type {
 		}
 		if tu, ok := x.info().T.(*Tuple); ok {
 			if len(tu.Types) != lhsN {
-				c.errorf(x.Pos(), "assignment mismatch: %d variables but %s returns %d values", lhsN, exprString(x), len(tu.Types))
+				c.errorf(pos, "assignment mismatch: %d variables but %s returns %d values", lhsN, exprString(x), len(tu.Types))
 				return nil
 			}
 			return tu.Types
 		}
-		c.errorf(x.Pos(), "assignment mismatch: %d variables but 1 value", lhsN)
+		c.errorf(pos, "assignment mismatch: %d variables but 1 value", lhsN)
 		return nil
 	}
 	if len(rhs) != lhsN {
-		c.errorf(rhs[0].Pos(), "assignment mismatch: %d variables but %d values", lhsN, len(rhs))
+		c.errorf(pos, "assignment mismatch: %d variables but %d values", lhsN, len(rhs))
 		for _, x := range rhs {
 			c.expr(x)
 		}
@@ -193,6 +228,11 @@ func (c *Checker) rhsTypes(lhsN int, rhs []Expr, hints []Type) []Type {
 			h = hints[i]
 		}
 		c.exprHint(x, h)
+		if tu, ok := x.info().T.(*Tuple); ok && x.info().Mode != ModeInvalid {
+			c.errorf(x.Pos(), "assignment mismatch: %d variable%s but %s returns %d values", lhsN, plural(lhsN), exprString(x), len(tu.Types))
+			c.invalid(x)
+			return nil
+		}
 		if !c.value(x) {
 			return nil
 		}
@@ -210,7 +250,7 @@ func (c *Checker) assign(s *AssignStmt) {
 	switch s.Tok {
 	case DEFINE:
 		// rhs first, in the enclosing scope
-		ts := c.rhsTypes(len(s.Lhs), s.Rhs, nil)
+		ts := c.rhsTypes(s.Lhs[0].Pos(), len(s.Lhs), s.Rhs, nil)
 		s.NewVars = make([]bool, len(s.Lhs))
 		anyNew := false
 		for i, l := range s.Lhs {
@@ -220,9 +260,12 @@ func (c *Checker) assign(s *AssignStmt) {
 				continue
 			}
 			var t Type = tInvalid
+			existing := c.scope.LookupLocal(id.Name)
 			if ts != nil {
 				t = ts[i]
-				if len(s.Rhs) == len(s.Lhs) {
+				// an existing variable gives an untyped value its type (assignable below);
+				// only new names take the default type
+				if len(s.Rhs) == len(s.Lhs) && (existing == nil || existing.Kind != ObjVar) {
 					if isNilType(t) {
 						c.errorf(s.Rhs[i].Pos(), "use of untyped nil in assignment")
 						t = tInvalid
@@ -246,6 +289,11 @@ func (c *Checker) assign(s *AssignStmt) {
 				}
 				continue
 			}
+			if isStorageCopy(t) {
+				c.errorf(id.P, "cannot copy %s storage into %s: use a view (%s) instead", t, id.Name, viewOf(t))
+			} else if len(s.Rhs) == len(s.Lhs) {
+				c.checkNestedStorageCopy(s.Rhs[i], t, " into "+id.Name)
+			}
 			anyNew = true
 			s.NewVars[i] = true
 			if _, isTuple := t.(*Tuple); isTuple {
@@ -266,7 +314,7 @@ func (c *Checker) assign(s *AssignStmt) {
 			c.expr(l)
 			hints = append(hints, l.info().T)
 		}
-		ts := c.rhsTypes(len(s.Lhs), s.Rhs, hints)
+		ts := c.rhsTypes(s.Lhs[0].Pos(), len(s.Lhs), s.Rhs, hints)
 		for i, l := range s.Lhs {
 			if isBlank(l) {
 				l.info().Mode = ModeVar
@@ -311,7 +359,9 @@ func (c *Checker) assign(s *AssignStmt) {
 }
 
 func (c *Checker) goStmt(s *GoStmt) {
+	c.goCall = s.Call
 	c.expr(s.Call)
+	c.goCall = nil
 	call := s.Call
 	if call.Mode == ModeInvalid {
 		return
@@ -324,8 +374,8 @@ func (c *Checker) goStmt(s *GoStmt) {
 		c.errorf(s.P, "go requires a direct call to a named function or method (the goroutine's stack is sized from its entry function)")
 		return
 	}
-	if call.Callee.Extern != "" {
-		c.errorf(s.P, "cannot start a goroutine on extern function %s", call.Callee.Name)
+	if !call.Callee.IsTask {
+		c.errorf(s.P, "go needs a task: declare %s with `task %s(...) pool N` (tasks have a pool size and a proven stack)", call.Callee.Name, call.Callee.Name)
 		return
 	}
 	if len(call.Callee.Sig.Results) > 0 {
@@ -489,6 +539,7 @@ func (c *Checker) switchStmt(s *SwitchStmt) {
 	c.breakable = append(c.breakable, s)
 	defer func() { c.breakable = c.breakable[:len(c.breakable)-1] }()
 	hasDefault := false
+	seen := map[string]Pos{} // constant case values, as in Go
 	for _, cc := range s.Cases {
 		if cc.List == nil {
 			if hasDefault {
@@ -507,7 +558,14 @@ func (c *Checker) switchStmt(s *SwitchStmt) {
 				c.defaultUntyped(x)
 				continue
 			}
-			c.assignable(x, tagT, "switch case")
+			if c.assignable(x, tagT, "switch case") && x.info().Const != nil {
+				k := x.info().Const.ExactString()
+				if prev, ok := seen[k]; ok {
+					c.errorf(x.Pos(), "duplicate case %s in expression switch (previous case at %s:%d)", exprString(x), shortFile(prev.File), prev.Line)
+				} else {
+					seen[k] = x.Pos()
+				}
+			}
 		}
 		c.openScope()
 		c.stmtList(cc.Body)
@@ -522,6 +580,7 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 		c.stmt(s.Body)
 		return
 	}
+	c.toView(s.X)
 	xt := s.X.info().T
 	var kt, vt Type
 	switch u := xt.Underlying().(type) {
@@ -563,6 +622,9 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 	for i, v := range vars {
 		if v == nil {
 			continue
+		}
+		if st := storageIn(types[i]); st != nil && !isBlank(v) {
+			c.errorf(v.Pos(), "cannot copy elements of %s into %s: %s contains %s storage; range over the index and use &%s[i]", exprString(s.X), exprString(v), types[i], st, exprString(s.X))
 		}
 		if s.Define {
 			id, ok := v.(*Ident)
@@ -620,7 +682,7 @@ func (c *Checker) declStmt(d *GenDecl) {
 						hints = append(hints, typ)
 					}
 				}
-				ts = c.rhsTypes(len(vs.Names), vs.Values, hints)
+				ts = c.rhsTypes(vs.Names[0].P, len(vs.Names), vs.Values, hints)
 				if ts != nil && len(vs.Values) == len(vs.Names) {
 					for i, x := range vs.Values {
 						if typ != nil {
@@ -631,7 +693,20 @@ func (c *Checker) declStmt(d *GenDecl) {
 							}
 							c.defaultUntyped(x)
 							ts[i] = x.info().T
+							if isStorageCopy(ts[i]) {
+								c.errorf(x.Pos(), "cannot copy %s storage into %s: use a view (%s) instead", ts[i], vs.Names[i].Name, viewOf(ts[i]))
+							} else {
+								c.checkNestedStorageCopy(x, ts[i], " into "+vs.Names[i].Name)
+							}
 						}
+					}
+				}
+			}
+			if ts != nil && typ != nil && len(vs.Values) == 1 && len(vs.Names) > 1 {
+				// var a, b T = f(): each result must be assignable to T
+				for i, name := range vs.Names {
+					if i < len(ts) && ts[i] != tInvalid && !assignableType(ts[i], typ) {
+						c.errorf(name.P, "cannot assign %s to %s (type %s)", ts[i], name.Name, typ)
 					}
 				}
 			}
@@ -674,6 +749,8 @@ func (c *Checker) isTerminating(s Stmt) bool {
 		}
 	case *BlockStmt:
 		return c.isTerminatingList(s.List)
+	case *ArenaStmt:
+		return c.isTerminating(s.Body)
 	case *IfStmt:
 		return s.Else != nil && c.isTerminating(s.Body) && c.isTerminating(s.Else)
 	case *LabeledStmt:
@@ -711,6 +788,8 @@ func hasBreak(s Stmt, target Stmt, top bool) bool {
 		return s.Tok == BREAK && s.Target == target
 	case *BlockStmt:
 		return hasBreakList(s.List, target, top)
+	case *ArenaStmt:
+		return hasBreak(s.Body, target, top)
 	case *IfStmt:
 		if hasBreak(s.Body, target, top) {
 			return true
@@ -732,4 +811,11 @@ func hasBreak(s Stmt, target Stmt, top bool) bool {
 		return hasBreakList(s.Body, target, top)
 	}
 	return false
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }

@@ -1,0 +1,9 @@
+package main
+
+func cleanup(i int) {}
+
+func main() {
+	for i := 0; i < 3; i++ {
+		defer cleanup(i) // ERROR "defer inside a loop is not allowed"
+	}
+}

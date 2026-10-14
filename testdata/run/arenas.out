@@ -1,0 +1,7 @@
+nodes: 15 leaf: root.1.0.1
+used > 0: true cap: 65536 true
+squares 10 81
+map 2 2
+grown 100 true
+hello, root!
+alpha beta

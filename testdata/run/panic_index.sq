@@ -1,0 +1,9 @@
+package main
+
+func get(s []int, i int) int { return s[i] }
+
+func main() {
+	var a [3]int
+	println("before")
+	println(get(a[:], 5))
+}

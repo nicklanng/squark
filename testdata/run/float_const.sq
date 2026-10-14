@@ -1,0 +1,11 @@
+package main
+
+// typed float constants are rounded to their type
+const f32 float32 = 16777217
+const f64 float64 = 9007199254740993
+
+func main() {
+	println(f32 == 16777216, f64 == 9007199254740992)
+	var x float32 = 0.1
+	println(float64(x) == float64(float32(0.1)), x == 0.1)
+}

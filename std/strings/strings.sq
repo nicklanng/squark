@@ -46,7 +46,7 @@ func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
-func TrimSpace(s string) string {
+func TrimSpace(s string) string from s {
 	i, j := 0, len(s)
 	for i < j && isSpace(s[i]) {
 		i++
@@ -72,7 +72,7 @@ func TrimSuffix(s, suffix string) string {
 }
 
 // Cut slices s around the first instance of sep.
-func Cut(s, sep string) (string, string, bool) {
+func Cut(s, sep string) (string, string, bool) from s {
 	if i := Index(s, sep); i >= 0 {
 		return s[:i], s[i+len(sep):], true
 	}
@@ -107,10 +107,30 @@ func AppendLower(dst []byte, s string) []byte {
 	return dst
 }
 
-// Split splits s around sep into out, returning the used part of out.
-// It stops when out is full; the last element then holds the unsplit remainder.
-func Split(s, sep string, out []string) []string {
+// Split splits s around sep into out, returning the used part of out. An empty sep splits after
+// each UTF-8 sequence, as in Go. It stops when out is full; the last element then holds the
+// unsplit remainder.
+func Split(s string into out, sep string, out []string) []string from out {
 	n := 0
+	if len(sep) == 0 {
+		start := 0
+		for i := range s {
+			if i == 0 {
+				continue
+			}
+			if n == len(out)-1 {
+				break
+			}
+			out[n] = s[start:i]
+			n++
+			start = i
+		}
+		if n < len(out) && start < len(s) {
+			out[n] = s[start:]
+			n++
+		}
+		return out[:n]
+	}
 	for n < len(out)-1 {
 		i := Index(s, sep)
 		if i < 0 {
@@ -149,9 +169,15 @@ func Fields(s string, out []string) []string {
 	return out[:n]
 }
 
+// Count counts the non-overlapping instances of sub in s; an empty sub counts the runes plus one,
+// as in Go.
 func Count(s, sub string) int {
 	if len(sub) == 0 {
-		return len(s) + 1
+		n := 1
+		for range s {
+			n++
+		}
+		return n
 	}
 	n := 0
 	for {

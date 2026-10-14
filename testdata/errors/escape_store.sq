@@ -1,0 +1,40 @@
+package main
+
+type Node struct {
+	name string
+	next *Node
+}
+
+var head *Node
+var keep []byte
+
+func setHead(n *Node) { head = n }
+
+func link(a, b *Node) { a.next = b }
+
+func main() {
+	var n Node
+	setHead(&n) // ERROR "cannot escape into static memory (setHead keeps argument 1 in static memory)"
+
+	var buf [8]byte
+	keep = buf[:] // ERROR "cannot escape into static memory (assigned to keep)"
+
+	var outer Node
+	{
+		var inner Node
+		link(&outer, &inner) // ERROR "does not live long enough to be stored in variable outer (declared at main.sq:22) (link stores argument 2 inside argument 1)"
+	}
+
+	var p *Node
+	{
+		var q Node
+		p = &q // ERROR "does not live long enough to be stored in variable p"
+	}
+	_ = p
+
+	// fine: same scope, or static data
+	var a, b Node
+	link(&a, &b)
+	setHead(head)
+	keep = keep[:0]
+}

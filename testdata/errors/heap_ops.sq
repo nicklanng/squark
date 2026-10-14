@@ -1,0 +1,19 @@
+package main
+
+type T struct{ a int }
+
+func (t *T) M() {}
+
+func f(s string, n int) {
+	_ = s + "!" // ERROR "string concatenation needs memory: allocate it in an arena"
+	_ = make([]int, n) // ERROR "make needs an arena (make(...) in a); otherwise declare an array"
+	_ = new(T) // ERROR "new(T) needs memory: allocate it in an arena"
+	_ = []byte(s) // ERROR "converting s to []byte copies it: allocate the copy in an arena"
+	var t T
+	m := t.M // ERROR "method values are not supported"
+	_ = m
+}
+
+func main() {
+	f("x", 1)
+}

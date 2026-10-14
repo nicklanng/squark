@@ -7,18 +7,33 @@ import (
 	"utf8"
 )
 
-var ErrSyntax = __error(1, "json: syntax error")
-var ErrType = __error(2, "json: unexpected value type")
-var ErrBuffer = __error(3, "json: string does not fit in buffer")
+const ErrSyntax = error(1, "json: syntax error")
+const ErrType = error(2, "json: unexpected value type")
+const ErrBuffer = error(3, "json: string does not fit in buffer")
 
 const hex = "0123456789abcdef"
 
-// AppendString appends s as a quoted, escaped JSON string.
+// AppendString appends s as a quoted, escaped JSON string. Invalid UTF-8 becomes U+FFFD, and
+// U+2028 and U+2029 are escaped, as Go does.
 func AppendString(dst []byte, s string) []byte {
 	dst = append(dst, '"')
 	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if c >= 0x80 {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if r == utf8.RuneError && size == 1 {
+				dst = append(dst, s[start:i]...)
+				dst = append(dst, "\uFFFD"...)
+				start = i + 1
+			} else if r == 0x2028 || r == 0x2029 {
+				dst = append(dst, s[start:i]...)
+				dst = append(dst, '\\', 'u', '2', '0', '2', hex[r&0xF])
+				start = i + size
+			}
+			i += size - 1
+			continue
+		}
 		if c >= 0x20 && c != '"' && c != '\\' {
 			continue
 		}
@@ -65,7 +80,7 @@ type Decoder struct {
 	Err   error
 }
 
-func NewDecoder(data []byte) Decoder {
+func NewDecoder(data []byte) Decoder from data {
 	return Decoder{data: data}
 }
 
@@ -169,7 +184,7 @@ func (d *Decoder) Field(keybuf []byte) (string, bool) {
 }
 
 // String decodes a JSON string into buf and returns a view of buf.
-func (d *Decoder) String(buf []byte) (string, bool) {
+func (d *Decoder) String(buf []byte) (string, bool) from buf {
 	if d.Err != nil {
 		return "", false
 	}
@@ -218,13 +233,25 @@ func (d *Decoder) String(buf []byte) (string, bool) {
 			r = 12
 		case 'u':
 			r = d.hex4()
-			if r >= 0xD800 && r < 0xDC00 && d.pos+1 < len(d.data) && d.data[d.pos] == '\\' && d.data[d.pos+1] == 'u' {
-				d.pos += 2
-				lo := d.hex4()
-				if lo >= 0xDC00 && lo < 0xE000 {
-					r = 0x10000 + (r-0xD800)<<10 + (lo - 0xDC00)
-				} else {
-					r = utf8.RuneError
+			if d.Err != nil {
+				return "", false
+			}
+			if r >= 0xD800 && r < 0xE000 {
+				// a high surrogate must be followed by a low one; anything else is U+FFFD
+				hi := r
+				r = utf8.RuneError
+				if hi < 0xDC00 && d.pos+1 < len(d.data) && d.data[d.pos] == '\\' && d.data[d.pos+1] == 'u' {
+					save := d.pos
+					d.pos += 2
+					lo := d.hex4()
+					if d.Err != nil {
+						return "", false
+					}
+					if lo >= 0xDC00 && lo < 0xE000 {
+						r = 0x10000 + (hi-0xD800)<<10 + (lo - 0xDC00)
+					} else {
+						d.pos = save // not a pair: that escape is decoded on its own
+					}
 				}
 			}
 		default:

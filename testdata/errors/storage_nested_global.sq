@@ -1,0 +1,12 @@
+package main
+
+type Reg struct {
+	n int
+	m map[int]int cap 4
+}
+
+var global Reg
+var gcopy = global // ERROR "cannot copy global into gcopy: Reg contains map[int]int cap 4 storage"
+var gfresh = Reg{n: 1}
+
+func main() { println(gcopy.n, gfresh.n) }

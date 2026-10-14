@@ -1,0 +1,40 @@
+package main
+
+import "json"
+
+func main() {
+	var src [128]byte
+	n := copy(src[:], ` {"name": "squark ❤", "n": -42, "ok": true, "skip": {"a": [1, {"b": "}"}]}, "tail": "x\"y"} `)
+	d := json.NewDecoder(src[:n])
+	var key [16]byte
+	var val [64]byte
+	if !d.BeginObject() {
+		println("bad")
+		return
+	}
+	for {
+		k, ok := d.Field(key[:])
+		if !ok {
+			break
+		}
+		switch k {
+		case "name", "tail":
+			s, _ := d.String(val[:])
+			println(k, "=", s)
+		case "n":
+			n, _ := d.Int()
+			println(k, "=", n)
+		case "ok":
+			b, _ := d.Bool()
+			println(k, "=", b)
+		default:
+			d.Skip()
+			println("skipped", k)
+		}
+	}
+	println("end", d.End(), d.Err == nil)
+
+	var out [128]byte
+	enc := json.AppendString(out[:0], "tab\there \"quoted\" \x01")
+	println(string(enc))
+}

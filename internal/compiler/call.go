@@ -1,7 +1,9 @@
 package compiler
 
 import (
+	"fmt"
 	"go/constant"
+	gotoken "go/token"
 )
 
 func (c *Checker) call(e *CallExpr) {
@@ -65,12 +67,21 @@ func (c *Checker) call(e *CallExpr) {
 		case SelMethod:
 			e.Callee = f.Method
 		case SelBuiltinMethod:
-			if len(e.Args) != 0 {
-				c.errorf(e.P, "too many arguments in call to %s", exprString(e.Fun))
+			switch f.X.info().T.Underlying().(type) {
+			case *ArenaType:
+				e.Builtin = "arena." + f.Sel.Name
+			case *VecType:
+				e.Builtin = "vec." + f.Sel.Name
+			default:
+				e.Builtin = "error." + f.Sel.Name
 			}
-			e.T = sig.Results[0].Type
-			e.Mode = ModeValue
-			e.Builtin = "error." + f.Sel.Name
+			c.args(e, sig)
+			switch len(sig.Results) {
+			case 0:
+				e.T, e.Mode = tInvalid, ModeNoValue
+			default:
+				e.T, e.Mode = sig.Results[0].Type, ModeValue
+			}
 			return
 		}
 	}
@@ -78,7 +89,9 @@ func (c *Checker) call(e *CallExpr) {
 	if owner == nil {
 		owner = c.prog.InitFunc // package-level initializers
 	}
-	if e.Callee != nil {
+	if e == c.goCall {
+		// `go f()` runs f on its own stack: not a call edge for stack sizing or recursion
+	} else if e.Callee != nil {
 		owner.Calls = append(owner.Calls, e.Callee)
 	} else {
 		owner.Indirect = append(owner.Indirect, sig)
@@ -166,6 +179,11 @@ func (c *Checker) checkArg(a Expr, params []*Var, i int, sig *Signature, e *Call
 // ---- conversions ----
 
 func (c *Checker) conversion(e *CallExpr, t Type) {
+	if _, ok := t.(*ErrorType); ok {
+		// error(msg) or error(code, msg): build an error value
+		c.errorCtor(e)
+		return
+	}
 	e.Conversion = true
 	if len(e.Args) != 1 {
 		c.errorf(e.P, "conversion to %s needs exactly one argument", t)
@@ -234,10 +252,16 @@ func (c *Checker) conversion(e *CallExpr, t Type) {
 		return
 	}
 	if isString(t) && isByteSlice(xi.T) {
-		return // zero-copy view: string(b) aliases b's bytes
+		// string(b) is a zero-copy view of b; `string(b) in a` copies into the arena like Go
+		e.InArena = c.allocArena
+		return
 	}
 	if isByteSlice(t) && isString(xi.T) {
-		c.errorf(e.P, "cannot convert %s to []byte: that would copy to the heap; copy into a buffer with copy(buf[:], s)", exprString(x))
+		if c.allocArena != nil {
+			e.InArena = c.allocArena
+			return
+		}
+		c.errorf(e.P, "converting %s to []byte copies it: allocate the copy in an arena ([]byte(s) in a), or copy into a buffer with copy(buf[:], s)", exprString(x))
 		c.invalid(e)
 		return
 	}
@@ -277,6 +301,25 @@ func convertible(v, t Type) bool {
 		return isPtr || tk == Uintptr
 	}
 	return false
+}
+
+func (c *Checker) errorCtor(e *CallExpr) {
+	e.Builtin = "__error"
+	switch len(e.Args) {
+	case 1:
+		c.valueExpr(e.Args[0], tString)
+		c.assignable(e.Args[0], tString, "error message")
+	case 2:
+		c.valueExpr(e.Args[0], tInt)
+		c.assignable(e.Args[0], tInt, "error code")
+		c.valueExpr(e.Args[1], tString)
+		c.assignable(e.Args[1], tString, "error message")
+	default:
+		c.errorf(e.P, "error takes a message, or a code and a message: error(404, \"not found\")")
+		c.invalid(e)
+		return
+	}
+	e.T, e.Mode = tError, ModeValue
 }
 
 // ---- builtins ----
@@ -320,6 +363,16 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 		if isUntyped(xi.T) && isString(xi.T) {
 			c.convertUntyped(x, tString, name)
 		}
+		// as in Go, a fixed length is constant only if computing x calls nothing and receives nothing
+		if vt, ok := xi.T.Underlying().(*VecType); ok && name == "cap" {
+			e.T, e.Mode = tInt, ModeValue
+			if !hasCall(x) {
+				e.Mode, e.Const = ModeConst, constant.MakeInt64(vt.Len)
+			}
+			return
+		}
+		c.toView(x)
+		xi = x.info()
 		t := xi.T.Underlying()
 		if p, ok := t.(*Pointer); ok {
 			if a, ok := p.Elem.Underlying().(*Array); ok {
@@ -329,9 +382,9 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 		e.T, e.Mode = tInt, ModeValue
 		switch u := t.(type) {
 		case *Array:
-			e.Const, e.Mode = constant.MakeInt64(u.Len), ModeConst
-			e.T = tUntypedInt
-			e.T = tInt
+			if !hasCall(x) {
+				e.Const, e.Mode = constant.MakeInt64(u.Len), ModeConst
+			}
 		case *Slice, *Chan:
 		case *Map:
 			if name == "cap" {
@@ -366,6 +419,7 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 			return
 		}
 		e.T, e.Mode = s.info().T, ModeValue
+		e.InArena = c.allocArena // with an arena, append grows instead of panicking
 		if e.Ellipsis {
 			if nargs != 2 {
 				c.errorf(e.P, "can only use ... with final argument")
@@ -415,8 +469,17 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 	case "make":
 		c.makeBuiltin(e)
 	case "new":
-		c.errorf(e.P, "new(T) would allocate on the heap; declare a variable (var x T) and use &x")
-		c.invalid(e)
+		if c.allocArena == nil {
+			c.errorf(e.P, "new(T) needs memory: allocate it in an arena (new(T) in a), or declare a variable and use &x")
+			c.invalid(e)
+			return
+		}
+		if !exactly(1) {
+			return
+		}
+		t := c.typExpr(e.Args[0])
+		e.InArena = c.allocArena
+		e.T, e.Mode = &Pointer{Elem: t}, ModeValue
 	case "delete":
 		if !exactly(2) {
 			return
@@ -425,6 +488,7 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 		if !c.valueExpr(e.Args[0], nil) {
 			return
 		}
+		c.toView(e.Args[0])
 		m, ok := e.Args[0].info().T.Underlying().(*Map)
 		if !ok {
 			c.errorf(e.Args[0].Pos(), "invalid argument: %s is not a map", exprString(e.Args[0]))
@@ -438,6 +502,7 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 		}
 		e.T, e.Mode = tInvalid, ModeNoValue
 		if c.valueExpr(e.Args[0], nil) {
+			c.toView(e.Args[0])
 			if _, ok := e.Args[0].info().T.Underlying().(*Chan); !ok {
 				c.errorf(e.Args[0].Pos(), "invalid operation: non-chan argument to close")
 			}
@@ -491,7 +556,39 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 			}
 		}
 		if t == nil {
-			t = defaultType(e.Args[0].info().T)
+			// all untyped: as in Go, the widest kind wins (min(3, 2.5) is 2.5), and constant
+			// arguments give a constant
+			k := basicKind(e.Args[0].info().T)
+			allConst := true
+			for _, a := range e.Args {
+				if kk := basicKind(a.info().T); kk > k && kk != UntypedString && kk != UntypedBool {
+					k = kk
+				}
+				allConst = allConst && a.info().Const != nil && isString(a.info().T) == isString(e.Args[0].info().T)
+			}
+			for _, b := range []*Basic{tUntypedInt, tUntypedRune, tUntypedFloat, tUntypedString} {
+				if b.Kind == k {
+					t = b
+				}
+			}
+			if t == nil {
+				t = defaultType(e.Args[0].info().T)
+			}
+			if allConst && (isNumeric(t) || isString(t)) {
+				best := e.Args[0].info().Const
+				for _, a := range e.Args[1:] {
+					v := a.info().Const
+					if (name == "min" && constant.Compare(v, gotoken.LSS, best)) || (name == "max" && constant.Compare(v, gotoken.GTR, best)) {
+						best = v
+					}
+				}
+				if isFloat(t) {
+					best = constant.ToFloat(best)
+				}
+				e.T, e.Mode, e.Const = t, ModeConst, best
+				return
+			}
+			t = defaultType(t)
 		}
 		for _, a := range e.Args {
 			c.assignable(a, t, name)
@@ -522,6 +619,20 @@ func (c *Checker) makeBuiltin(e *CallExpr) {
 		return
 	}
 	t := c.typExpr(e.Args[0])
+	if c.allocArena == nil {
+		hint := "declare storage instead"
+		switch u := t.Underlying().(type) {
+		case *Slice:
+			hint = fmt.Sprintf("declare an array (var buf [N]%s) or a vector (var v [..N]%s) and use a view of it", u.Elem, u.Elem)
+		case *Map:
+			hint = fmt.Sprintf("declare storage: var m map[%s]%s cap N", u.Key, u.Value)
+		case *Chan:
+			hint = fmt.Sprintf("declare storage at package level: var ch chan %s cap N", u.Elem)
+		}
+		c.errorf(e.P, "make needs an arena (make(...) in a); otherwise %s", hint)
+		c.invalid(e)
+		return
+	}
 	e.T, e.Mode = t, ModeValue
 	sizes := []int64{}
 	for _, a := range e.Args[1:] {
@@ -529,24 +640,32 @@ func (c *Checker) makeBuiltin(e *CallExpr) {
 			c.invalid(e)
 			return
 		}
-		v, ok := constInt(a)
-		if !ok || !isInteger(a.info().T) {
-			c.errorf(a.Pos(), "make size %s must be a constant: a run-time size would need the heap (use a fixed capacity)", exprString(a))
+		if !isInteger(a.info().T) {
+			c.errorf(a.Pos(), "make size %s must be an integer", exprString(a))
 			c.invalid(e)
 			return
 		}
-		if v < 0 {
+		v, ok := constInt(a)
+		if !ok {
+			if c.allocArena == nil {
+				c.errorf(a.Pos(), "make size %s is not a constant: allocate it in an arena (make(...) in a), or use a fixed capacity", exprString(a))
+				c.invalid(e)
+				return
+			}
+			v = -1 // run-time size
+		} else if v < 0 {
 			c.errorf(a.Pos(), "negative size argument in make")
 		}
 		c.convertUntyped(a, tInt, "make")
 		sizes = append(sizes, v)
 	}
+	e.InArena = c.allocArena
 	switch t.Underlying().(type) {
 	case *Slice:
 		if len(sizes) == 0 {
 			c.errorf(e.P, "make(%s) needs a length", t)
 		}
-		if len(sizes) == 2 && sizes[1] < sizes[0] {
+		if len(sizes) == 2 && sizes[0] >= 0 && sizes[1] >= 0 && sizes[1] < sizes[0] {
 			c.errorf(e.P, "len larger than cap in make(%s)", t)
 		}
 		if len(sizes) > 2 {
@@ -560,7 +679,7 @@ func (c *Checker) makeBuiltin(e *CallExpr) {
 		if len(sizes) > 1 {
 			c.errorf(e.P, "too many arguments to make(%s)", t)
 		}
-		if c.fn != nil {
+		if c.fn != nil || e.InArena != nil {
 			c.errorf(e.P, "make(%s) is only allowed in package-level variable declarations: channels are shared between goroutines, so their buffers live in static memory", t)
 		}
 	default:

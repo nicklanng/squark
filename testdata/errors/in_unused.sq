@@ -1,0 +1,9 @@
+package main
+
+func main() {
+	arena a 1K {
+		x := "a"
+		x + "b" in a // ERROR "is not used"
+		len(x) in a // ERROR "is not used"
+	}
+}

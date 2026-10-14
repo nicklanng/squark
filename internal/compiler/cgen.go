@@ -40,6 +40,7 @@ type gen struct {
 	eqFuncs  map[string]string
 	eqOrder  []string
 	pkgNames map[*Package]string
+	cnames   map[string]bool // package-level C names in use (see uniqueCName)
 
 	// function state
 	fn       *Func
@@ -59,12 +60,24 @@ type gen struct {
 	statics   strings.Builder // static storage for package-level make()
 }
 
+// uniqueCName reserves a package-level C name, adding a numeric suffix if it is already taken.
+func (g *gen) uniqueCName(n string) string {
+	base := n
+	for i := 2; g.cnames[n]; i++ {
+		n = fmt.Sprintf("%s_%d", base, i)
+	}
+	g.cnames[n] = true
+	return n
+}
+
+// Generate emits C for the program.
 func Generate(prog *Program, order []*Func) (*Output, error) {
 	g := &gen{
 		prog:     prog,
 		defByKey: map[string]*cdef{},
 		eqFuncs:  map[string]string{},
 		pkgNames: map[*Package]string{},
+		cnames:   map[string]bool{},
 		pools:    map[*Func]*PoolInfo{},
 		labelIDs: map[Stmt]int{},
 	}
@@ -77,14 +90,21 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 		used[n] = true
 		g.pkgNames[p] = n
 	}
+	// Functions, methods and globals share the C namespace with externs: a clash (method T.M and a
+	// function T__M both want pkg__T__M) gets a numeric suffix.
+	for _, f := range prog.Funcs {
+		if f.Extern != "" {
+			f.CName = f.Extern
+			g.cnames[f.CName] = true
+		}
+	}
 	for _, f := range prog.Funcs {
 		switch {
 		case f.Extern != "":
-			f.CName = f.Extern
 		case f.RecvType != nil:
-			f.CName = g.pkgNames[f.Pkg] + "__" + f.RecvType.Obj.Name + "__" + f.Name
+			f.CName = g.uniqueCName(g.pkgNames[f.Pkg] + "__" + sanitize(f.RecvType.Obj.Name) + "__" + sanitize(f.Name))
 		default:
-			f.CName = g.pkgNames[f.Pkg] + "__" + f.Name
+			f.CName = g.uniqueCName(g.pkgNames[f.Pkg] + "__" + sanitize(f.Name))
 		}
 	}
 	prog.InitFunc.CName = "sq_init_globals"
@@ -112,10 +132,17 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 			if v.Type == nil {
 				continue
 			}
-			v.CName = "G_" + g.pkgNames[p] + "__" + sanitize(v.Name)
+			v.CName = g.uniqueCName("G_" + g.pkgNames[p] + "__" + sanitize(v.Name))
 			if v.Name == "_" {
 				v.CName = fmt.Sprintf("G_%s__blank%d", g.pkgNames[p], g.tmpN)
 				g.tmpN++
+			}
+			if v.ArenaSize > 0 {
+				// package arena: static storage, bump-only
+				fmt.Fprintf(&g.globals, "static uint8_t %s_buf[%d] __attribute__((aligned(16)));\n", v.CName, v.ArenaSize)
+				fmt.Fprintf(&g.globals, "static sq_arena %s_arena = {%s_buf, 0, %d, %s};\n", v.CName, v.CName, v.ArenaSize, cString(p.Name+"."+v.Name))
+				fmt.Fprintf(&g.globals, "static sq_arena *%s = &%s_arena;\n", v.CName, v.CName)
+				continue
 			}
 			fmt.Fprintf(&g.globals, "static %s;\n", g.decl(v.Type, v.CName))
 		}
@@ -209,6 +236,14 @@ func (g *gen) typeKey(t Type) string {
 		return "map"
 	case *ErrorType:
 		return "error"
+	case *ArenaType:
+		return "arena"
+	case *VecType:
+		return fmt.Sprintf("[..%d]%s", u.Len, g.typeKey(u.Elem))
+	case *MapStore:
+		return fmt.Sprintf("map[%s]%s cap %d", g.typeKey(u.Key), g.typeKey(u.Value), u.Cap)
+	case *ChanStore:
+		return fmt.Sprintf("chan %s cap %d", g.typeKey(u.Elem), u.Cap)
 	case *Struct:
 		var parts []string
 		for _, f := range u.Fields {
@@ -240,6 +275,8 @@ func (g *gen) ctype(t Type) string {
 		return g.basicC(u.Kind)
 	case *ErrorType:
 		return "sq_error"
+	case *ArenaType:
+		return "sq_arena*"
 	case *Named:
 		if st, ok := u.Underlying().(*Struct); ok {
 			key := g.typeKey(u)
@@ -277,6 +314,40 @@ func (g *gen) ctype(t Type) string {
 		g.defs = append(g.defs, d)
 		elem := g.ctype(u.Elem)
 		d.body = fmt.Sprintf("struct %s { %s a[%d]; };\n", d.name, elem, u.Len)
+		d.deps = g.valueDeps(u.Elem)
+		return d.name
+	case *VecType:
+		key := g.typeKey(u)
+		if d, ok := g.defByKey[key]; ok {
+			return d.name
+		}
+		d := &cdef{name: fmt.Sprintf("sq_vec%d", len(g.defs))}
+		g.defByKey[key] = d
+		g.defs = append(g.defs, d)
+		d.body = fmt.Sprintf("struct %s { int64_t len; %s a[%d]; };\n", d.name, g.ctype(u.Elem), max(u.Len, 1))
+		d.deps = g.valueDeps(u.Elem)
+		return d.name
+	case *MapStore:
+		key := g.typeKey(u)
+		if d, ok := g.defByKey[key]; ok {
+			return d.name
+		}
+		d := &cdef{name: fmt.Sprintf("sq_mapst%d", len(g.defs))}
+		g.defByKey[key] = d
+		g.defs = append(g.defs, d)
+		slots := mapSlots(u.Cap)
+		d.body = fmt.Sprintf("struct %s { sq_map h; %s k[%d]; %s v[%d]; uint8_t c[%d]; };\n", d.name, g.ctype(u.Key), slots, g.ctype(u.Value), slots, slots)
+		d.deps = append(g.valueDeps(u.Key), g.valueDeps(u.Value)...)
+		return d.name
+	case *ChanStore:
+		key := g.typeKey(u)
+		if d, ok := g.defByKey[key]; ok {
+			return d.name
+		}
+		d := &cdef{name: fmt.Sprintf("sq_chanst%d", len(g.defs))}
+		g.defByKey[key] = d
+		g.defs = append(g.defs, d)
+		d.body = fmt.Sprintf("struct %s { sq_chan h; %s buf[%d]; };\n", d.name, g.ctype(u.Elem), max(u.Cap, 1))
 		d.deps = g.valueDeps(u.Elem)
 		return d.name
 	case *Tuple:
@@ -353,14 +424,25 @@ func (g *gen) valueDeps(t Type) []string {
 			return []string{g.ctype(u)}
 		}
 		return g.valueDeps(u.Underlying())
-	case *Struct, *Slice, *Array, *Tuple:
+	case *Struct, *Slice, *Array, *Tuple, *VecType, *MapStore, *ChanStore:
 		return []string{g.ctype(u)}
 	}
 	return nil
 }
 
+// mapSlots is the table size for a map of capacity n (load factor at most 3/4).
+func mapSlots(n int64) int64 {
+	return nextPow2(n + n/3 + 1)
+}
+
 func (g *gen) decl(t Type, name string) string {
 	return g.ctype(t) + " " + name
+}
+
+// localDecl declares a local variable. (Locals are never over-aligned: clang's -fstack-usage
+// does not count the slack that realigning a frame needs, which would break the stack proof.)
+func (g *gen) localDecl(t Type, name string) string {
+	return g.decl(t, name)
 }
 
 func (g *gen) resultC(sig *Signature) string {
@@ -457,10 +539,10 @@ func (g *gen) zero(t Type) string {
 			return "false"
 		}
 		return "0"
-	case *Pointer, *Chan, *Map, *Signature:
+	case *Pointer, *Chan, *Map, *Signature, *ArenaType:
 		return "NULL"
 	}
-	return "((" + g.ctype(t) + "){0})"
+	return "((" + g.ctype(t) + "){})" // {} (GNU C) also works for empty structs and [0]T
 }
 
 // ---- equality ----
@@ -626,7 +708,13 @@ func (g *gen) function(f *Func) string {
 	var b strings.Builder
 	b.WriteString("\n")
 	g.lineDirectiveTo(&b, f.Decl.P)
-	b.WriteString("static " + g.proto(f) + " {\n")
+	attr := ""
+	for _, p := range f.Pragmas {
+		if p == "noinline" {
+			attr = "__attribute__((noinline)) "
+		}
+	}
+	b.WriteString("static " + attr + g.proto(f) + " {\n")
 	for _, d := range g.topDecls {
 		b.WriteString("\t" + d + "\n")
 	}

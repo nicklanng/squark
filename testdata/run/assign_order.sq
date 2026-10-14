@@ -1,0 +1,51 @@
+package main
+
+// multi-target assignment: index and pointer operands on the left are evaluated before any store
+
+type P struct{ n int }
+
+var m map[int]int cap 8
+
+func two() (int, int) { return 2, 7 }
+
+func main() {
+	var x [4]int
+	i := 0
+	i, x[i] = 2, 7
+	println(i, x[0], x[2])
+
+	s := []int{0, 0, 0}
+	j := 0
+	j, s[j] = 1, 5
+	println(j, s[0], s[1])
+
+	a, b := 1, 2
+	pa, pb := &a, &b
+	pa, *pa = pb, 9
+	println(a, b, *pa)
+
+	k := 1
+	k, m[k] = 3, 10
+	println(k, m[1], m[3])
+
+	var y [4]int
+	n := 0
+	n, y[n] = two()
+	println(n, y[0], y[2])
+
+	q := 0
+	var ok bool
+	q, ok = m[1]
+	println(q, ok)
+
+	ps := [2]P{}
+	r := 0
+	r, ps[r].n = 1, 4
+	println(r, ps[0].n, ps[1].n)
+
+	// swaps still work
+	u, v := 1, 2
+	u, v = v, u
+	x[0], x[1] = x[1], x[0]
+	println(u, v, x[0], x[1])
+}

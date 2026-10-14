@@ -1,0 +1,10 @@
+package main
+
+func main() {
+	const u uint8 = 1
+	v := u << 8 // ERROR "constant 256 overflows"
+	n := 3
+	var f float64 = 1 << n // ERROR "shifted operand 1 (type float64) must be integer"
+	var b uint8 = 300 << n // ERROR "constant 300 overflows"
+	println(v, f, b)
+}

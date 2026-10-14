@@ -1,0 +1,30 @@
+package main
+
+// pool, stack and from are contextual words: types with those names still work as results
+
+type stack struct{ items [..8]int }
+
+type from int
+
+func newStack() stack {
+	var s stack
+	s.items.Push(1)
+	return s
+}
+
+func depth() stack stack 16K { // result type stack, then a stack clause
+	return newStack()
+}
+
+func fromOf(n int) from { return from(n) }
+
+var f func() stack = newStack
+
+func view(b []byte) []byte from b { return b[:1] }
+
+func main() {
+	s := f()
+	d := depth()
+	var b [4]byte
+	println(len(s.items), len(d.items), int(fromOf(3)), len(view(b[:])))
+}

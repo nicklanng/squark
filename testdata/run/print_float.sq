@@ -1,0 +1,8 @@
+package main
+
+// println formats every float with nine significant digits, zero included
+
+func main() {
+	z := 0.0
+	println(z, 1.0, -2.5, 1e-300, 123456789.0)
+}

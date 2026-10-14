@@ -1,0 +1,26 @@
+package main
+
+// zero-size types compile and behave
+
+type E struct{}
+
+type W struct {
+	e E
+	n int
+	z [0]int
+}
+
+var ge E
+var gz [0]int
+
+func mk() E { return E{} }
+
+func main() {
+	var e E
+	var z [0]int
+	var w W
+	w.n = 3
+	println(e == mk(), e == ge, len(z), len(gz), w.n, len(w.z))
+	var es [3]E
+	println(len(es), es[1] == e)
+}

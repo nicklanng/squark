@@ -1,0 +1,142 @@
+// wordfreq prints the 10 most frequent words in a file as "count word".
+// It streams the file through a 64 KiB buffer and copies each distinct word once into a
+// package arena, so memory use is bounded by the vocabulary, not the file size.
+package main
+
+import (
+	"io"
+	"os"
+	"strconv"
+)
+
+const (
+	maxWords  = 128K
+	chunkSize = 64K
+)
+
+// words holds one copy of every distinct word for the life of the program.
+arena words 8M
+
+type Entry struct {
+	word  string
+	count int
+}
+
+var entries [maxWords]Entry
+var nentries = 0
+
+// counts maps each word (interned, so its key is static) to its index in entries.
+var counts map[string]int cap maxWords
+
+func count(w []byte) {
+	idx, ok := counts[string(w)]
+	if !ok {
+		if nentries == maxWords {
+			panic("too many distinct words")
+		}
+		idx = nentries
+		entries[idx] = Entry{word: string(w) in words}
+		counts[entries[idx].word] = idx
+		nentries++
+	}
+	entries[idx].count++
+}
+
+
+// less orders by count descending, then word ascending.
+func less(a, b Entry) bool {
+	if a.count != b.count {
+		return a.count > b.count
+	}
+	return a.word < b.word
+}
+
+// heapSort sorts entries with an explicit loop: no recursion, no closures.
+func heapSort(es []Entry) {
+	n := len(es)
+	for start := n/2 - 1; start >= 0; start-- {
+		siftDown(es, start, n)
+	}
+	for end := n - 1; end > 0; end-- {
+		es[0], es[end] = es[end], es[0]
+		siftDown(es, 0, end)
+	}
+}
+
+func siftDown(es []Entry, root, n int) {
+	for {
+		child := 2*root + 1
+		if child >= n {
+			return
+		}
+		if child+1 < n && less(es[child], es[child+1]) {
+			child++
+		}
+		if !less(es[root], es[child]) {
+			return
+		}
+		es[root], es[child] = es[child], es[root]
+		root = child
+	}
+}
+
+func main() {
+	if os.NArgs() != 2 {
+		println("usage: wordfreq FILE")
+		os.Exit(2)
+	}
+	f, err := os.Open(os.Arg(1))
+	if err != nil {
+		println("open:", err.Error())
+		os.Exit(1)
+	}
+	var buf [chunkSize]byte
+	carry := 0
+	for {
+		n, err := f.Read(buf[carry:])
+		end := carry + n
+		atEOF := err == io.EOF || n == 0
+		if err != nil && err != io.EOF {
+			println("read:", err.Error())
+			os.Exit(1)
+		}
+		start := -1
+		for i := 0; i < end; i++ {
+			c := buf[i]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+				buf[i] = c
+			}
+			if c >= 'a' && c <= 'z' {
+				if start < 0 {
+					start = i
+				}
+			} else if start >= 0 {
+				count(buf[start:i])
+				start = -1
+			}
+		}
+		if atEOF {
+			if start >= 0 {
+				count(buf[start:end])
+			}
+			break
+		}
+		// carry a partial word over to the next chunk
+		carry = 0
+		if start >= 0 {
+			carry = copy(buf[:], buf[start:end])
+		}
+	}
+	f.Close()
+	all := entries[:nentries]
+	heapSort(all)
+	var line [128]byte
+	for i := 0; i < len(all) && i < 10; i++ {
+		out := strconv.AppendInt(line[:0], all[i].count)
+		out = append(out, ' ')
+		out = append(out, all[i].word...)
+		out = append(out, '\n')
+		os.Stdout.Write(out)
+	}
+}

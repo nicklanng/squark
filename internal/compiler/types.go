@@ -55,7 +55,7 @@ var (
 	tInt32         = &Basic{Int32, "int32"}
 	tInt64         = &Basic{Int64, "int64"}
 	tUint          = &Basic{Uint, "uint"}
-	tUint8         = &Basic{Uint8, "uint8"}
+	tUint8         = &Basic{Uint8, "byte"}
 	tUint16        = &Basic{Uint16, "uint16"}
 	tUint32        = &Basic{Uint32, "uint32"}
 	tUint64        = &Basic{Uint64, "uint64"}
@@ -100,6 +100,13 @@ type Signature struct {
 	Params   []*Var
 	Results  []*Var
 	Variadic bool
+
+	// declared provenance (slots count the receiver first)
+	HasContract  bool
+	From         []int // results may point into these slots
+	ResultStatic bool  // results point only to static memory
+	StaticSlots  []int // these slots must point to static memory
+	Into         [][2]int
 }
 
 // Tuple is the type of a multi-value call.
@@ -132,6 +139,54 @@ func (t *Named) Underlying() Type {
 }
 
 var tError = &ErrorType{}
+
+// VecType is [..N]T: a length plus inline storage for N elements.
+type VecType struct {
+	Len  int64
+	Elem Type
+}
+
+// MapStore is map[K]V cap N: inline storage for a fixed-capacity map.
+type MapStore struct {
+	Key, Value Type
+	Cap        int64
+}
+
+// ChanStore is chan T cap N: inline storage for a channel and its buffer.
+type ChanStore struct {
+	Elem Type
+	Cap  int64
+}
+
+func (t *VecType) Underlying() Type   { return t }
+func (t *MapStore) Underlying() Type  { return t }
+func (t *ChanStore) Underlying() Type { return t }
+func (t *VecType) String() string     { return fmt.Sprintf("[..%d]%s", t.Len, t.Elem) }
+func (t *MapStore) String() string {
+	return fmt.Sprintf("map[%s]%s cap %d", t.Key, t.Value, t.Cap)
+}
+func (t *ChanStore) String() string { return fmt.Sprintf("chan %s cap %d", t.Elem, t.Cap) }
+
+// viewOf returns the view type of a storage type, or nil.
+func viewOf(t Type) Type {
+	switch u := t.Underlying().(type) {
+	case *VecType:
+		return &Slice{Elem: u.Elem}
+	case *MapStore:
+		return &Map{Key: u.Key, Value: u.Value}
+	case *ChanStore:
+		return &Chan{Elem: u.Elem}
+	}
+	return nil
+}
+
+// ArenaType is the type `arena`: a reference to a block of arena storage.
+type ArenaType struct{}
+
+func (t *ArenaType) Underlying() Type { return t }
+func (t *ArenaType) String() string   { return "arena" }
+
+var tArena = &ArenaType{}
 
 func (t *Array) String() string   { return fmt.Sprintf("[%d]%s", t.Len, t.Elem) }
 func (t *Slice) String() string   { return "[]" + t.Elem.String() }
@@ -229,12 +284,13 @@ type Var struct {
 
 	// lifetime analysis
 	Depth     int // lexical block depth of declaration (0 = global)
-	Content   Region // lower bound on the lifetime of references held by the variable
-	ContentHi Region // upper bound on the lifetime of storage the variable's references point to
-	hiSet     bool
 	AddrTaken bool
-	CName   string // unique C name (locals)
-	Used    bool
+	CName    string // unique C name (locals)
+	Used     bool
+	ReadOnly bool // error constants, arenas
+
+	ArenaSize     int64 // for arenas
+	ArenaSizeExpr Expr
 }
 
 type Func struct {
@@ -258,6 +314,8 @@ type Func struct {
 	StackHint int64 // //squark:stack N (for externs)
 	CName     string
 	Intrinsic string
+	IsTask    bool
+	StackLimit int64 // asserted upper bound (stack N on a task or function)
 }
 
 func (f *Func) FullName() string {
@@ -385,6 +443,18 @@ func Identical(a, b Type) bool {
 	case *ErrorType:
 		_, ok := b.(*ErrorType)
 		return ok
+	case *ArenaType:
+		_, ok := b.(*ArenaType)
+		return ok
+	case *VecType:
+		y, ok := b.(*VecType)
+		return ok && x.Len == y.Len && Identical(x.Elem, y.Elem)
+	case *MapStore:
+		y, ok := b.(*MapStore)
+		return ok && x.Cap == y.Cap && Identical(x.Key, y.Key) && Identical(x.Value, y.Value)
+	case *ChanStore:
+		y, ok := b.(*ChanStore)
+		return ok && x.Cap == y.Cap && Identical(x.Elem, y.Elem)
 	}
 	return false
 }
@@ -403,9 +473,15 @@ func hasRefs(t Type, seen map[Type]bool) bool {
 	switch u := t.Underlying().(type) {
 	case *Basic:
 		return u.Kind == String || u.Kind == UntypedString
-	case *Pointer, *Slice, *Chan, *Map:
+	case *Pointer, *Slice, *Chan, *Map, *ArenaType:
 		return true
 	case *Array:
+		return hasRefs(u.Elem, seen)
+	case *VecType:
+		return hasRefs(u.Elem, seen)
+	case *MapStore:
+		return hasRefs(u.Key, seen) || hasRefs(u.Value, seen)
+	case *ChanStore:
 		return hasRefs(u.Elem, seen)
 	case *Struct:
 		for _, f := range u.Fields {

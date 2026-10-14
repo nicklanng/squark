@@ -1,0 +1,12 @@
+package main
+
+func two() (int, int) { return 1, 2 }
+
+func main() {
+	var x int = "hello" // ERROR "cannot use \"hello\""
+	var y uint8 = 300 // ERROR "constant 300 overflows byte"
+	a := two() // ERROR "assignment mismatch: 1 variable but two() returns 2 values"
+	z := undefinedThing // ERROR "undefined: undefinedThing"
+	m := map[string]int{"a": 1} // ERROR "map literals are not supported"
+	_, _, _, _, _ = x, y, a, z, m
+}

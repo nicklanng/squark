@@ -1,0 +1,42 @@
+package main
+
+func leakInt() *int {
+	x := 42
+	return &x // ERROR "cannot return reference to variable x"
+}
+
+func leakSlice() []byte {
+	var buf [64]byte
+	return buf[:] // ERROR "cannot return reference to variable buf"
+}
+
+func leakLiteral() *Point {
+	return &Point{1, 2} // ERROR "cannot return reference to a temporary"
+}
+
+func leakVec() []int {
+	var v [..8]int
+	v.Push(1)
+	return v[:] // ERROR "cannot return reference to variable v"
+}
+
+func leakVariadic(xs ...int) []int {
+	return xs
+}
+
+func callVariadic() []int {
+	return leakVariadic(1, 2, 3) // ERROR "cannot return reference to the variadic argument list"
+}
+
+type Point struct{ X, Y int }
+
+// returning views of parameters is fine
+func prefix(b []byte) []byte { return b[:2] }
+func field(p *Point) *int    { return &p.X }
+
+func main() {
+	var b [4]byte
+	_ = prefix(b[:])
+	var p Point
+	_ = field(&p)
+}

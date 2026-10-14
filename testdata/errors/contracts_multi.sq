@@ -1,0 +1,21 @@
+package main
+
+type Node struct{ next *Node }
+
+// one missing `into` is reported once, not with its consequences
+func attach3(a *Node, b *Node) *Node from a { // ERROR "stores b inside a, but its signature does not say so"
+	a.next = b
+	return a
+}
+
+// independent problems are all reported
+func both(a *Node, b *Node, c *Node) *Node from a { // ERROR "stores b inside a" // ERROR "returns a reference into c"
+	a.next = b
+	return c
+}
+
+func main() {
+	var x, y, z Node
+	attach3(&x, &y)
+	both(&x, &y, &z)
+}

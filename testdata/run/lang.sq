@@ -1,0 +1,114 @@
+package main
+
+import (
+	"strconv"
+	"strings"
+)
+
+type Shape struct {
+	Kind string
+	W, H int
+}
+
+func (s Shape) Area() int { return s.W * s.H }
+
+func (s *Shape) Scale(k int) {
+	s.W *= k
+	s.H *= k
+}
+
+type Celsius float64
+
+const (
+	A = iota * 10
+	B
+	C
+)
+
+func minmax(xs []int) (lo, hi int) {
+	lo, hi = xs[0], xs[0]
+	for _, x := range xs[1:] {
+		lo = min(lo, x)
+		hi = max(hi, x)
+	}
+	return
+}
+
+func describe(n int) string {
+	switch n {
+	case 0:
+		return "zero"
+	case 1, 2, 3:
+		return "small"
+	}
+	return "big"
+}
+
+func main() {
+	s := Shape{Kind: "rect", W: 2, H: 3}
+	s.Scale(2)
+	println(s.Kind, s.Area())
+
+	shapes := []Shape{{"a", 1, 1}, {"b", 2, 2}}
+	total := 0
+	for _, sh := range shapes {
+		total += sh.Area()
+	}
+	println("total", total)
+
+	println(A, B, C)
+	lo, hi := minmax([]int{5, -2, 9, 3})
+	println(lo, hi)
+	println(describe(0), describe(2), describe(10))
+
+	var t Celsius = 21.5
+	println(t > 20)
+
+	var u8 uint8 = 250
+	u8 += 10
+	var i8 int8 = 127
+	i8++
+	println(u8, i8, -7/2, -7%2, 1<<62>>61)
+
+	var buf [32]byte
+	out := strconv.AppendInt(buf[:0], -12345)
+	out = append(out, ' ')
+	out = strconv.AppendFloat(out, 3.14159, 3)
+	println(string(out))
+
+	n, err := strconv.Atoi("123x")
+	println(n, err != nil, err.Error())
+	v, _ := strconv.Atoi("-9876")
+	println(v)
+
+	var parts [4]string
+	fields := strings.Split("a,b,c", ",", parts[:])
+	println(len(fields), fields[0], fields[2])
+	before, after, found := strings.Cut("key=value", "=")
+	println(before, after, found)
+	println(strings.TrimSpace("  hi  "), strings.Index("hello", "ll"), strings.EqualFold("Go", "GO"))
+
+	var m map[int]string cap 16
+	for i := range 10 {
+		m[i] = describe(i)
+	}
+	delete(m, 5)
+	println(len(m), m[2], m[5] == "")
+	count := 0
+	for k, v := range m {
+		if v == "big" {
+			count += k
+		}
+	}
+	println("sum of big keys", count)
+
+	arr := [5]int{1, 2, 3}
+	arr2 := arr
+	arr2[0] = 100
+	println(arr[0], arr2[0], len(arr), arr == [5]int{1, 2, 3, 0, 0})
+
+	x := 10
+	p := &x
+	*p += 5
+	println(x)
+}

@@ -1,0 +1,29 @@
+package main
+
+import "strconv"
+
+func show(s string, base int) {
+	n, err := strconv.ParseInt(s, base)
+	if err != nil {
+		println(s, base, "error:", err)
+		return
+	}
+	println(s, base, n)
+}
+
+func main() {
+	show("_", 10)
+	show("1_000", 10)
+	show("-_", 10)
+	show("+", 10)
+	show("", 10)
+	show("10", 37)
+	show("10", 1)
+	show("10", 0)
+	show("+5", 10)
+	show("-9223372036854775808", 10)
+	show("9223372036854775808", 10)
+	show("zz", 36)
+	show("ff", 16)
+	show("12a", 10)
+}

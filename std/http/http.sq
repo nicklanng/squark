@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -13,9 +14,15 @@ const (
 	ReadBufferSize = 16384
 	// WriteBufferSize is the response staging buffer; larger bodies stream as chunks.
 	WriteBufferSize = 16384
+	// RequestArenaSize is the per-request arena (Request.Arena), freed when the response is done.
+	RequestArenaSize = 16K
 	headerBufferSize = 1024
 	MaxHeaders       = 32
 )
+
+// IdleRelease is how long a keep-alive connection may sit idle before its goroutine exits and the
+// connection moves to the runtime's idle set (where it costs no stack until its next request).
+const IdleRelease = 100 * time.Millisecond
 
 type Header struct {
 	Name  string
@@ -30,6 +37,10 @@ type Request struct {
 	Proto         string
 	Body          []byte
 	ContentLength int
+
+	// Arena is scratch memory for this request: allocate with `x in r.Arena`. Everything in it is
+	// gone once the response has been written.
+	Arena arena
 
 	headers   [MaxHeaders]Header
 	nheaders  int
@@ -81,6 +92,8 @@ type ResponseWriter struct {
 	head        bool
 	failed      bool
 	hasType     bool
+	crlf        bool // a chunk's data went out; its closing CRLF leads the next write
+	dropped     int  // HEAD: body bytes counted for Content-Length but not sent
 }
 
 // SetHeader adds a response header. Content-Length, Date and Connection are managed for you.
@@ -111,7 +124,7 @@ func (w *ResponseWriter) Write(p []byte) (int, error) {
 	n := 0
 	for n < len(p) {
 		if len(w.buf) == cap(w.buf) {
-			w.flushChunk()
+			w.spill()
 		}
 		k := min(len(p)-n, cap(w.buf)-len(w.buf))
 		w.buf = append(w.buf, p[n:n+k]...)
@@ -124,7 +137,7 @@ func (w *ResponseWriter) WriteString(s string) (int, error) {
 	n := 0
 	for n < len(s) {
 		if len(w.buf) == cap(w.buf) {
-			w.flushChunk()
+			w.spill()
 		}
 		k := min(len(s)-n, cap(w.buf)-len(w.buf))
 		w.buf = append(w.buf, s[n:n+k]...)
@@ -135,7 +148,7 @@ func (w *ResponseWriter) WriteString(s string) (int, error) {
 
 func (w *ResponseWriter) WriteByte(c byte) error {
 	if len(w.buf) == cap(w.buf) {
-		w.flushChunk()
+		w.spill()
 	}
 	w.buf = append(w.buf, c)
 	return nil
@@ -149,8 +162,7 @@ func (w *ResponseWriter) WriteInt(v int) {
 // Status returns the status code that will be (or was) sent.
 func (w *ResponseWriter) Status() int { return w.status }
 
-//squark:extern sq_httpdate
-func httpDate(dst []byte) int
+extern "sq_httpdate" func httpDate(dst []byte) int stack 8K
 
 func (w *ResponseWriter) statusLine(dst []byte) []byte {
 	dst = append(dst, "HTTP/1.1 "...)
@@ -171,6 +183,16 @@ func (w *ResponseWriter) statusLine(dst []byte) []byte {
 	return dst
 }
 
+// spill empties a full w.buf: it sends it as a chunk, or for HEAD, which has no body, only counts it.
+func (w *ResponseWriter) spill() {
+	if w.head {
+		w.dropped += len(w.buf)
+		w.buf = w.buf[:0]
+		return
+	}
+	w.flushChunk()
+}
+
 // flushChunk sends the buffered body as a chunk, switching to chunked encoding if needed.
 func (w *ResponseWriter) flushChunk() {
 	var head [headerBufferSize + 256]byte
@@ -182,10 +204,15 @@ func (w *ResponseWriter) flushChunk() {
 		h = append(h, w.hdr...)
 		h = append(h, "Transfer-Encoding: chunked\r\n\r\n"...)
 	}
+	if w.crlf {
+		h = append(h, "\r\n"...)
+		w.crlf = false
+	}
 	if len(w.buf) > 0 {
+		// w.buf may be full, so the chunk's CRLF is sent with the next write instead
 		h = appendHex(h, len(w.buf))
 		h = append(h, "\r\n"...)
-		w.buf = append(w.buf, "\r\n"...)
+		w.crlf = true
 	}
 	if _, err := w.conn.Write2(h, w.buf); err != nil {
 		w.failed = true
@@ -211,12 +238,19 @@ func appendHex(dst []byte, v int) []byte {
 // finish sends whatever remains of the response.
 func (w *ResponseWriter) finish() {
 	if w.chunked {
+		const term = "\r\n0\r\n\r\n"
+		if len(w.buf) > 0 && cap(w.buf)-len(w.buf) < len(term) {
+			w.flushChunk() // no room for the terminator after the data
+		}
 		var tail [32]byte
 		t := tail[:0]
+		if w.crlf {
+			t = append(t, "\r\n"...)
+		}
 		if len(w.buf) > 0 {
 			t = appendHex(t, len(w.buf))
 			t = append(t, "\r\n"...)
-			w.buf = append(w.buf, "\r\n0\r\n\r\n"...)
+			w.buf = append(w.buf, term...)
 		} else {
 			t = append(t, "0\r\n\r\n"...)
 		}
@@ -233,7 +267,7 @@ func (w *ResponseWriter) finish() {
 		body = w.buf[:0]
 	} else {
 		h = append(h, "Content-Length: "...)
-		h = strconv.AppendInt(h, len(w.buf))
+		h = strconv.AppendInt(h, w.dropped+len(w.buf))
 		h = append(h, "\r\n"...)
 	}
 	h = append(h, "\r\n"...)
@@ -257,7 +291,25 @@ func ListenAndServe(addr string, h HandlerFunc) error {
 	return Serve(l, h)
 }
 
+// MaxServers is how many Serve calls one process may run.
+const MaxServers = 16
+
+const ErrTooManyServers = error(503, "http: too many servers in one process")
+
+// handlers holds each running server's handler; idle connections are tagged with its index.
+var handlers [..MaxServers]HandlerFunc
+var wakerStarted bool
+
 func Serve(l net.Listener, h HandlerFunc) error {
+	if len(handlers) == MaxServers {
+		return ErrTooManyServers
+	}
+	id := len(handlers)
+	handlers.Push(h)
+	if !wakerStarted {
+		wakerStarted = true
+		go wakeIdle() // one for all servers: the idle set has a single consumer
+	}
 	for {
 		c, err := l.Accept()
 		if err != nil {
@@ -266,7 +318,7 @@ func Serve(l net.Listener, h HandlerFunc) error {
 			}
 			return err
 		}
-		go serveConn(c, h)
+		go serveConn(c, id)
 	}
 }
 
@@ -276,47 +328,74 @@ func writeError(c net.Conn, status string) {
 	c.WriteString("\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 }
 
-// serveConn runs one keep-alive connection. At most 10000 run at once; further accepted
-// connections wait for a slot.
-//
-//squark:goroutines 10000
-func serveConn(c net.Conn, h HandlerFunc) {
+// wakeIdle restarts connections from the idle set when they have a new request.
+task wakeIdle() pool 1 {
+	for {
+		c, id := net.NextIdle()
+		go serveConn(c, id)
+	}
+}
+
+// serveConn runs one keep-alive connection while it is busy. At most 10000 run at once; further
+// connections wait for a slot. A connection that stays quiet for IdleRelease is parked in the
+// runtime's idle set and this goroutine exits, returning its whole stack to the OS.
+task serveConn(c net.Conn, id int) pool 10000 {
+	h := handlers[id]
 	var rbuf [ReadBufferSize]byte
 	var wbuf [WriteBufferSize]byte
-	var hbuf [headerBufferSize]byte
-	defer c.Close()
 	n := 0
 	for {
-		end := -1
-		for {
-			end = headerEnd(rbuf[:n])
-			if end >= 0 {
-				break
-			}
-			if n == len(rbuf) {
-				writeError(c, "431 Request Header Fields Too Large")
-				return
-			}
-			m, err := c.Read(rbuf[n:])
-			if err != nil || m == 0 {
-				return
-			}
-			n += m
+		if n == 0 && !c.WaitReadable(IdleRelease) {
+			c.ParkIdle(id)
+			return
 		}
+		ok := false
+		n, ok = serveRequest(c, h, rbuf[:], n, wbuf[:])
+		if !ok {
+			c.Close()
+			return
+		}
+	}
+}
+
+// serveRequest serves one request whose first n bytes are already in rbuf. It returns how many
+// bytes of the next (pipelined) request remain buffered, and whether to keep the connection.
+//
+//squark:noinline
+func serveRequest(c net.Conn, h HandlerFunc, rbuf []byte, n int, wbuf []byte) (int, bool) {
+	var hbuf [headerBufferSize]byte
+	end := -1
+	for {
+		end = headerEnd(rbuf[:n])
+		if end >= 0 {
+			break
+		}
+		if n == len(rbuf) {
+			writeError(c, "431 Request Header Fields Too Large")
+			return 0, false
+		}
+		m, err := c.Read(rbuf[n:])
+		if err != nil || m == 0 {
+			return 0, false
+		}
+		n += m
+	}
+	arena scratch RequestArenaSize {
 		var req Request
+		req.Arena = scratch
 		if !parseRequest(string(rbuf[:end]), &req) {
 			writeError(c, "400 Bad Request")
-			return
+			return 0, false
+		}
+		if req.ContentLength > len(rbuf)-end { // not end+ContentLength: that can overflow
+			writeError(c, "413 Request Entity Too Large")
+			return 0, false
 		}
 		total := end + req.ContentLength
-		if total > len(rbuf) {
-			writeError(c, "413 Request Entity Too Large")
-			return
-		}
 		for n < total {
 			m, err := c.Read(rbuf[n:])
 			if err != nil || m == 0 {
-				return
+				return 0, false
 			}
 			n += m
 		}
@@ -325,11 +404,11 @@ func serveConn(c net.Conn, h HandlerFunc) {
 		h(&w, &req)
 		w.finish()
 		if !w.keepAlive || w.failed {
-			return
+			return 0, false
 		}
 		// keep pipelined bytes
-		copy(rbuf[:], rbuf[total:n])
-		n -= total
+		copy(rbuf, rbuf[total:n])
+		return n - total, true
 	}
 }
 

@@ -4,19 +4,20 @@ import (
 	"fmt"
 	"go/constant"
 	gotoken "go/token"
+	"math"
 	"strconv"
 	"strings"
 )
 
 var universe = NewScope(nil)
 
-var builtinNames = []string{"len", "cap", "append", "copy", "make", "delete", "close", "panic", "print", "println", "min", "max", "new", "__error"}
+var builtinNames = []string{"len", "cap", "append", "copy", "make", "delete", "close", "panic", "print", "println", "min", "max", "new"}
 
 func init() {
 	for _, t := range []*Basic{tBool, tInt, tInt8, tInt16, tInt32, tInt64, tUint, tUint8, tUint16, tUint32, tUint64, tUintptr, tFloat32, tFloat64, tString, tRawptr} {
 		universe.Insert(&Object{Kind: ObjType, Name: t.Name, Type: t, state: 2})
 	}
-	universe.Insert(&Object{Kind: ObjType, Name: "byte", Type: tUint8, state: 2})
+	universe.Insert(&Object{Kind: ObjType, Name: "uint8", Type: tUint8, state: 2})
 	universe.Insert(&Object{Kind: ObjType, Name: "rune", Type: tInt32, state: 2})
 	universe.Insert(&Object{Kind: ObjType, Name: "error", Type: tError, state: 2})
 	universe.Insert(&Object{Kind: ObjConst, Name: "true", Type: tUntypedBool, Const: constant.MakeBool(true), state: 2})
@@ -42,12 +43,15 @@ type Checker struct {
 	scope     *Scope
 	depth     int
 	breakable []Stmt
+	labels    map[string]Pos // labels seen in the current function
 	loopDepth int
 	iota      int64 // -1 when not in a const decl
 	varCount  int
 	namedRes  []*Var
 
-	calleeIdent *Ident // identifier being checked as the callee of a direct call
+	calleeIdent *Ident    // identifier being checked as the callee of a direct call
+	goCall      *CallExpr // call being checked as the operand of a go statement
+	allocArena  Expr      // innermost `in` arena, while checking its operand
 }
 
 // Check type-checks the whole program.
@@ -104,14 +108,9 @@ func (c *Checker) collect(pkg *Package) {
 	}
 	for _, f := range pkg.Files {
 		imps := map[string]*Package{}
+		impPaths := map[string]string{}
 		for _, imp := range f.Imports {
-			var dep *Package
-			for _, d := range pkg.Imports {
-				if d.Path == imp.Path || strings.HasSuffix(d.Dir, strings.TrimPrefix(imp.Path, "./")) {
-					dep = d
-					break
-				}
-			}
+			dep := imp.Pkg
 			if dep == nil {
 				c.errorf(imp.P, "unresolved import %q", imp.Path)
 				continue
@@ -120,6 +119,11 @@ func (c *Checker) collect(pkg *Package) {
 			if imp.Name != nil {
 				name = imp.Name.Name
 			}
+			if prev, ok := impPaths[name]; ok {
+				c.errorf(imp.P, "%s redeclared in this block (also imported from %q)", name, prev)
+				continue
+			}
+			impPaths[name] = imp.Path
 			imps[name] = dep
 		}
 		c.fileScopes[f] = imps
@@ -139,6 +143,19 @@ func (c *Checker) collect(pkg *Package) {
 					}
 				case CONST:
 					for _, vs := range d.Values {
+						if isErrorConst(vs) {
+							// error constants are static read-only values
+							for _, name := range vs.Names {
+								v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, ReadOnly: true}
+								o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f}
+								v.Obj = o
+								name.Obj = o
+								pkg.Globals = append(pkg.Globals, v)
+								declare(o)
+							}
+							pkg.GlobalInits = append(pkg.GlobalInits, vs)
+							continue
+						}
 						for i, name := range vs.Names {
 							o := &Object{Kind: ObjConst, Name: name.Name, Pos: name.P, Pkg: pkg, decl: constDecl{vs, i, f}}
 							name.Obj = o
@@ -158,6 +175,14 @@ func (c *Checker) collect(pkg *Package) {
 						pkg.GlobalInits = append(pkg.GlobalInits, vs)
 					}
 				}
+			case *ArenaDecl:
+				v := &Var{Name: d.Name.Name, Pos: d.Name.P, Global: true, Pkg: pkg, Type: tArena, ReadOnly: true, ArenaSizeExpr: d.Size}
+				o := &Object{Kind: ObjVar, Name: d.Name.Name, Pos: d.Name.P, Pkg: pkg, Var: v, Type: tArena, decl: f}
+				v.Obj = o
+				d.Name.Obj = o
+				pkg.Globals = append(pkg.Globals, v)
+				pkg.Arenas = append(pkg.Arenas, v)
+				declare(o)
 			case *FuncDecl:
 				fn := &Func{Name: d.Name.Name, Decl: d, Pkg: pkg, Pragmas: d.Pragmas}
 				for _, pr := range d.Pragmas {
@@ -166,36 +191,30 @@ func (c *Checker) collect(pkg *Package) {
 						continue
 					}
 					switch fields[0] {
-					case "extern":
-						if len(fields) > 1 {
-							fn.Extern = fields[1]
-						} else {
-							fn.Extern = d.Name.Name
-						}
-					case "stack":
-						if len(fields) > 1 {
-							n, err := parseSize(fields[1])
-							if err != nil {
-								c.errorf(d.P, "bad //squark:stack size %q", fields[1])
-							}
-							fn.StackHint = n
-						}
-					case "goroutines":
-						if len(fields) > 1 {
-							n, err := strconv.Atoi(fields[1])
-							if err != nil || n < 1 {
-								c.errorf(d.P, "bad //squark:goroutines count %q", fields[1])
-							}
-							fn.Pool = n
-						}
-					case "intrinsic":
-						if len(fields) > 1 {
-							fn.Intrinsic = fields[1]
-						}
+					case "noinline":
+					case "extern", "stack", "goroutines":
+						c.errorf(d.P, "//squark:%s is gone: use extern func ... stack N, or task ... pool N", fields[0])
+					default:
+						c.errorf(d.P, "unknown pragma //squark:%s", fields[0])
 					}
 				}
-				if d.Body == nil && fn.Extern == "" && fn.Intrinsic == "" {
-					c.errorf(d.P, "missing function body (add //squark:extern to bind a C function)")
+				switch d.Kind {
+				case KindExtern:
+					fn.Extern = d.ExternSym
+					if fn.Extern == "" {
+						fn.Extern = d.Name.Name
+					}
+					if d.Stack == nil {
+						c.errorf(d.P, "extern func %s needs a stack budget (extern func %s(...) stack 8K): the stack proof depends on it", d.Name.Name, d.Name.Name)
+					}
+				case KindTask:
+					fn.IsTask = true
+					if d.Pool == nil {
+						c.errorf(d.P, "task %s needs a pool size (task %s(...) pool N): the maximum number running at once", d.Name.Name, d.Name.Name)
+					}
+				}
+				if d.Body == nil && d.Kind != KindExtern {
+					c.errorf(d.P, "missing function body (use extern func to bind a C function)")
 				}
 				pkg.Funcs = append(pkg.Funcs, fn)
 				c.prog.Funcs = append(c.prog.Funcs, fn)
@@ -212,12 +231,70 @@ func (c *Checker) collect(pkg *Package) {
 			}
 		}
 	}
+	// as in Go, a file's import names and the package's own names share one namespace
+	for _, f := range pkg.Files {
+		for _, imp := range f.Imports {
+			if imp.Pkg == nil {
+				continue
+			}
+			name := imp.Pkg.Name
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			if o := pkg.Scope.LookupLocal(name); o != nil {
+				c.errorf(o.Pos, "%s already declared through import of %q (at %s:%d)", name, imp.Path, shortFile(imp.P.File), imp.P.Line)
+			}
+		}
+	}
+}
+
+// isErrorConst reports whether a const spec initializes errors: const ErrX = error(404, "x").
+func isErrorConst(vs *ValueSpec) bool {
+	if len(vs.Values) == 0 {
+		return false
+	}
+	call, ok := vs.Values[0].(*CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Fun.(*Ident)
+	return ok && id.Name == "error"
 }
 
 type constDecl struct {
 	spec  *ValueSpec
 	index int
 	file  *File
+}
+
+// findTask resolves "pkg.name" (or "name" in package main) to a task.
+func (c *Checker) findTask(target string) *Func {
+	pkgName, name := "main", target
+	if i := strings.IndexByte(target, '.'); i >= 0 {
+		pkgName, name = target[:i], target[i+1:]
+	}
+	for _, p := range c.prog.Packages {
+		if p.Name != pkgName {
+			continue
+		}
+		for _, f := range p.Funcs {
+			if f.Name == name && f.IsTask && f.RecvType == nil {
+				return f
+			}
+		}
+	}
+	return nil
+}
+
+// constSize evaluates a constant non-negative integer clause expression.
+func (c *Checker) constSize(x Expr, what string) (int64, bool) {
+	c.expr(x)
+	v, ok := constInt(x)
+	if !ok || !isInteger(x.info().T) || v < 0 {
+		c.errorf(x.Pos(), "%s must be a non-negative integer constant", what)
+		return 0, false
+	}
+	return v, true
 }
 
 func parseSize(s string) (int64, error) {
@@ -263,12 +340,19 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			if g, ok := d.(*GenDecl); ok && g.Tok == CONST {
 				for _, vs := range g.Values {
 					for _, name := range vs.Names {
-						if name.Obj != nil {
+						if name.Obj != nil && name.Obj.Kind == ObjConst {
 							c.resolveConst(name.Obj)
 						}
 					}
 				}
 			}
+		}
+	}
+	// package arena sizes
+	for _, v := range pkg.Arenas {
+		c.setFile(v.Obj.decl.(*File))
+		if n, ok := c.constSize(v.ArenaSizeExpr, "arena size"); ok {
+			v.ArenaSize = n
 		}
 	}
 	// function signatures and methods
@@ -308,6 +392,26 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			named.Methods = append(named.Methods, fn)
 		}
 		fn.Sig = c.signature(d.Type, recv)
+		if d.Pool != nil {
+			if n, ok := c.constSize(d.Pool, "pool size"); ok {
+				if n < 1 {
+					c.errorf(d.Pool.Pos(), "pool size must be at least 1")
+				}
+				fn.Pool = int(n)
+			}
+		}
+		if d.Stack != nil {
+			if n, ok := c.constSize(d.Stack, "stack size"); ok {
+				if fn.Extern != "" {
+					fn.StackHint = n
+				} else {
+					fn.StackLimit = n
+				}
+			}
+		}
+		if fn.IsTask && len(fn.Sig.Results) > 0 {
+			c.errorf(d.P, "task %s cannot return values (a task's results would have nowhere to go)", fn.Name)
+		}
 		if fn.Extern != "" && recv != nil {
 			c.errorf(d.P, "extern functions cannot be methods")
 		}
@@ -318,15 +422,47 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			d.Name.Obj.Type = fn.Sig
 		}
 	}
+	// budget and pool directives (package main only)
+	for _, d := range pkg.Budgets {
+		if pkg != c.prog.Main {
+			c.errorf(d.P, "%s is only allowed in package main", d.Name)
+			continue
+		}
+		c.setFile(c.fileOf(d.P))
+		n, ok := c.constSize(d.Value, d.Name)
+		if !ok {
+			continue
+		}
+		switch d.Name {
+		case "budget":
+			if c.prog.Budget != 0 {
+				c.errorf(d.P, "duplicate budget")
+			}
+			c.prog.Budget = n
+		case "pool":
+			fn := c.findTask(d.Target)
+			if fn == nil {
+				c.errorf(d.P, "pool %s: no task named %s (write pkg.task, e.g. pool http.serveConn 256)", d.Target, d.Target)
+				continue
+			}
+			if n < 1 {
+				c.errorf(d.P, "pool size must be at least 1")
+			}
+			fn.Pool = int(n)
+		}
+	}
 	// global variable types
 	for _, f := range pkg.Files {
 		c.setFile(f)
 		for _, d := range f.Decls {
 			g, ok := d.(*GenDecl)
-			if !ok || g.Tok != VAR {
+			if !ok || (g.Tok != VAR && g.Tok != CONST) {
 				continue
 			}
 			for _, vs := range g.Values {
+				if g.Tok == CONST && !isErrorConst(vs) {
+					continue
+				}
 				c.globalVarSpec(vs)
 			}
 		}
@@ -367,6 +503,10 @@ func (c *Checker) globalVarSpec(vs *ValueSpec) {
 			if isNilType(t) {
 				c.errorf(x.Pos(), "use of untyped nil in variable declaration")
 				t = tInvalid
+			} else if isStorageCopy(t) {
+				c.errorf(x.Pos(), "cannot copy %s storage into %s: use a view (%s) instead", t, n.Name, viewOf(t))
+			} else {
+				c.checkNestedStorageCopy(x, t, " into "+n.Name)
 			}
 		} else {
 			c.assignable(x, t, "variable declaration")
@@ -396,7 +536,12 @@ func (c *Checker) resolveNamed(n *Named) {
 	c.fileImports = saved
 	if nn, ok := u.(*Named); ok {
 		c.resolveNamed(nn)
-		u = nn.Underlying()
+		if nn.Obj.state == 1 { // type A B; type B A
+			c.errorf(o.Pos, "invalid recursive type %s", o.Name)
+			u = tInvalid
+		} else {
+			u = nn.Underlying()
+		}
 	}
 	n.underlying = u
 	o.state = 2
@@ -414,6 +559,12 @@ func (c *Checker) checkValueCycle(t Type, path []*Named) bool {
 		}
 		return c.checkValueCycle(u.underlying, append(path, u))
 	case *Array:
+		return c.checkValueCycle(u.Elem, path)
+	case *VecType: // vectors, map and channel storage hold their elements inline
+		return c.checkValueCycle(u.Elem, path)
+	case *MapStore:
+		return c.checkValueCycle(u.Key, path) || c.checkValueCycle(u.Value, path)
+	case *ChanStore:
 		return c.checkValueCycle(u.Elem, path)
 	case *Struct:
 		for _, f := range u.Fields {
@@ -461,7 +612,9 @@ func (c *Checker) resolveConst(o *Object) {
 	x = cloneExpr(x)
 	c.expr(x)
 	if x.info().Const == nil {
-		c.errorf(x.Pos(), "%s is not constant", exprString(x))
+		if x.info().Mode != ModeInvalid {
+			c.errorf(x.Pos(), "%s is not constant", exprString(x))
+		}
 		o.Type = tInvalid
 		o.Const = constant.MakeUnknown()
 		return
@@ -535,9 +688,57 @@ func (c *Checker) signature(ft *FuncType, recv *Var) *Signature {
 			sig.Results = append(sig.Results, &Var{Name: n.Name, Type: t, Pos: n.P})
 		}
 	}
+	c.contract(ft, sig, recv)
 	ft.T = sig
 	ft.Mode = ModeType
 	return sig
+}
+
+// contract records declared provenance (from / into / static) on a signature.
+func (c *Checker) contract(ft *FuncType, sig *Signature, recv *Var) {
+	slots := map[string]int{}
+	base := 0
+	if recv != nil {
+		slots[recv.Name] = 0
+		base = 1
+	}
+	for i, p := range sig.Params {
+		slots[p.Name] = base + i
+	}
+	slotOf := func(id *Ident) (int, bool) {
+		s, ok := slots[id.Name]
+		if !ok || id.Name == "_" {
+			c.errorf(id.P, "%s is not a parameter of this function", id.Name)
+		}
+		return s, ok
+	}
+	idx := base
+	for _, f := range ft.Params {
+		n := max(len(f.Names), 1)
+		for k := 0; k < n; k++ {
+			if f.Static {
+				sig.HasContract = true
+				sig.StaticSlots = append(sig.StaticSlots, idx)
+			}
+			if f.Into != nil {
+				sig.HasContract = true
+				if dst, ok := slotOf(f.Into); ok {
+					sig.Into = append(sig.Into, [2]int{idx, dst})
+				}
+			}
+			idx++
+		}
+	}
+	for _, id := range ft.From {
+		sig.HasContract = true
+		if s, ok := slotOf(id); ok {
+			sig.From = append(sig.From, s)
+		}
+	}
+	if ft.ResultStatic {
+		sig.HasContract = true
+		sig.ResultStatic = true
+	}
 }
 
 // typExpr evaluates a type expression.
@@ -610,16 +811,34 @@ func (c *Checker) typExpr1(x Expr) Type {
 		}
 		return &Array{Len: n, Elem: elem}
 	case *ChanType:
-		return &Chan{Elem: c.typExpr(e.Elem)}
+		elem := c.typExpr(e.Elem)
+		if e.Cap != nil {
+			n, _ := c.constSize(e.Cap, "channel capacity")
+			return &ChanStore{Elem: elem, Cap: n}
+		}
+		return &Chan{Elem: elem}
 	case *MapType:
 		k := c.typExpr(e.Key)
 		v := c.typExpr(e.Value)
 		if !validMapKey(k) {
 			c.errorf(e.Key.Pos(), "invalid map key type %s (must be an integer, string, bool or pointer)", k)
 		}
+		if e.Cap != nil {
+			n, _ := c.constSize(e.Cap, "map capacity")
+			if n < 1 {
+				c.errorf(e.Cap.Pos(), "map capacity must be at least 1")
+			}
+			return &MapStore{Key: k, Value: v, Cap: n}
+		}
 		return &Map{Key: k, Value: v}
+	case *VecTypeExpr:
+		elem := c.typExpr(e.Elem)
+		n, _ := c.constSize(e.Len, "vector capacity")
+		return &VecType{Len: n, Elem: elem}
 	case *FuncType:
 		return c.signature(e, nil)
+	case *ArenaTypeExpr:
+		return tArena
 	case *StructType:
 		st := &Struct{}
 		seen := map[string]bool{}
@@ -682,9 +901,15 @@ func (c *Checker) checkBodies(pkg *Package) {
 	// global initializers are checked in resolveDecls via globalVarSpec.
 }
 
+// newVarName returns the C name of a local: unique through the counter, and never containing "__",
+// which every package-level C name (pkg__F, G_pkg__v) does, so a local cannot shadow one.
 func (c *Checker) newVarName(name string) string {
 	c.varCount++
-	return fmt.Sprintf("%s_%d", sanitize(name), c.varCount)
+	n := fmt.Sprintf("%s_%d", sanitize(name), c.varCount)
+	for strings.Contains(n, "__") {
+		n = strings.ReplaceAll(n, "__", "_")
+	}
+	return n
 }
 
 func sanitize(s string) string {
@@ -706,6 +931,7 @@ func (c *Checker) funcBody(fn *Func) {
 	c.depth = 1
 	c.varCount = 0
 	c.breakable = nil
+	c.labels = map[string]Pos{}
 	c.loopDepth = 0
 	c.namedRes = nil
 	defer func() { c.fn = nil; c.scope = c.pkg.Scope }()
@@ -816,7 +1042,24 @@ func representable(v constant.Value, t Type) (constant.Value, bool) {
 		}
 		ok := constant.Compare(v, gotoken.GEQ, lo) && constant.Compare(v, gotoken.LEQ, hi)
 		return v, ok
-	case k == Float32 || k == Float64 || k == UntypedFloat:
+	case k == Float32 || k == Float64:
+		if v.Kind() != constant.Int && v.Kind() != constant.Float {
+			return v, false
+		}
+		// round to the type's precision, as the C value will be; too large is an overflow
+		f := constant.ToFloat(v)
+		var r float64
+		if k == Float32 {
+			r32, _ := constant.Float32Val(f)
+			r = float64(r32)
+		} else {
+			r, _ = constant.Float64Val(f)
+		}
+		if math.IsInf(r, 0) {
+			return v, false
+		}
+		return constant.MakeFloat64(r), true
+	case k == UntypedFloat:
 		if v.Kind() == constant.Int || v.Kind() == constant.Float {
 			return constant.ToFloat(v), true
 		}

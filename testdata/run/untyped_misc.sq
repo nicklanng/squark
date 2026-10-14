@@ -1,0 +1,22 @@
+package main
+
+// comparisons are untyped booleans; min/max of untyped constants take the widest kind
+
+type MyBool bool
+
+func isNil(a arena) bool { return a == nil }
+
+const lo = min(3, 2.5, 7)
+const hi = max(1, 'a')
+
+func main() {
+	x := 3
+	var b MyBool = x > 1
+	c := x == 3
+	var d MyBool = !(x < 0) && b
+	println(b, c, d, lo, hi, max("b", "ab"), min(x, 2))
+	println(isNil(nil))
+	arena a 64 {
+		println(isNil(a))
+	}
+}

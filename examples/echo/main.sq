@@ -1,0 +1,44 @@
+// echo is a TCP echo server: one goroutine per connection, each with a 4 KiB buffer on its own
+// compiler-sized stack. Try: nc localhost 7007
+package main
+
+import (
+	"net"
+	"os"
+	"time"
+)
+
+task handle(c net.Conn) pool 1000 {
+	defer c.Close()
+	var buf [4096]byte
+	start := time.Now()
+	total := 0
+	for {
+		n, err := c.Read(buf[:])
+		if err != nil {
+			break
+		}
+		if _, err := c.Write(buf[:n]); err != nil {
+			break
+		}
+		total += n
+	}
+	println("connection closed after", time.Since(start).Milliseconds(), "ms,", total, "bytes echoed")
+}
+
+func main() {
+	l, err := net.Listen(":7007")
+	if err != nil {
+		println("listen:", err.Error())
+		os.Exit(1)
+	}
+	println("echo server on :7007")
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			println("accept:", err.Error())
+			continue
+		}
+		go handle(c)
+	}
+}

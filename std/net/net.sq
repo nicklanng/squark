@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Listener struct {
@@ -17,31 +18,31 @@ type Conn struct {
 	fd int
 }
 
-//squark:extern sq_listen_tcp
-func listenTCP(host string, port int, backlog int) int
+extern "sq_listen_tcp" func listenTCP(host string, port int, backlog int) int stack 8K
 
-//squark:extern sq_accept
-func accept(fd int) int
+extern "sq_accept" func accept(fd int) int stack 8K
 
-//squark:extern sq_dial_tcp
-func dialTCP(host string, port int) int
+extern "sq_dial_tcp" func dialTCP(host string, port int) int stack 8K
 
-//squark:extern sq_read
-func sysRead(fd int, b []byte) int
+extern "sq_read" func sysRead(fd int, b []byte) int stack 8K
 
-//squark:extern sq_write
-func sysWrite(fd int, b []byte) int
+extern "sq_write" func sysWrite(fd int, b []byte) int stack 8K
 
-//squark:extern sq_write_str
-func sysWriteStr(fd int, s string) int
+extern "sq_write_str" func sysWriteStr(fd int, s string) int stack 8K
 
-//squark:extern sq_writev2
-func sysWritev2(fd int, a []byte, b []byte) int
+extern "sq_writev2" func sysWritev2(fd int, a []byte, b []byte) int stack 8K
 
-//squark:extern sq_close
-func sysClose(fd int) int
+extern "sq_close" func sysClose(fd int) int stack 8K
 
-var ErrBadAddress = __error(22, "invalid address (want host:port)")
+extern "sq_wait_idle" func waitIdle(fd int, graceNs int) int stack 8K
+
+extern "sq_park_idle" func parkIdle(fd int, tag int) stack 8K
+
+extern "sq_next_idle" func nextIdle() int stack 8K
+
+extern "sq_idle_count" func idleCount() int stack 8K
+
+const ErrBadAddress = error(22, "invalid address (want host:port)")
 
 func splitHostPort(addr string) (string, int, error) {
 	i := strings.LastIndexByte(addr, ':')
@@ -118,6 +119,9 @@ func (c Conn) Write(p []byte) (int, error) {
 	if n < 0 {
 		return 0, os.Errno(-n)
 	}
+	if n < len(p) {
+		return n, io.ErrShortWrite
+	}
 	return n, nil
 }
 
@@ -125,6 +129,9 @@ func (c Conn) WriteString(s string) (int, error) {
 	n := sysWriteStr(c.fd, s)
 	if n < 0 {
 		return 0, os.Errno(-n)
+	}
+	if n < len(s) {
+		return n, io.ErrShortWrite
 	}
 	return n, nil
 }
@@ -135,8 +142,35 @@ func (c Conn) Write2(a, b []byte) (int, error) {
 	if n < 0 {
 		return 0, os.Errno(-n)
 	}
+	if n < len(a)+len(b) {
+		return n, io.ErrShortWrite
+	}
 	return n, nil
 }
+
+// WaitReadable parks until c is readable and returns true, or returns false if nothing arrives
+// within grace.
+func (c Conn) WaitReadable(grace time.Duration) bool {
+	return waitIdle(c.fd, int(grace)) == 0
+}
+
+// ParkIdle hands c to the runtime's idle set with a tag (0..255) that NextIdle returns with it,
+// e.g. to say which server it belongs to. No goroutine waits for it: when it becomes readable it is
+// returned by NextIdle. The calling goroutine's stack is returned to the OS when it exits, so an
+// idle connection costs no memory beyond the kernel's socket.
+func (c Conn) ParkIdle(tag int) {
+	parkIdle(c.fd, tag)
+}
+
+// NextIdle blocks until a parked connection becomes readable and returns it with its tag.
+// Only one goroutine may call NextIdle at a time.
+func NextIdle() (Conn, int) {
+	v := nextIdle()
+	return Conn{fd: v & 0xffffffff}, v >> 32
+}
+
+// IdleCount reports how many connections are parked in the idle set.
+func IdleCount() int { return idleCount() }
 
 func (c Conn) Close() error {
 	if r := sysClose(c.fd); r < 0 {

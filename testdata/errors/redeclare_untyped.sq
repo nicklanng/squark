@@ -1,0 +1,7 @@
+package main
+
+func main() {
+	var a int8
+	a, b := 300, 2 // ERROR "constant 300 overflows"
+	println(a, b)
+}

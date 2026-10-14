@@ -1,0 +1,83 @@
+// jsonenc encodes an order with 10 items N times into a reused buffer and prints the total
+// number of bytes (counting a trailing newline per document, like Go's json.Encoder).
+package main
+
+import (
+	"json"
+	"os"
+	"strconv"
+)
+
+type Item struct {
+	SKU        string
+	Name       string
+	Qty        int
+	PriceCents int
+}
+
+type Order struct {
+	ID       int
+	Customer string
+	Email    string
+	Paid     bool
+	Items    []Item
+}
+
+func appendOrder(dst []byte, o *Order) []byte {
+	dst = append(dst, `{"id":`...)
+	dst = json.AppendInt(dst, o.ID)
+	dst = append(dst, `,"customer":`...)
+	dst = json.AppendString(dst, o.Customer)
+	dst = append(dst, `,"email":`...)
+	dst = json.AppendString(dst, o.Email)
+	dst = append(dst, `,"paid":`...)
+	dst = json.AppendBool(dst, o.Paid)
+	dst = append(dst, `,"items":[`...)
+	for i, it := range o.Items {
+		if i > 0 {
+			dst = append(dst, ',')
+		}
+		dst = append(dst, `{"sku":`...)
+		dst = json.AppendString(dst, it.SKU)
+		dst = append(dst, `,"name":`...)
+		dst = json.AppendString(dst, it.Name)
+		dst = append(dst, `,"qty":`...)
+		dst = json.AppendInt(dst, it.Qty)
+		dst = append(dst, `,"price_cents":`...)
+		dst = json.AppendInt(dst, it.PriceCents)
+		dst = append(dst, '}')
+	}
+	dst = append(dst, "]}\n"...)
+	return dst
+}
+
+func main() {
+	n := 2000000
+	if os.NArgs() > 1 {
+		n, _ = strconv.Atoi(os.Arg(1))
+	}
+	// item strings are built once into a text arena
+	var text [512]byte
+	t := text[:0]
+	var items [10]Item
+	for i := range items {
+		s := len(t)
+		t = append(t, "SKU-"...)
+		t = strconv.AppendInt(t, 1000+i)
+		sku := string(t[s:])
+		s = len(t)
+		t = append(t, "widget "...)
+		t = strconv.AppendInt(t, i)
+		items[i] = Item{SKU: sku, Name: string(t[s:]), Qty: i + 1, PriceCents: 199 * (i + 1)}
+	}
+	o := Order{Customer: "Ada Lovelace", Email: "ada@example.com", Items: items[:]}
+	var buf [4096]byte
+	total := 0
+	for i := 0; i < n; i++ {
+		o.ID = i
+		o.Paid = i%2 == 0
+		out := appendOrder(buf[:0], &o)
+		total += len(out)
+	}
+	println(total)
+}

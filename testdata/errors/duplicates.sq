@@ -1,0 +1,25 @@
+package main
+
+const two = 2
+
+func main() {
+	x := 2
+	switch x {
+	case 1, two:
+	case 2: // ERROR "duplicate case 2 in expression switch"
+	case 3, 1+2: // ERROR "duplicate case 1 + 2 in expression switch"
+	}
+	switch s := "a"; s {
+	case "a":
+	case "b", "a": // ERROR "duplicate case \"a\" in expression switch"
+	}
+L:
+	for i := range 3 {
+		_ = i
+		break L
+	}
+L: // ERROR "label L already defined"
+	for {
+		break L
+	}
+}

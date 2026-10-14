@@ -1,0 +1,33 @@
+// Package math wraps the C math library. Its functions are leaves that need very little stack.
+package math
+
+const (
+	Pi    = 3.14159265358979323846264338327950288419716939937510582097494459
+	E     = 2.71828182845904523536028747135266249775724709369995957496696763
+	MaxInt64 = 1<<63 - 1
+	MinInt64 = -1 << 63
+)
+
+extern "sqrt" func Sqrt(x float64) float64 stack 1K
+
+extern "fabs" func Abs(x float64) float64 stack 1K
+
+extern "floor" func Floor(x float64) float64 stack 1K
+
+extern "ceil" func Ceil(x float64) float64 stack 1K
+
+extern "pow" func Pow(x, y float64) float64 stack 1K
+
+extern "exp" func Exp(x float64) float64 stack 1K
+
+extern "log" func Log(x float64) float64 stack 1K
+
+extern "sin" func Sin(x float64) float64 stack 1K
+
+extern "cos" func Cos(x float64) float64 stack 1K
+
+// Float64bits returns the IEEE 754 bits of f.
+extern "sq_float64bits" func Float64bits(f float64) uint64 stack 1K
+
+// Float64frombits returns the float64 with IEEE 754 bits b.
+extern "sq_float64frombits" func Float64frombits(b uint64) float64 stack 1K

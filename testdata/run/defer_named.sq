@@ -1,0 +1,47 @@
+package main
+
+// deferred calls see and can change named results, as in Go
+
+const ErrBad = error(1, "bad")
+
+func set(p *int)          { *p = 42 }
+func double(p *int)       { *p *= 2 }
+func wrap(e *error)       { if *e != nil { *e = ErrWrapped } }
+func fail() (int, error)  { return 0, ErrBad }
+
+const ErrWrapped = error(2, "wrapped")
+
+func f() (res int) {
+	defer set(&res)
+	return 1
+}
+
+func g() (res int) {
+	defer double(&res)
+	res = 5
+	return
+}
+
+func h() (n int, err error) {
+	defer double(&n)
+	return 21, nil
+}
+
+func t() (n int, err error) {
+	defer wrap(&err)
+	n = 7
+	_ = try fail()
+	return n, nil
+}
+
+func plain() int {
+	x := 3
+	defer set(&x)
+	return x
+}
+
+func main() {
+	n, err := h()
+	n2, err2 := t()
+	println(f(), g(), n, err == nil, n2, err2.Error(), plain())
+}

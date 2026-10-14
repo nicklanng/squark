@@ -1,0 +1,7 @@
+name = squark ❤
+n = -42
+ok = true
+skipped skip
+tail = x"y
+end true true
+"tab\there \"quoted\" \u0001"

@@ -1,0 +1,19 @@
+package main
+
+func main() {
+	a := "\xZZ|"         // ERROR "invalid character 'Z' in hexadecimal escape"
+	b := "\400"          // ERROR "octal escape value 256 > 255"
+	c := "\08|"          // ERROR "invalid character '8' in octal escape"
+	d := "\uZZZZ"        // ERROR "invalid character 'Z' in Unicode escape"
+	e := "\U00110000"    // ERROR "escape is invalid Unicode code point"
+	f := "\uD800"        // ERROR "escape is invalid Unicode code point"
+	g := "a\0"           // ERROR "invalid character '\"' in octal escape"
+	h := '\xg1'          // ERROR "invalid character 'g' in hexadecimal escape"
+	i := ''              // ERROR "empty rune literal or unescaped ' in rune literal"
+	j := 'ab'            // ERROR "more than one character in rune literal"
+	k := 1e              // ERROR "exponent has no digits"
+	m := 1_.5            // ERROR "'_' must separate successive digits"
+	n := 0x1.8           // ERROR "hexadecimal mantissa requires a 'p' exponent"
+	o := 1__0            // ERROR "'_' must separate successive digits"
+	println(a, b, c, d, e, f, g, h, i, j, k, m, n, o)
+}

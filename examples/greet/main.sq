@@ -1,0 +1,17 @@
+package main
+
+import "http"
+
+budget 128M             // the build fails if the worst case can exceed this
+pool http.serveConn 512 // at most 512 connections served at once
+
+func handle(w *http.ResponseWriter, r *http.Request) {
+	greeting := "hello, " + r.QueryValue("name") + "\n" in r.Arena // per-request arena
+	w.WriteString(greeting)
+}
+
+func main() {
+	if err := http.ListenAndServe(":8080", handle); err != nil {
+		panic(err)
+	}
+}

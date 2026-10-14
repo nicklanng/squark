@@ -1,0 +1,54 @@
+package main
+
+// strconv.AppendFloat against Go's strconv.FormatFloat(v, 'f', prec, 64); the .out file was
+// produced by the equivalent Go program
+
+import (
+	"math"
+	"os"
+	"strconv"
+)
+
+var seed uint64 = 88172645463325252
+
+func next() uint64 {
+	seed ^= seed << 13
+	seed ^= seed >> 7
+	seed ^= seed << 17
+	return seed
+}
+
+var buf [2400]byte
+
+func show(v float64, prec int) {
+	b := strconv.AppendFloat(buf[:0], v, prec)
+	b = append(b, '\n')
+	os.Stdout.Write(b)
+}
+
+var precs = [4]int{0, 2, 17, 30}
+
+func main() {
+	zero := 0.0
+	special := [...]float64{0, -zero, 1, -1, 0.5, 1.5, 2.5, -2.5, 0.125, 0.375, 9.995, 99.5, 0.05, 1e19, 1.8446744073709552e19,
+		-1e300, 1e308, 1.7976931348623157e308, 5e-324, 2.2250738585072014e-308, 123456.789, 3.141592653589793,
+		1 / zero, -1 / zero, zero / zero}
+	for _, v := range special {
+		for _, p := range precs {
+			show(v, p)
+		}
+	}
+	show(1.5, 25)
+	show(5e-324, 1100)
+	show(0.1, 60)
+	show(1, -3)
+	for i := 0; i < 200; i++ {
+		v := math.Float64frombits(next())
+		show(v, precs[i%4])
+	}
+	// values with a moderate exponent, where rounding ties are common
+	for i := 0; i < 200; i++ {
+		v := float64(int(next()%2000000)-1000000) / 64
+		show(v, i%4)
+	}
+}

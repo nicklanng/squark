@@ -1,0 +1,52 @@
+package main
+
+// Test server for TestHTTP (internal/driver): /n?n=N writes N bytes in one Write, /p?n=N writes
+// them 1000 bytes at a time. Byte i is 'a'+i%26, so the client can check every byte. /who answers
+// "one". With a second address argument, a second server answers "two" to everything.
+
+import (
+	"http"
+	"os"
+	"strconv"
+)
+
+var body [100000]byte
+
+func handle(w *http.ResponseWriter, r *http.Request) {
+	if r.Path == "/who" {
+		w.WriteString("one")
+		return
+	}
+	n, err := strconv.Atoi(r.QueryValue("n"))
+	if err != nil || n < 0 || n > len(body) {
+		w.WriteHeader(400)
+		return
+	}
+	if r.Path == "/p" {
+		for i := 0; i < n; i += 1000 {
+			w.Write(body[i:min(i+1000, n)])
+		}
+		return
+	}
+	w.Write(body[:n])
+}
+
+func handle2(w *http.ResponseWriter, r *http.Request) { w.WriteString("two") }
+
+task serve2(addr string) pool 1 {
+	if err := http.ListenAndServe(addr, handle2); err != nil {
+		panic(err)
+	}
+}
+
+func main() {
+	for i := range len(body) {
+		body[i] = byte('a' + i%26)
+	}
+	if os.NArgs() > 2 {
+		go serve2(os.Arg(2))
+	}
+	if err := http.ListenAndServe(os.Arg(1), handle); err != nil {
+		panic(err)
+	}
+}

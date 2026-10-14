@@ -1,0 +1,16 @@
+package main
+
+import "os"
+
+// a huge run-time map capacity must panic, not loop forever sizing the table
+func main() {
+	n := 1 << 62
+	if os.NArgs() > 5 {
+		n = 3
+	}
+	arena a 64K {
+		m := make(map[int]int, n) in a
+		m[1] = 2
+		println(len(m))
+	}
+}

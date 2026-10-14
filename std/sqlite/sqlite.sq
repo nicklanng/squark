@@ -1,10 +1,10 @@
 // Package sqlite binds libsqlite3. SQLite manages its own memory; squark code never touches
 // the heap: column text is copied into caller-provided buffers.
-//
-//squark:link sqlite3
-//squark:cflags -I/opt/homebrew/opt/sqlite/include
-//squark:ldflags -L/opt/homebrew/opt/sqlite/lib
 package sqlite
+
+link "sqlite3"
+cflags "-I/opt/homebrew/opt/sqlite/include"
+ldflags "-L/opt/homebrew/opt/sqlite/lib"
 
 const (
 	OK   = 0
@@ -30,85 +30,49 @@ type Stmt struct {
 
 // SQLite calls get a generous stack budget: the query planner and VDBE are not tiny.
 
-//squark:extern sq_sqlite_open
-//squark:stack 128K
-func open(path string, db *rawptr) int
+extern "sq_sqlite_open" func open(path string, db *rawptr) int stack 128K
 
-//squark:extern sq_sqlite_close
-//squark:stack 64K
-func closeDB(db rawptr) int
+extern "sq_sqlite_close" func closeDB(db rawptr) int stack 64K
 
-//squark:extern sq_sqlite_exec
-//squark:stack 128K
-func exec(db rawptr, sql string) int
+extern "sq_sqlite_exec" func exec(db rawptr, sql string) int stack 128K
 
-//squark:extern sq_sqlite_prepare
-//squark:stack 128K
-func prepare(db rawptr, sql string, st *rawptr) int
+extern "sq_sqlite_prepare" func prepare(db rawptr, sql string, st *rawptr) int stack 128K
 
-//squark:extern sq_sqlite_bind_int
-//squark:stack 16K
-func bindInt(st rawptr, i int, v int) int
+extern "sq_sqlite_bind_int" func bindInt(st rawptr, i int, v int) int stack 16K
 
-//squark:extern sq_sqlite_bind_text
-//squark:stack 16K
-func bindText(st rawptr, i int, s string) int
+extern "sq_sqlite_bind_text" func bindText(st rawptr, i int, s string) int stack 16K
 
-//squark:extern sq_sqlite_bind_null
-//squark:stack 16K
-func bindNull(st rawptr, i int) int
+extern "sq_sqlite_bind_null" func bindNull(st rawptr, i int) int stack 16K
 
-//squark:extern sq_sqlite_step
-//squark:stack 128K
-func step(st rawptr) int
+extern "sq_sqlite_step" func step(st rawptr) int stack 128K
 
-//squark:extern sq_sqlite_reset
-//squark:stack 64K
-func reset(st rawptr) int
+extern "sq_sqlite_reset" func reset(st rawptr) int stack 64K
 
-//squark:extern sq_sqlite_clear
-//squark:stack 16K
-func clearBindings(st rawptr) int
+extern "sq_sqlite_clear" func clearBindings(st rawptr) int stack 16K
 
-//squark:extern sq_sqlite_finalize
-//squark:stack 64K
-func finalize(st rawptr) int
+extern "sq_sqlite_finalize" func finalize(st rawptr) int stack 64K
 
-//squark:extern sq_sqlite_column_int
-//squark:stack 16K
-func columnInt(st rawptr, i int) int
+extern "sq_sqlite_column_int" func columnInt(st rawptr, i int) int stack 16K
 
-//squark:extern sq_sqlite_column_type
-//squark:stack 16K
-func columnType(st rawptr, i int) int
+extern "sq_sqlite_column_type" func columnType(st rawptr, i int) int stack 16K
 
-//squark:extern sq_sqlite_column_count
-//squark:stack 16K
-func columnCount(st rawptr) int
+extern "sq_sqlite_column_count" func columnCount(st rawptr) int stack 16K
 
-//squark:extern sq_sqlite_column_text
-//squark:stack 16K
-func columnText(st rawptr, i int, buf []byte) int
+extern "sq_sqlite_column_text" func columnText(st rawptr, i int, buf []byte) int stack 16K
 
-//squark:extern sq_sqlite_changes
-//squark:stack 16K
-func changes(db rawptr) int
+extern "sq_sqlite_changes" func changes(db rawptr) int stack 16K
 
-//squark:extern sq_sqlite_last_insert_rowid
-//squark:stack 16K
-func lastInsertRowID(db rawptr) int
+extern "sq_sqlite_last_insert_rowid" func lastInsertRowID(db rawptr) int stack 16K
 
-//squark:extern sq_sqlite_errstr
-//squark:stack 16K
-func errstr(rc int) string
+extern "sq_sqlite_errstr" func errstr(rc int) string stack 16K
 
-var ErrTruncated = __error(-1, "sqlite: column text larger than buffer")
+const ErrTruncated = error(-1, "sqlite: column text larger than buffer")
 
 func check(rc int) error {
 	if rc == OK || rc == ROW || rc == DONE {
 		return nil
 	}
-	return __error(rc, errstr(rc))
+	return error(rc, errstr(rc))
 }
 
 // Open opens (creating if needed) a database file.

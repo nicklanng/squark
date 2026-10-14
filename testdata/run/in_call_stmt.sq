@@ -1,0 +1,16 @@
+package main
+
+import "os"
+
+// a call statement can allocate its arguments in an arena
+
+func show(s string) { os.Stdout.WriteString(s) }
+
+func main() {
+	name := "squark"
+	arena a 1K {
+		show("hi " + name + "\n") in a
+		(show("bye " + name + "\n")) in a
+		println(a.Used() > 0)
+	}
+}

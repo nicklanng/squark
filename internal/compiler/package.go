@@ -51,7 +51,9 @@ type Package struct {
 	GlobalInits []*ValueSpec
 	Types   []*Named
 
-	CFiles  []CFile // C shims shipped with the package
+	CFiles  []CFile // C shims shipped with the package (.c and .h)
+	Budgets []*Directive
+	Arenas  []*Var // package-level arenas
 	Links   []string
 	CFlags  []string
 	LDFlags []string
@@ -68,6 +70,7 @@ type Program struct {
 	Funcs    []*Func
 	MainFunc *Func
 	InitFunc *Func // synthetic function holding package-level initializer calls
+	Budget   int64 // budget N in package main (0: none)
 
 	GoSites    []*GoStmt
 	MakeSites  []*CallExpr
@@ -87,7 +90,7 @@ type Loader struct {
 func (l *Loader) Load() (*Program, error) {
 	l.pkgs = map[string]*Package{}
 	l.loading = map[string]bool{}
-	mainPkg, err := l.load("main", l.MainDir, nil)
+	mainPkg, err := l.load(l.localKey(l.MainDir), "main", l.MainDir, false)
 	if err != nil {
 		return nil, err
 	}
@@ -121,15 +124,25 @@ func (l *Loader) readDir(dir string, std bool) (names []string, read func(string
 	return names, func(n string) ([]byte, error) { return os.ReadFile(filepath.Join(dir, n)) }, nil
 }
 
-func (l *Loader) load(importPath, dir string, std *bool) (*Package, error) {
-	if p, ok := l.pkgs[importPath]; ok {
+// localKey is the cache key of the package in dir: its absolute path, so the same directory reached
+// through different relative paths is one package, and a local package never shadows a std one.
+func (l *Loader) localKey(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return "local:" + filepath.Clean(dir)
+}
+
+// load reads the package in dir, cached under key. importPath becomes Package.Path: the import path
+// for std packages, "main" for the program, the absolute directory for other local packages.
+func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error) {
+	if p, ok := l.pkgs[key]; ok {
 		return p, nil
 	}
-	if l.loading[importPath] {
+	if l.loading[key] {
 		return nil, fmt.Errorf("import cycle involving %q", importPath)
 	}
-	l.loading[importPath] = true
-	isStd := std != nil && *std
+	l.loading[key] = true
 	names, read, err := l.readDir(dir, isStd)
 	if err != nil {
 		return nil, fmt.Errorf("cannot find package %q: %v", importPath, err)
@@ -161,19 +174,29 @@ func (l *Loader) load(importPath, dir string, std *bool) (*Package, error) {
 			} else if pkg.Name != f.Package {
 				errs = append(errs, &Error{Pos{File: display, Line: 1, Col: 1}, fmt.Sprintf("package %s; expected %s", f.Package, pkg.Name)})
 			}
+			for _, d := range f.Directives {
+				lit, ok := d.Value.(*BasicLit)
+				switch d.Name {
+				case "link", "cflags", "ldflags":
+					if !ok || lit.Kind != STRING {
+						errs = append(errs, &Error{d.P, d.Name + " needs a string literal"})
+						continue
+					}
+					fields := strings.Fields(lit.Lit)
+					switch d.Name {
+					case "link":
+						pkg.Links = append(pkg.Links, fields...)
+					case "cflags":
+						pkg.CFlags = append(pkg.CFlags, fields...)
+					case "ldflags":
+						pkg.LDFlags = append(pkg.LDFlags, fields...)
+					}
+				case "budget", "pool":
+					pkg.Budgets = append(pkg.Budgets, d)
+				}
+			}
 			for _, pr := range f.Pragmas {
-				fields := strings.Fields(pr)
-				if len(fields) == 0 {
-					continue
-				}
-				switch fields[0] {
-				case "link":
-					pkg.Links = append(pkg.Links, fields[1:]...)
-				case "cflags":
-					pkg.CFlags = append(pkg.CFlags, fields[1:]...)
-				case "ldflags":
-					pkg.LDFlags = append(pkg.LDFlags, fields[1:]...)
-				}
+				errs = append(errs, &Error{Pos{File: display, Line: 1, Col: 1}, "file pragma //squark:" + pr + " is gone: use link \"lib\", cflags \"...\" or ldflags \"...\""})
 			}
 			pkg.Files = append(pkg.Files, f)
 		case strings.HasSuffix(n, ".c") || strings.HasSuffix(n, ".h"):
@@ -181,9 +204,7 @@ func (l *Loader) load(importPath, dir string, std *bool) (*Package, error) {
 			if err != nil {
 				return nil, err
 			}
-			if strings.HasSuffix(n, ".c") {
-				pkg.CFiles = append(pkg.CFiles, CFile{Name: n, Src: src})
-			}
+			pkg.CFiles = append(pkg.CFiles, CFile{Name: n, Src: src})
 		}
 	}
 	if len(errs) > 0 {
@@ -193,33 +214,35 @@ func (l *Loader) load(importPath, dir string, std *bool) (*Package, error) {
 		return nil, fmt.Errorf("no squark files in %s", dir)
 	}
 	// load imports
-	seen := map[string]bool{}
+	seen := map[string]*Package{}
 	for _, f := range pkg.Files {
 		for _, imp := range f.Imports {
-			if seen[imp.Path] {
+			if dep, ok := seen[imp.Path]; ok {
+				imp.Pkg = dep
 				continue
 			}
-			seen[imp.Path] = true
 			var dep *Package
 			var err error
 			if strings.HasPrefix(imp.Path, "./") || strings.HasPrefix(imp.Path, "../") {
-				base := dir
 				if isStd {
 					return nil, fmt.Errorf("%s: relative import in standard library", imp.P)
 				}
-				dep, err = l.load(filepath.Clean(filepath.Join(base, imp.Path)), filepath.Join(base, imp.Path), nil)
+				d := filepath.Join(dir, imp.Path)
+				key := l.localKey(d)
+				dep, err = l.load(key, strings.TrimPrefix(key, "local:"), d, false)
 			} else {
-				yes := true
-				dep, err = l.load(imp.Path, path.Join("std", imp.Path), &yes)
+				dep, err = l.load("std/"+imp.Path, imp.Path, path.Join("std", imp.Path), true)
 			}
 			if err != nil {
 				return nil, &Error{imp.P, err.Error()}
 			}
+			seen[imp.Path] = dep
+			imp.Pkg = dep
 			pkg.Imports = append(pkg.Imports, dep)
 		}
 	}
-	l.pkgs[importPath] = pkg
+	l.pkgs[key] = pkg
 	l.order = append(l.order, pkg)
-	delete(l.loading, importPath)
+	delete(l.loading, key)
 	return pkg, nil
 }

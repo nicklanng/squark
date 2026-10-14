@@ -1,0 +1,10 @@
+package main
+
+func main() {
+	x := 1e400 // ERROR "constant 1e+400 overflows float64"
+	var f float32 = 1e300 // ERROR "constant 1e+300 overflows float32"
+	const big float64 = 2e308 // ERROR "overflows float64"
+	var y float64 = 1e308
+	var tiny float64 = 1e-400 // rounds to 0, as in Go
+	println(x, f, big, y, tiny)
+}

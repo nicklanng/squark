@@ -1,0 +1,15 @@
+package main
+
+import "bytes"
+
+// Truncate past the length panics instead of exposing old bytes
+
+func main() {
+	var store [16]byte
+	b := bytes.NewBuffer(store[:0])
+	b.WriteString("hidden")
+	b.Truncate(2)
+	println(b.String())
+	b.Truncate(5)
+	println(b.String())
+}

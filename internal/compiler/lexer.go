@@ -1,6 +1,8 @@
 package compiler
 
 import (
+	"bytes"
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -28,7 +30,28 @@ type lexToken struct {
 }
 
 func newLexer(file string, src []byte) *lexer {
-	return &lexer{file: file, src: src, line: 1, col: 1}
+	l := &lexer{file: file, src: src, line: 1, col: 1}
+	if bytes.HasPrefix(src, []byte("\xEF\xBB\xBF")) {
+		l.off = 3 // a leading byte order mark is ignored, as in Go
+	}
+	if !utf8.Valid(src) {
+		// as in Go, source must be UTF-8: report the first bad byte
+		line, col := 1, 1
+		for i := 0; i < len(src); {
+			r, sz := utf8.DecodeRune(src[i:])
+			if r == utf8.RuneError && sz == 1 {
+				l.errorf(Pos{file, line, col}, "invalid UTF-8 encoding")
+				break
+			}
+			if r == '\n' {
+				line, col = line+1, 1
+			} else {
+				col++
+			}
+			i += sz
+		}
+	}
+	return l
 }
 
 func (l *lexer) pos() Pos { return Pos{l.file, l.line, l.col} }
@@ -143,7 +166,7 @@ again:
 
 	t := l.scan(p)
 	switch t.tok {
-	case IDENT, INT, FLOAT, CHAR, STRING, BREAK, CONTINUE, RETURN, INC, DEC, RPAREN, RBRACK, RBRACE:
+	case IDENT, INT, FLOAT, CHAR, STRING, BREAK, CONTINUE, RETURN, INC, DEC, RPAREN, RBRACK, RBRACE, ARENA:
 		l.insertSemi = true
 	default:
 		l.insertSemi = false
@@ -168,7 +191,7 @@ func (l *lexer) scan(p Pos) lexToken {
 		}
 		return lexToken{tok: IDENT, lit: lit, pos: p}
 	}
-	if isDigit(c) || (c == '.' && isDigit(rune(l.peekAt(1)))) {
+	if isDigit(c) || (c == '.' && isDigit(rune(l.peekAt(1))) && (l.off == 0 || l.src[l.off-1] != '.')) {
 		return l.number(p)
 	}
 	switch c {
@@ -263,6 +286,10 @@ func (l *lexer) scan(p Pos) lexToken {
 			l.next()
 			return lexToken{tok: ELLIPSIS, pos: p}
 		}
+		if l.peekc() == '.' {
+			l.next()
+			return lexToken{tok: DOTDOT, pos: p}
+		}
 		return lexToken{tok: PERIOD, pos: p}
 	case '(':
 		return lexToken{tok: LPAREN, pos: p}
@@ -291,15 +318,27 @@ func (l *lexer) number(p Pos) lexToken {
 	if l.peekc() == '0' && (l.peekAt(1) == 'x' || l.peekAt(1) == 'X' || l.peekAt(1) == 'b' || l.peekAt(1) == 'B' || l.peekAt(1) == 'o' || l.peekAt(1) == 'O') {
 		l.next()
 		l.next()
-		for {
-			c := l.peekc()
-			if isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '_' {
+		hex := l.src[start+1] == 'x' || l.src[start+1] == 'X'
+		hexDigits := func() {
+			for c := l.peekc(); isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '_'; c = l.peekc() {
 				l.next()
-				continue
 			}
-			break
 		}
-		return lexToken{tok: INT, lit: string(l.src[start:l.off]), pos: p}
+		hexDigits()
+		if hex && (l.peekc() == '.' || l.peekc() == 'p' || l.peekc() == 'P') {
+			// hexadecimal float: 0x1.8p3
+			if l.peekc() == '.' {
+				l.next()
+				hexDigits()
+			}
+			if l.peekc() != 'p' && l.peekc() != 'P' {
+				l.errorf(p, "hexadecimal mantissa requires a 'p' exponent")
+			} else {
+				l.exponent(p)
+			}
+			return l.numberToken(FLOAT, start, p)
+		}
+		return l.numberToken(INT, start, p)
 	}
 	for isDigit(l.peekc()) || l.peekc() == '_' {
 		l.next()
@@ -313,24 +352,85 @@ func (l *lexer) number(p Pos) lexToken {
 	}
 	if l.peekc() == 'e' || l.peekc() == 'E' {
 		isFloat = true
-		l.next()
-		if l.peekc() == '+' || l.peekc() == '-' {
-			l.next()
-		}
-		for isDigit(l.peekc()) {
-			l.next()
+		l.exponent(p)
+	}
+	// size suffixes: 4K, 16M, 1G (binary multiples)
+	if !isFloat {
+		if c := l.peekc(); c == 'K' || c == 'M' || c == 'G' {
+			n := rune(l.peekAt(1))
+			if !isLetter(n) && !isDigit(n) {
+				l.next()
+			}
 		}
 	}
-	lit := string(l.src[start:l.off])
 	if isFloat {
-		return lexToken{tok: FLOAT, lit: lit, pos: p}
+		return l.numberToken(FLOAT, start, p)
 	}
-	return lexToken{tok: INT, lit: lit, pos: p}
+	return l.numberToken(INT, start, p)
 }
 
-func (l *lexer) escape(quote rune, sb *strings.Builder) {
+// exponent reads e/E/p/P, an optional sign and the exponent's digits.
+func (l *lexer) exponent(p Pos) {
+	l.next()
+	if l.peekc() == '+' || l.peekc() == '-' {
+		l.next()
+	}
+	if !isDigit(l.peekc()) {
+		l.errorf(p, "exponent has no digits")
+	}
+	for isDigit(l.peekc()) || l.peekc() == '_' {
+		l.next()
+	}
+}
+
+func (l *lexer) numberToken(tok Tok, start int, p Pos) lexToken {
+	lit := string(l.src[start:l.off])
+	if i := invalidSep(lit); i >= 0 {
+		l.errorf(p, "'_' must separate successive digits")
+	}
+	return lexToken{tok: tok, lit: lit, pos: p}
+}
+
+// invalidSep returns the index of the first '_' in a number literal that does not separate two
+// digits (a base prefix counts as a digit), or -1. It is go/scanner's rule.
+func invalidSep(x string) int {
+	x1 := ' ' // prefix char, we only care if it's 'x'
+	d := '.'  // previous char class: '_', '0' (a digit), or '.' (anything else)
+	i := 0
+	if len(x) >= 2 && x[0] == '0' {
+		x1 = rune(x[1]) | 0x20
+		if x1 == 'x' || x1 == 'o' || x1 == 'b' {
+			d = '0'
+			i = 2
+		}
+	}
+	for ; i < len(x); i++ {
+		p := d
+		d = rune(x[i])
+		switch {
+		case d == '_':
+			if p != '0' {
+				return i
+			}
+		case isDigit(d) || x1 == 'x' && (d|0x20 >= 'a' && d|0x20 <= 'f'):
+			d = '0'
+		default:
+			if p == '_' {
+				return i - 1
+			}
+			d = '.'
+		}
+	}
+	if d == '_' {
+		return len(x) - 1
+	}
+	return -1
+}
+
+func (l *lexer) escape(quote rune, sb *strings.Builder) bool {
 	p := l.pos()
 	c := l.next()
+	ok := true
 	switch c {
 	case 'n':
 		sb.WriteByte('\n')
@@ -339,10 +439,12 @@ func (l *lexer) escape(quote rune, sb *strings.Builder) {
 	case 'r':
 		sb.WriteByte('\r')
 	case '0', '1', '2', '3', '4', '5', '6', '7':
-		v := int(c - '0')
-		for i := 0; i < 2; i++ {
-			d := l.next()
-			v = v*8 + int(d-'0')
+		var v int
+		v, ok = l.escDigits(2, 8, "octal")
+		v += int(c-'0') << 6
+		if ok && v > 255 {
+			l.errorf(p, fmt.Sprintf("octal escape value %d > 255", v))
+			ok = false
 		}
 		sb.WriteByte(byte(v))
 	case 'a':
@@ -356,28 +458,51 @@ func (l *lexer) escape(quote rune, sb *strings.Builder) {
 	case '\\':
 		sb.WriteByte('\\')
 	case 'x':
-		v := 0
-		for i := 0; i < 2; i++ {
-			v = v*16 + hexval(l.next())
-		}
+		var v int
+		v, ok = l.escDigits(2, 16, "hexadecimal")
 		sb.WriteByte(byte(v))
 	case 'u', 'U':
 		n := 4
 		if c == 'U' {
 			n = 8
 		}
-		v := 0
-		for i := 0; i < n; i++ {
-			v = v*16 + hexval(l.next())
+		var v int
+		v, ok = l.escDigits(n, 16, "Unicode")
+		if ok && (v > utf8.MaxRune || v >= 0xD800 && v < 0xE000) {
+			l.errorf(p, "escape is invalid Unicode code point")
+			ok = false
 		}
 		sb.WriteRune(rune(v))
 	default:
 		if c == quote {
 			sb.WriteRune(c)
-			return
+			return true
 		}
 		l.errorf(p, "unknown escape sequence")
+		ok = false
 	}
+	return ok
+}
+
+// escDigits reads the n base-b digits of an escape. A non-digit is reported and left unread, so a
+// closing quote still ends the literal.
+func (l *lexer) escDigits(n, base int, what string) (int, bool) {
+	v := 0
+	for i := 0; i < n; i++ {
+		c := l.peekc()
+		d := hexval(c)
+		if d < 0 || d >= base {
+			if c == -1 || c == '\n' {
+				l.errorf(l.pos(), "escape sequence not terminated")
+			} else {
+				l.errorf(l.pos(), fmt.Sprintf("invalid character %q in %s escape", c, what))
+			}
+			return v, false
+		}
+		l.next()
+		v = v*base + d
+	}
+	return v, true
 }
 
 func hexval(r rune) int {
@@ -389,7 +514,7 @@ func hexval(r rune) int {
 	case r >= 'A' && r <= 'F':
 		return int(r-'A') + 10
 	}
-	return 0
+	return -1
 }
 
 func (l *lexer) str(p Pos) lexToken {
@@ -418,15 +543,31 @@ func (l *lexer) str(p Pos) lexToken {
 func (l *lexer) char(p Pos) lexToken {
 	l.next()
 	var sb strings.Builder
+	switch c := l.peekc(); c {
+	case '\'':
+		l.next()
+		l.errorf(p, "empty rune literal or unescaped ' in rune literal")
+		return lexToken{tok: CHAR, lit: "\x00", pos: p}
+	case '\n', -1:
+		l.errorf(p, "rune literal not terminated")
+		return lexToken{tok: CHAR, lit: "\x00", pos: p}
+	}
 	c := l.next()
+	ok := true
 	if c == '\\' {
-		l.escape('\'', &sb)
+		ok = l.escape('\'', &sb)
 	} else {
 		sb.WriteRune(c)
 	}
 	if l.peekc() != '\'' {
-		l.errorf(p, "invalid char literal")
-	} else {
+		if ok { // after a bad escape, just find the end
+			l.errorf(p, "more than one character in rune literal")
+		}
+		for c := l.peekc(); c != '\'' && c != '\n' && c != -1; c = l.peekc() {
+			l.next()
+		}
+	}
+	if l.peekc() == '\'' {
 		l.next()
 	}
 	s := sb.String()

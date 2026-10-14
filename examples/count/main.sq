@@ -1,0 +1,49 @@
+package main
+
+import (
+	"http"
+	"sqlite"
+	"strconv"
+)
+
+budget 64M
+pool http.serveConn 128
+
+var db sqlite.DB
+var countStmt sqlite.Stmt
+
+func handle(w *http.ResponseWriter, r *http.Request) {
+	if r.Path != "/count" {
+		w.WriteHeader(404)
+		return
+	}
+	defer countStmt.Reset()
+	row, err := countStmt.Step()
+	if err != nil || !row {
+		w.WriteHeader(500)
+		return
+	}
+	var buf [24]byte
+	w.Write(strconv.AppendInt(buf[:0], countStmt.ColumnInt(0)))
+}
+
+func setup() error {
+	d, err := sqlite.Open("app.db")
+	if err != nil {
+		return err
+	}
+	db = d
+	try db.Exec("CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY)")
+	countStmt = try db.Prepare("SELECT count(*) FROM items")
+	return nil
+}
+
+func main() {
+	if err := setup(); err != nil {
+		println("setup:", err.Error())
+		return
+	}
+	if err := http.ListenAndServe(":8080", handle); err != nil {
+		panic(err)
+	}
+}

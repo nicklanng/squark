@@ -1,0 +1,7 @@
+package main
+
+// a deferred panic reports its own message
+func main() {
+	defer panic("real message")
+	println("before")
+}

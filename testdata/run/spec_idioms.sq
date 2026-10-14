@@ -1,0 +1,96 @@
+package main
+
+// The idioms from docs/spec.md section 8, kept compiling and running.
+import (
+	"http"
+	"math"
+	"os"
+	"strconv"
+)
+
+type Node struct {
+	Name     string
+	Children []*Node
+}
+
+type Shape struct{ Kind int; W, H float64 }
+
+const Circle = 1
+const ErrNoUser = error(404, "user not found")
+
+func Area(s Shape) float64 {
+	switch s.Kind {
+	case Circle:
+		return math.Pi * s.W * s.W
+	}
+	return s.W * s.H
+}
+
+func Squares(n int, out []int) []int {
+	out = out[:0]
+	for i := 0; i < n; i++ {
+		out = append(out, i*i)
+	}
+	return out
+}
+
+func readAll(path string, data []byte) (int, error) {
+	f := try os.Open(path)
+	defer f.Close()
+	n, _ := f.ReadFull(data)
+	return n, nil
+}
+
+func lookup(name string, err error) error {
+	if err != nil {
+		println("lookup failed for", name, ":", err.Error())
+		return ErrNoUser
+	}
+	return nil
+}
+
+func handle(w *http.ResponseWriter, r *http.Request) {
+	w.SetHeader("Content-Type", "application/json")
+	w.WriteHeader(201)
+	w.WriteString(`{"ok":true}`)
+}
+
+func main() {
+	id, name := 7, "ada"
+	var buf [64]byte
+	line := strconv.AppendInt(append(buf[:0], "id="...), id)
+	line = append(append(line, " name="...), name...)
+	line = append(line, '\n')
+	os.Stdout.Write(line)
+
+	var data [64K]byte
+	n, err := readAll(os.Arg(0), data[:])
+	println("read", n > 0, err == nil)
+
+	var out [10]int
+	println(len(Squares(5, out[:])))
+
+	arena tree 256K {
+		root := new(Node) in tree
+		root.Children = append(root.Children, new(Node) in tree) in tree
+		s := "name=" + name in tree
+		println(s)
+		var stack [..64]*Node
+		stack.Push(root)
+		count := 0
+		for len(stack) > 0 {
+			nd := stack.Pop()
+			count++
+			for _, c := range nd.Children {
+				stack.Push(c)
+			}
+		}
+		println("nodes", count)
+	}
+	println(Area(Shape{Kind: Circle, W: 1}) > 3, lookup("x", ErrNoUser) == ErrNoUser)
+	_ = handle
+	for i := range 3 {
+		print(i)
+	}
+	println()
+}

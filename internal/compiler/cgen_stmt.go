@@ -99,6 +99,16 @@ func (g *gen) stmt1(s Stmt) {
 		g.declStmt(s.Decl)
 	case *LabeledStmt:
 		g.stmt1(s.Stmt)
+	case *ArenaStmt:
+		v := s.Name.Obj.Var
+		g.lineDirective(s.P)
+		g.open()
+		// storage is part of this frame, so the stack proof counts it; pages are touched only as used
+		g.line("uint8_t %s_buf[%d] __attribute__((aligned(16)));", v.CName, v.ArenaSize)
+		g.line("sq_arena %s_arena = {%s_buf, 0, %d, %s};", v.CName, v.CName, v.ArenaSize, cString(v.Name))
+		g.line("sq_arena *%s = &%s_arena;", v.CName, v.CName)
+		g.stmts(s.Body.List)
+		g.close()
 	}
 }
 
@@ -111,7 +121,7 @@ func (g *gen) declStmt(d *GenDecl) {
 		if len(vs.Values) == 0 {
 			for _, n := range vs.Names {
 				v := n.Obj.Var
-				g.line("%s = %s;", g.decl(v.Type, v.CName), g.zero(v.Type))
+				g.line("%s = %s;", g.localDecl(v.Type, v.CName), g.zero(v.Type))
 			}
 			continue
 		}
@@ -122,14 +132,14 @@ func (g *gen) declStmt(d *GenDecl) {
 			}
 			for i, n := range vs.Names {
 				v := n.Obj.Var
-				g.line("%s = %s;", g.decl(v.Type, v.CName), vals[i])
+				g.line("%s = %s;", g.localDecl(v.Type, v.CName), vals[i])
 			}
 			continue
 		}
 		var lhs []Expr
 		for _, n := range vs.Names {
 			v := n.Obj.Var
-			g.line("%s = %s;", g.decl(v.Type, v.CName), g.zero(v.Type))
+			g.line("%s = %s;", g.localDecl(v.Type, v.CName), g.zero(v.Type))
 			lhs = append(lhs, n)
 		}
 		g.multiAssign(lhs, vs.Values[0])
@@ -167,7 +177,7 @@ func (g *gen) assign(s *AssignStmt) {
 			l := s.Lhs[0]
 			if isNew(0) {
 				v := l.(*Ident).Obj.Var
-				g.line("%s = %s;", g.decl(v.Type, v.CName), g.coerce(s.Rhs[0], v.Type))
+				g.line("%s = %s;", g.localDecl(v.Type, v.CName), g.coerce(s.Rhs[0], v.Type))
 				return
 			}
 			if isBlank(l) {
@@ -178,6 +188,7 @@ func (g *gen) assign(s *AssignStmt) {
 			return
 		}
 		// parallel assignment: evaluate everything first
+		targets := g.lhsTargets(s.Lhs, isNew)
 		tmps := make([]string, len(s.Rhs))
 		for i, x := range s.Rhs {
 			t := x.info().T
@@ -193,27 +204,65 @@ func (g *gen) assign(s *AssignStmt) {
 		for i, l := range s.Lhs {
 			if isNew(i) {
 				v := l.(*Ident).Obj.Var
-				g.line("%s = %s;", g.decl(v.Type, v.CName), tmps[i])
+				g.line("%s = %s;", g.localDecl(v.Type, v.CName), tmps[i])
 				continue
 			}
 			if isBlank(l) {
 				continue
 			}
-			g.store(l, tmps[i])
+			g.storeTarget(l, targets[i], tmps[i])
 		}
 		return
 	}
 	for i, l := range s.Lhs {
 		if isNew(i) {
 			v := l.(*Ident).Obj.Var
-			g.line("%s = %s;", g.decl(v.Type, v.CName), g.zero(v.Type))
+			g.line("%s = %s;", g.localDecl(v.Type, v.CName), g.zero(v.Type))
 		}
 	}
 	g.multiAssign(s.Lhs, s.Rhs[0])
 }
 
+// lhsTargets is the first phase of a multi-target assignment, as in Go: the index and pointer
+// operands of the targets are evaluated before anything is stored, so i, x[i] = 2, 7 stores
+// into x[old i]. For each target it returns a C lvalue, or "" for a variable or blank (and where
+// skip says so), which g.store handles directly.
+func (g *gen) lhsTargets(lhs []Expr, skip func(int) bool) []string {
+	targets := make([]string, len(lhs))
+	for i, l := range lhs {
+		if (skip != nil && skip(i)) || isBlank(l) {
+			continue
+		}
+		switch x := unparen(l).(type) {
+		case *Ident:
+			continue
+		case *IndexExpr:
+			if m, ok := x.X.info().T.Underlying().(*Map); ok {
+				mp, k := g.tmp(), g.tmp()
+				g.line("sq_map *%s = %s; %s %s = %s;", mp, g.expr(x.X), g.ctype(m.Key), k, g.coerce(x.Index, m.Key))
+				targets[i] = fmt.Sprintf("(*(%s*)sq_map_put(%s, &%s, __FILE__, __LINE__))", g.ctype(m.Value), mp, k)
+				continue
+			}
+		}
+		p := g.tmp()
+		g.line("%s *%s = &(%s);", g.ctype(l.info().T), p, g.expr(l))
+		targets[i] = "(*" + p + ")"
+	}
+	return targets
+}
+
+// storeTarget stores val into l, through target if lhsTargets captured one.
+func (g *gen) storeTarget(l Expr, target, val string) {
+	if target == "" {
+		g.store(l, val)
+		return
+	}
+	g.line("%s = %s;", target, val)
+}
+
 // multiAssign handles a, b = f(), v, ok = m[k] and v, ok = <-ch (lhs already declared).
 func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
+	targets := g.lhsTargets(lhs, nil)
 	switch r := unparen(rhs).(type) {
 	case *IndexExpr:
 		if r.CommaOk {
@@ -223,8 +272,8 @@ func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
 			g.ind++
 			g.line("%s %s = %s;", g.ctype(m.Key), k, g.coerce(r.Index, m.Key))
 			g.line("%s *%s = sq_map_get(%s, &%s);", g.ctype(m.Value), p, g.expr(r.X), k)
-			g.store(lhs[0], fmt.Sprintf("(%s ? *%s : %s)", p, p, g.zero(m.Value)))
-			g.store(lhs[1], fmt.Sprintf("(%s != NULL)", p))
+			g.storeTarget(lhs[0], targets[0], fmt.Sprintf("(%s ? *%s : %s)", p, p, g.zero(m.Value)))
+			g.storeTarget(lhs[1], targets[1], fmt.Sprintf("(%s != NULL)", p))
 			g.ind--
 			g.line("}")
 			return
@@ -236,8 +285,8 @@ func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
 			g.line("{")
 			g.ind++
 			g.line("%s %s; bool %s = sq_chan_recv(%s, &%s);", g.ctype(et), v, ok, g.expr(r.X), v)
-			g.store(lhs[0], v)
-			g.store(lhs[1], ok)
+			g.storeTarget(lhs[0], targets[0], v)
+			g.storeTarget(lhs[1], targets[1], ok)
 			g.ind--
 			g.line("}")
 			return
@@ -256,7 +305,7 @@ func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
 		if g.ctype(l.info().T) != g.ctype(tu.Types[i]) {
 			val = fmt.Sprintf("({ %s _v = %s; *(%s*)&_v; })", g.ctype(tu.Types[i]), val, g.ctype(l.info().T))
 		}
-		g.store(l, val)
+		g.storeTarget(l, targets[i], val)
 	}
 	g.ind--
 	g.line("}")
@@ -283,6 +332,25 @@ func (g *gen) opAssign(lhs Expr, op Tok, rhs Expr, rhsC string) {
 	if ix, ok := unparen(lhs).(*IndexExpr); ok {
 		if _, ok := ix.X.info().T.Underlying().(*Map); ok {
 			p := g.tmp()
+			if rhs != nil && rhs.info().Const == nil {
+				// as in Go, the right side is evaluated before the entry is created:
+				// m[k] += len(m) sees the map without k
+				r, cur := g.tmp(), "(*"+p+")"
+				var pre, v string
+				if op == SHL || op == SHR {
+					ct := rhs.info().T
+					if isUntyped(ct) {
+						ct = defaultType(ct)
+					}
+					pre = fmt.Sprintf("%s %s = %s;", g.ctype(ct), r, g.expr(rhs))
+					v = g.shiftC(op, cur, r, !isUnsigned(ct), t)
+				} else {
+					pre = fmt.Sprintf("%s %s = %s;", g.ctype(t), r, g.coerce(rhs, t))
+					v = g.arith(op, cur, r, rhs, t)
+				}
+				g.line("{ %s %s *%s = %s; *%s = %s; }", pre, g.ctype(t), p, g.mapSlot(ix), p, v)
+				return
+			}
 			g.line("{ %s *%s = %s; *%s = %s; }", g.ctype(t), p, g.mapSlot(ix), p, val("(*"+p+")"))
 			return
 		}
@@ -386,7 +454,11 @@ func (g *gen) deferCall(d *DeferStmt) string {
 	case "close":
 		return fmt.Sprintf("sq_chan_close(%s, __FILE__, __LINE__)", names[0])
 	case "panic":
-		return fmt.Sprintf("sq_panic_cstr(\"deferred panic\", __FILE__, __LINE__)")
+		t := call.Args[0].info().T
+		if isUntyped(t) {
+			t = defaultType(t)
+		}
+		return panicC(names[0], t)
 	case "print", "println":
 		var parts []string
 		for i, a := range call.Args {
@@ -420,6 +492,8 @@ func (g *gen) printArgC(s string, t Type) string {
 			return "sq_print_bool(" + s + ")"
 		case u.Kind == Float32 || u.Kind == Float64:
 			return "sq_print_float((double)(" + s + "))"
+		case u.Kind == Rawptr:
+			return "sq_print_ptr(" + s + ")"
 		case isUnsigned(u):
 			return "sq_print_uint((uint64_t)(" + s + "))"
 		default:
@@ -427,6 +501,10 @@ func (g *gen) printArgC(s string, t Type) string {
 		}
 	case *ErrorType:
 		return "sq_print_err(" + s + ")"
+	case *Pointer:
+		return "sq_print_ptr(" + s + ")"
+	case *Slice:
+		return fmt.Sprintf("sq_print_str((sq_string){(%s).p, (%s).len})", s, s)
 	}
 	return "sq_print_ptr((const void*)&" + s + ")"
 }
@@ -466,6 +544,21 @@ func (g *gen) returnStmt(s *ReturnStmt) {
 	}
 	if !hasDefers {
 		g.line("return %s;", val)
+		return
+	}
+	if namedResults(sig) {
+		// as in Go: the values go to the named results first, so deferred calls can change them
+		g.line("{")
+		g.ind++
+		if len(s.Results) > 0 {
+			r := g.tmp()
+			g.line("%s %s = %s;", g.resultC(sig), r, val)
+			g.line("%s", g.assignNamedResults(sig, r))
+		}
+		g.runDefers()
+		g.line("return %s;", g.namedResultsValue(sig))
+		g.ind--
+		g.line("}")
 		return
 	}
 	r := g.tmp()
@@ -580,6 +673,21 @@ func (g *gen) forStmt(s *ForStmt) {
 	if s.Init != nil {
 		g.stmt(s.Init)
 	}
+	// The post statement runs at the end of each iteration, but its temporaries (p = &T{...}) are
+	// read by the next condition, so they are declared outside the loop, where lifetime analysis
+	// places them too.
+	var post strings.Builder
+	if s.Post != nil {
+		prevH, prevOut := g.hoisted, g.out
+		g.hoisted, g.out = nil, &post
+		g.ind++
+		g.stmt1(s.Post)
+		g.ind--
+		for _, h := range g.hoisted {
+			prevOut.WriteString(strings.Repeat("\t", g.ind) + h + "\n")
+		}
+		g.hoisted, g.out = prevH, prevOut
+	}
 	g.lineDirective(s.P)
 	g.line("for (;;) {")
 	g.ind++
@@ -590,9 +698,7 @@ func (g *gen) forStmt(s *ForStmt) {
 	g.stmts(s.Body.List)
 	g.close()
 	g.line("sq_cont%d:;", id)
-	if s.Post != nil {
-		g.stmt(s.Post)
-	}
+	g.out.WriteString(post.String())
 	g.ind--
 	g.line("}")
 	g.line("sq_brk%d:;", id)
@@ -605,7 +711,7 @@ func (g *gen) rangeVar(x Expr, define bool, val string, t Type) {
 	}
 	if define {
 		v := x.(*Ident).Obj.Var
-		g.line("%s = %s;", g.decl(v.Type, v.CName), val)
+		g.line("%s = %s;", g.localDecl(v.Type, v.CName), val)
 		return
 	}
 	if g.ctype(x.info().T) != g.ctype(t) {
@@ -707,4 +813,33 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 	}
 	g.line("sq_brk%d:;", id)
 	g.close()
+}
+
+// namedResults reports whether sig's results are named, and so visible to deferred calls.
+func namedResults(sig *Signature) bool {
+	return len(sig.Results) > 0 && sig.Results[0].Name != ""
+}
+
+// assignNamedResults is C that copies the result value r into the named results.
+func (g *gen) assignNamedResults(sig *Signature, r string) string {
+	if len(sig.Results) == 1 {
+		return fmt.Sprintf("%s = %s;", sig.Results[0].CName, r)
+	}
+	var b strings.Builder
+	for i, res := range sig.Results {
+		fmt.Fprintf(&b, "%s = %s.r%d; ", res.CName, r, i)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// namedResultsValue is the C value returning the named results as they are now.
+func (g *gen) namedResultsValue(sig *Signature) string {
+	if len(sig.Results) == 1 {
+		return sig.Results[0].CName
+	}
+	var parts []string
+	for _, r := range sig.Results {
+		parts = append(parts, r.CName)
+	}
+	return fmt.Sprintf("(%s){%s}", g.resultC(sig), strings.Join(parts, ", "))
 }

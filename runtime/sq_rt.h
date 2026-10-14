@@ -85,6 +85,36 @@ static inline int64_t sq_copy(void *dst, int64_t dlen, const void *src, int64_t 
 	return n;
 }
 
+// ---- arenas: bump allocation in a fixed block (stack, static or passed in) ----
+typedef struct sq_arena {
+	uint8_t *base;
+	int64_t used, cap;
+	const char *name;
+} sq_arena;
+
+SQ_NORETURN void sq_panic_arena(sq_arena *a, int64_t need, const char *file, int line);
+
+// sq_arena_raw returns size bytes (not zeroed) aligned to align.
+static inline void *sq_arena_raw(sq_arena *a, int64_t size, int64_t align, const char *file, int line) {
+	int64_t off = (a->used + align - 1) & ~(align - 1);
+	if (__builtin_expect(size < 0 || size > a->cap - off, 0)) sq_panic_arena(a, size, file, line);
+	a->used = off + size;
+	return a->base + off;
+}
+static inline void *sq_arena_zero(sq_arena *a, int64_t size, int64_t align, const char *file, int line) {
+	void *p = sq_arena_raw(a, size, align, file, line);
+	if (size) memset(p, 0, (size_t)size);
+	return p;
+}
+// sq_arena_bytes computes n*esize, panicking on overflow.
+static inline int64_t sq_arena_bytes(sq_arena *a, int64_t n, int64_t esize, const char *file, int line) {
+	if (__builtin_expect(n < 0 || (esize > 0 && n > INT64_MAX / esize), 0)) sq_panic_arena(a, INT64_MAX, file, line);
+	return n * esize;
+}
+// sq_arena_grow resizes the block p (old_bytes, of which used_bytes are live) to new_bytes,
+// extending in place when p is the most recent allocation.
+void *sq_arena_grow(sq_arena *a, void *p, int64_t used_bytes, int64_t old_bytes, int64_t new_bytes, int64_t align, const char *file, int line);
+
 // ---- printing (builtin print/println, to stdout) ----
 void sq_print_str(sq_string s);
 void sq_print_int(int64_t v);
@@ -108,6 +138,7 @@ typedef struct sq_pool {
 	sq_g *free;
 	sq_g *waitq_head, *waitq_tail; // goroutines waiting for a free slot
 	int64_t live, peak, started;
+	int64_t observed; // deepest stack use seen (only with SQ_STACKCHECK=1)
 } sq_pool;
 
 void sq_go(sq_pool *pool, void (*entry)(void *), const void *args, size_t argsize);
@@ -130,14 +161,16 @@ static inline int64_t sq_chan_cap(sq_chan *c) { return c ? c->cap : 0; }
 
 // ---- maps: fixed-capacity open addressing ----
 enum { SQ_KEY_BYTES = 0, SQ_KEY_STRING = 1 };
+enum { SQ_SLOT_EMPTY = 0, SQ_SLOT_FULL = 1, SQ_SLOT_DELETED = 2, SQ_SLOT_MOVING = 3 };
 typedef struct sq_map {
 	uint8_t *keys, *vals, *ctrl;
-	int64_t slots, mask, len, maxlen;
+	int64_t slots, mask, len, maxlen, deleted;
 	int32_t keysize, valsize, kind;
 } sq_map;
 
 sq_map *sq_map_init(sq_map *m, void *keys, void *vals, uint8_t *ctrl, int64_t slots, int64_t maxlen,
                     int32_t keysize, int32_t valsize, int32_t kind);
+sq_map *sq_map_new_in(sq_arena *a, int64_t cap, int32_t keysize, int32_t valsize, int32_t kind, const char *file, int line);
 void *sq_map_get(sq_map *m, const void *key);
 void *sq_map_put(sq_map *m, const void *key, const char *file, int line);
 void sq_map_delete(sq_map *m, const void *key);

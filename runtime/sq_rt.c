@@ -6,6 +6,9 @@
 #include "sq_internal.h"
 
 #include <errno.h>
+#include <poll.h>
+#include <sys/stat.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -104,7 +107,13 @@ static sq_g *cur_g;
 static sq_g *runq_head, *runq_tail;
 static int64_t next_gid = 1;
 static int64_t total_parked; // goroutines blocked on channels/slots (not fds/timers)
-static int64_t fd_waiters;
+static int64_t fd_waiters;   // outstanding netpoll registrations
+
+static void heap_remove(sq_g *g);
+static void err_write(const char *s);
+static void stack_report(void);
+static bool stackcheck;
+static void release(uint8_t *p, int64_t n);
 
 static void runq_push(sq_g *g) {
 	g->state = G_RUNNABLE;
@@ -167,13 +176,23 @@ static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t a
 
 static void pool_init(sq_pool *p) {
 	p->free = NULL;
+	size_t total = (size_t)(p->count * p->slot_size);
+	void *mem = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (mem == MAP_FAILED) {
+		err_write("fatal error: cannot reserve goroutine stacks for pool ");
+		err_write(p->name);
+		err_write("\n");
+		_exit(2);
+	}
+	p->stacks = mem;
 	for (int64_t i = p->count - 1; i >= 0; i--) {
 		sq_g *g = &p->gs[i];
 		uint8_t *slot = p->stacks + i * p->slot_size;
 		long pagesz = sysconf(_SC_PAGESIZE);
-		// guard page at the low end of every stack
-		mprotect(slot, (size_t)pagesz, PROT_NONE);
+		// the guard page at the low end of every stack is installed on first use (see sq_go)
 		g->stack_lo = slot + pagesz;
+		g->heap_index = -1;
+		g->wait_fd = -1;
 		g->stack_hi = slot + p->slot_size;
 		g->pool = p;
 		g->state = G_FREE;
@@ -194,6 +213,12 @@ void sq_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize) 
 	}
 	sq_g *g = p->free;
 	p->free = g->next;
+	if (!g->guarded) {
+		long pagesz = sysconf(_SC_PAGESIZE);
+		mprotect(g->stack_lo - pagesz, (size_t)pagesz, PROT_NONE);
+		g->guarded = true;
+	}
+	if (stackcheck) memset(g->stack_lo, 0xA5, (size_t)(g->stack_hi - g->stack_lo));
 	g_prepare(g, entry, args, argsize);
 	p->live++;
 	p->started++;
@@ -201,8 +226,29 @@ void sq_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize) 
 	runq_push(g);
 }
 
+// stack_used measures how deep a painted stack was used.
+static int64_t stack_used(sq_g *g) {
+	uint8_t *q = g->stack_lo;
+	while (q < g->stack_hi && *q == 0xA5) q++;
+	return g->stack_hi - q;
+}
+
 static void g_release(sq_g *g) {
 	sq_pool *p = g->pool;
+	if (stackcheck) {
+		int64_t u = stack_used(g);
+		if (u > p->observed) p->observed = u;
+	}
+	if (g->armed) {
+		g->armed = false;
+		fd_waiters--;
+	}
+	g->wait_fd = -1;
+	heap_remove(g);
+	if (g->release_stack) {
+		g->release_stack = false;
+		release(g->stack_lo, g->stack_hi - g->stack_lo);
+	}
 	g->state = G_FREE;
 	g->next = p->free;
 	p->free = g;
@@ -308,6 +354,11 @@ void sq_print_float(double v) {
 	if (digits >= 1000000000ULL) { digits /= 10; e++; }
 	char d[12];
 	size_t nd = fmt_uint(d, digits);
+	if (nd < 9) { // 0 (or a rounding edge): always nine significant digits
+		memmove(d + 9 - nd, d, nd);
+		memset(d, '0', 9 - nd);
+		nd = 9;
+	}
 	buf[n++] = d[0];
 	buf[n++] = '.';
 	for (size_t i = 1; i < nd; i++) buf[n++] = d[i];
@@ -436,11 +487,36 @@ void sq_panic_append(int64_t need, int64_t cap, const char *file, int line) {
 	die(file, line);
 }
 
+void sq_panic_arena(sq_arena *a, int64_t need, const char *file, int line) {
+	sq_flush();
+	err_write("panic: arena ");
+	err_write(a->name);
+	err_write(" is full (capacity ");
+	err_int(a->cap);
+	err_write(", used ");
+	err_int(a->used);
+	err_write(", need ");
+	err_int(need);
+	err_write(" more)");
+	die(file, line);
+}
+
+void *sq_arena_grow(sq_arena *a, void *p, int64_t used_bytes, int64_t old_bytes, int64_t new_bytes, int64_t align, const char *file, int line) {
+	uint8_t *b = p;
+	if (b && b + old_bytes == a->base + a->used && b >= a->base && new_bytes - old_bytes <= a->cap - a->used) {
+		a->used += new_bytes - old_bytes; // the block is on top of the arena: extend in place
+		return p;
+	}
+	void *np = sq_arena_raw(a, new_bytes, align, file, line);
+	if (used_bytes > 0) memcpy(np, p, (size_t)used_bytes);
+	return np;
+}
+
 void sq_panic_divide(const char *file, int line) {
 	sq_panic_cstr("runtime error: integer divide by zero", file, line);
 }
 
-static uint8_t sigstack[32768];
+static uint8_t sq_sigstack[32768]; // not "sigstack": glibc declares a function of that name
 
 static void on_fault(int sig, siginfo_t *si, void *uctx) {
 	(void)uctx;
@@ -615,7 +691,9 @@ void sq_chan_close(sq_chan *c, const char *file, int line) {
 }
 
 // ---------------------------------------------------------------------------
-// maps (linear probing with backward-shift deletion; ctrl byte 1 = occupied)
+// maps: linear probing. delete leaves a tombstone (SQ_SLOT_DELETED) instead of moving entries, so a
+// range loop that deletes still visits every other entry exactly once. Tombstones are compacted
+// away only when a new key is inserted (see map_compact).
 
 static inline uint64_t mix64(uint64_t x) {
 	x ^= x >> 30;
@@ -658,6 +736,7 @@ sq_map *sq_map_init(sq_map *m, void *keys, void *vals, uint8_t *ctrl, int64_t sl
 	m->slots = slots;
 	m->mask = slots - 1;
 	m->len = 0;
+	m->deleted = 0;
 	m->maxlen = maxlen;
 	m->keysize = keysize;
 	m->valsize = valsize;
@@ -666,13 +745,72 @@ sq_map *sq_map_init(sq_map *m, void *keys, void *vals, uint8_t *ctrl, int64_t sl
 	return m;
 }
 
+sq_map *sq_map_new_in(sq_arena *a, int64_t cap, int32_t keysize, int32_t valsize, int32_t kind, const char *file, int line) {
+	if (cap < 0) sq_panic_cstr("negative map capacity", file, line);
+	// slots must reach cap*4/3+1 without overflowing; anything this large can't fit an arena anyway
+	if (cap > INT64_MAX / 4) sq_panic_arena(a, INT64_MAX, file, line);
+	int64_t slots = 1;
+	while (slots < cap + cap / 3 + 1) slots <<= 1;
+	sq_map *m = sq_arena_raw(a, sizeof(sq_map), 8, file, line);
+	void *keys = sq_arena_raw(a, sq_arena_bytes(a, slots, keysize, file, line), 8, file, line);
+	void *vals = sq_arena_raw(a, sq_arena_bytes(a, slots, valsize, file, line), 8, file, line);
+	uint8_t *ctrl = sq_arena_raw(a, slots, 1, file, line);
+	return sq_map_init(m, keys, vals, ctrl, slots, cap, keysize, valsize, kind);
+}
+
+static inline int64_t map_home(sq_map *m, int64_t i) {
+	return (int64_t)(map_hash(m, m->keys + i * m->keysize) & (uint64_t)m->mask);
+}
+
+// map_find returns the slot holding key, or -1 - (the slot to insert it at).
 static int64_t map_find(sq_map *m, const void *key) {
 	int64_t i = (int64_t)(map_hash(m, key) & (uint64_t)m->mask);
-	for (;;) {
-		if (!m->ctrl[i]) return -1 - i;
-		if (map_keyeq(m, m->keys + i * m->keysize, key)) return i;
-		i = (i + 1) & m->mask;
+	int64_t free = -1;
+	for (int64_t n = 0; n < m->slots; n++, i = (i + 1) & m->mask) {
+		uint8_t c = m->ctrl[i];
+		if (c == SQ_SLOT_EMPTY) return -1 - (free >= 0 ? free : i);
+		if (c == SQ_SLOT_DELETED) {
+			if (free < 0) free = i;
+		} else if (map_keyeq(m, m->keys + i * m->keysize, key)) {
+			return i;
+		}
 	}
+	return -1 - free; // no empty slot left: every free slot is a tombstone, and len < slots
+}
+
+static void map_swap(uint8_t *a, uint8_t *b, int32_t n) {
+	for (int32_t k = 0; k < n; k++) {
+		uint8_t t = a[k];
+		a[k] = b[k];
+		b[k] = t;
+	}
+}
+
+// map_compact rehashes in place to drop tombstones. It moves entries, so it runs only from
+// sq_map_put inserting a new key (never from delete, which range loops rely on).
+static void map_compact(sq_map *m) {
+	for (int64_t i = 0; i < m->slots; i++)
+		m->ctrl[i] = m->ctrl[i] == SQ_SLOT_FULL ? SQ_SLOT_MOVING : SQ_SLOT_EMPTY;
+	for (int64_t i = 0; i < m->slots; i++) {
+		while (m->ctrl[i] == SQ_SLOT_MOVING) {
+			// place the entry at i at the first slot of its probe sequence not yet holding a placed entry
+			int64_t j = map_home(m, i);
+			while (m->ctrl[j] == SQ_SLOT_FULL) j = (j + 1) & m->mask;
+			if (j == i) {
+				m->ctrl[i] = SQ_SLOT_FULL;
+			} else if (m->ctrl[j] == SQ_SLOT_EMPTY) {
+				memcpy(m->keys + j * m->keysize, m->keys + i * m->keysize, (size_t)m->keysize);
+				memcpy(m->vals + j * m->valsize, m->vals + i * m->valsize, (size_t)m->valsize);
+				m->ctrl[j] = SQ_SLOT_FULL;
+				m->ctrl[i] = SQ_SLOT_EMPTY;
+			} else { // j holds an entry still to be placed: swap, then place that one
+				map_swap(m->keys + j * m->keysize, m->keys + i * m->keysize, m->keysize);
+				map_swap(m->vals + j * m->valsize, m->vals + i * m->valsize, m->valsize);
+				m->ctrl[j] = SQ_SLOT_FULL;
+			}
+		}
+	}
+	m->deleted = 0;
 }
 
 void *sq_map_get(sq_map *m, const void *key) {
@@ -686,8 +824,13 @@ void *sq_map_put(sq_map *m, const void *key, const char *file, int line) {
 	int64_t i = map_find(m, key);
 	if (i >= 0) return m->vals + i * m->valsize;
 	if (m->len >= m->maxlen) sq_panic_cstr("map capacity exceeded (squark maps have a fixed capacity set by make)", file, line);
+	if (m->deleted > m->slots / 8) {
+		map_compact(m);
+		i = map_find(m, key);
+	}
 	i = -1 - i;
-	m->ctrl[i] = 1;
+	if (m->ctrl[i] == SQ_SLOT_DELETED) m->deleted--;
+	m->ctrl[i] = SQ_SLOT_FULL;
 	memcpy(m->keys + i * m->keysize, key, (size_t)m->keysize);
 	memset(m->vals + i * m->valsize, 0, (size_t)m->valsize);
 	m->len++;
@@ -698,32 +841,25 @@ void sq_map_delete(sq_map *m, const void *key) {
 	if (!m || m->len == 0) return;
 	int64_t i = map_find(m, key);
 	if (i < 0) return;
-	// backward-shift deletion keeps probe sequences intact without tombstones
-	int64_t j = i;
-	for (;;) {
-		m->ctrl[i] = 0;
-		for (;;) {
-			j = (j + 1) & m->mask;
-			if (!m->ctrl[j]) {
-				m->len--;
-				return;
-			}
-			int64_t k = (int64_t)(map_hash(m, m->keys + j * m->keysize) & (uint64_t)m->mask);
-			// can the entry at j move to i?
-			if ((i <= j) ? (i < k && k <= j) : (i < k || k <= j)) continue;
-			break;
-		}
-		m->ctrl[i] = 1;
-		memcpy(m->keys + i * m->keysize, m->keys + j * m->keysize, (size_t)m->keysize);
-		memcpy(m->vals + i * m->valsize, m->vals + j * m->valsize, (size_t)m->valsize);
-		i = j;
+	m->len--;
+	if (m->ctrl[(i + 1) & m->mask] != SQ_SLOT_EMPTY) {
+		m->ctrl[i] = SQ_SLOT_DELETED;
+		m->deleted++;
+		return;
+	}
+	// no probe sequence continues past an empty slot, so this slot and any tombstones right before
+	// it can become empty again
+	m->ctrl[i] = SQ_SLOT_EMPTY;
+	for (i = (i - 1) & m->mask; m->ctrl[i] == SQ_SLOT_DELETED; i = (i - 1) & m->mask) {
+		m->ctrl[i] = SQ_SLOT_EMPTY;
+		m->deleted--;
 	}
 }
 
 int64_t sq_map_next(sq_map *m, int64_t i) {
 	if (!m) return -1;
 	for (; i < m->slots; i++)
-		if (m->ctrl[i]) return i;
+		if (m->ctrl[i] == SQ_SLOT_FULL) return i;
 	return -1;
 }
 
@@ -762,6 +898,19 @@ static void heap_down(int64_t i) {
 	}
 }
 
+static void heap_remove(sq_g *g) {
+	int64_t i = g->heap_index;
+	if (i < 0) return;
+	ntimers--;
+	if (i != ntimers) {
+		sq_timer_heap[i] = sq_timer_heap[ntimers];
+		sq_timer_heap[i]->heap_index = i;
+		heap_down(i);
+		heap_up(i);
+	}
+	g->heap_index = -1;
+}
+
 static sq_g *heap_pop(void) {
 	sq_g *g = sq_timer_heap[0];
 	ntimers--;
@@ -770,6 +919,7 @@ static sq_g *heap_pop(void) {
 		sq_timer_heap[0]->heap_index = 0;
 		heap_down(0);
 	}
+	g->heap_index = -1;
 	return g;
 }
 
@@ -791,6 +941,7 @@ void sq_sleep(int64_t ns) {
 		return;
 	}
 	sq_g *g = cur_g;
+	g->wait_fd = -1;
 	g->wake_at = sq_nanotime() + ns;
 	g->heap_index = ntimers;
 	sq_timer_heap[ntimers++] = g;
@@ -804,7 +955,10 @@ static int nchanges;
 #endif
 
 // wait_fd parks the current goroutine until fd is readable (mode 'r') or writable ('w').
-static void wait_fd(int fd, int mode) {
+static void arm_fd(int fd, int mode) {
+	sq_g *g = cur_g;
+	g->wait_fd = fd;
+	g->wake = WAKE_NONE;
 #if SQ_KQUEUE
 	if (nchanges == (int)(sizeof changes / sizeof changes[0])) {
 		kevent(pollfd, changes, nchanges, NULL, 0, NULL);
@@ -815,9 +969,33 @@ static void wait_fd(int fd, int mode) {
 	struct epoll_event ev = {.events = (mode == 'r' ? EPOLLIN : EPOLLOUT) | EPOLLONESHOT, .data.ptr = cur_g};
 	if (epoll_ctl(pollfd, EPOLL_CTL_MOD, fd, &ev) < 0) epoll_ctl(pollfd, EPOLL_CTL_ADD, fd, &ev);
 #endif
-	fd_waiters++;
+	if (!g->armed) {
+		g->armed = true;
+		fd_waiters++;
+	}
+}
+
+static void wait_fd(int fd, int mode) {
+	arm_fd(fd, mode);
 	sq_park();
 }
+
+// fd_event delivers a readiness event; stale events (for a goroutine no longer waiting on that
+// fd) are dropped.
+static void fd_event(sq_g *g, int fd) {
+	if (!g) return;
+	if (g->armed) {
+		g->armed = false;
+		fd_waiters--;
+	}
+	if (g->state != G_WAITING || g->wait_fd != fd) return;
+	g->wait_fd = -1;
+	g->wake = WAKE_FD;
+	heap_remove(g);
+	sq_ready(g);
+}
+
+static void idle_event(int fd, int tag);
 
 static void netpoll(int64_t timeout_ns) {
 #if SQ_KQUEUE
@@ -831,24 +1009,25 @@ static void netpoll(int64_t timeout_ns) {
 	int n = kevent(pollfd, changes, nchanges, events, 256, tsp);
 	nchanges = 0;
 	for (int i = 0; i < n; i++) {
-		if (events[i].flags & EV_ERROR) {
-			// registration failed (e.g. fd closed): wake the waiter so its syscall reports the error
-			if (events[i].udata) {
-				fd_waiters--;
-				sq_ready(events[i].udata);
-			}
+		if ((uintptr_t)events[i].udata & 1) { // idle set: udata is tag<<1 | 1 (goroutines are aligned)
+			idle_event((int)events[i].ident, (int)((uintptr_t)events[i].udata >> 1));
 			continue;
 		}
-		fd_waiters--;
-		sq_ready(events[i].udata);
+		// EV_ERROR (e.g. fd closed) also wakes the waiter so its syscall reports the error
+		fd_event(events[i].udata, (int)events[i].ident);
 	}
 #else
 	struct epoll_event events[256];
 	int ms = timeout_ns < 0 ? -1 : (int)((timeout_ns + 999999) / 1000000);
 	int n = epoll_wait(pollfd, events, 256, ms);
 	for (int i = 0; i < n; i++) {
-		fd_waiters--;
-		sq_ready(events[i].data.ptr);
+		if (events[i].data.u64 & 1) { // idle set: tag<<33 | fd<<1 | 1
+			uint64_t d = events[i].data.u64;
+			idle_event((int)((d >> 1) & 0xffffffff), (int)(d >> 33));
+			continue;
+		}
+		sq_g *g = events[i].data.ptr;
+		fd_event(g, g ? g->wait_fd : -1);
 	}
 #endif
 }
@@ -856,7 +1035,139 @@ static void netpoll(int64_t timeout_ns) {
 static void fire_timers(void) {
 	if (!ntimers) return;
 	int64_t now = sq_nanotime();
-	while (ntimers > 0 && sq_timer_heap[0]->wake_at <= now) sq_ready(heap_pop());
+	while (ntimers > 0 && sq_timer_heap[0]->wake_at <= now) {
+		sq_g *g = heap_pop();
+		g->wake = WAKE_TIMER;
+		g->wait_fd = -1;
+		sq_ready(g);
+	}
+}
+
+// release returns the whole pages inside [p, p+n) to the OS; they read as zero afterwards.
+static void release(uint8_t *p, int64_t n) {
+	uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+	uintptr_t lo = ((uintptr_t)p + page - 1) & ~(page - 1);
+	uintptr_t hi = ((uintptr_t)p + (uintptr_t)n) & ~(page - 1);
+	if (hi <= lo) return;
+#if defined(__APPLE__)
+	// on macOS only replacing the mapping drops RSS immediately
+	mmap((void *)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+#else
+	madvise((void *)lo, hi - lo, MADV_DONTNEED);
+#endif
+}
+
+// sq_wait_idle parks until fd is readable (returns 0) or until grace_ns passes first (returns 1).
+// On timeout the read registration stays armed; the caller either waits again or hands the fd to
+// the idle set with sq_park_idle.
+int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
+	sq_g *g = cur_g;
+	arm_fd((int)fd, 'r');
+	g->wake_at = sq_nanotime() + grace_ns;
+	g->heap_index = ntimers;
+	sq_timer_heap[ntimers++] = g;
+	heap_up(g->heap_index);
+	sq_park();
+	if (g->wake == WAKE_FD) return 0;
+#if !SQ_KQUEUE
+	// The read registration would otherwise stay armed for g after it moves on. epoll events carry
+	// only g, not the fd, so fd_event can't tell such a stale event from a wait g starts later (a
+	// time.Sleep, or another fd). Disarm it; waiting again or sq_park_idle re-registers the fd.
+	// (kqueue events carry the fd, which fd_event checks.)
+	struct epoll_event ev = {.events = 0};
+	epoll_ctl(pollfd, EPOLL_CTL_MOD, (int)fd, &ev);
+	if (g->armed) {
+		g->armed = false;
+		fd_waiters--;
+	}
+#endif
+	return 1;
+}
+
+// The idle set: connections with nothing to do are registered with the poller without any
+// goroutine. When one becomes readable its fd is queued for the (single) idle consumer, which
+// typically starts a fresh goroutine for it. An idle connection therefore costs no stack at all.
+// Each parked fd carries a small tag (e.g. which server it belongs to) that comes back with it;
+// queue entries hold tag<<24 | fd.
+static int32_t idle_ready[1 << 16];
+static int64_t idle_head, idle_len, idle_parked;
+static sq_g *idle_waiter;
+
+static void idle_event(int fd, int tag) {
+	idle_parked--;
+	if (idle_len == (int64_t)(sizeof idle_ready / sizeof idle_ready[0])) {
+		sq_panic_cstr("idle connection queue overflow", __FILE__, __LINE__);
+	}
+	idle_ready[(idle_head + idle_len) % (int64_t)(sizeof idle_ready / sizeof idle_ready[0])] = (int32_t)((uint32_t)tag << 24 | (uint32_t)fd);
+	idle_len++;
+	if (idle_waiter) {
+		sq_g *w = idle_waiter;
+		idle_waiter = NULL;
+		fd_event(w, -2);
+	}
+}
+
+// sq_park_idle moves fd into the idle set with tag (0..255) and marks the calling goroutine's stack
+// for release when it exits.
+void sq_park_idle(int64_t fd, int64_t tag) {
+	sq_g *g = cur_g;
+	if (tag < 0 || tag > 255) sq_panic_cstr("idle tag out of range", __FILE__, __LINE__);
+	if (fd >= 1 << 24) sq_panic_cstr("fd too large for the idle set", __FILE__, __LINE__);
+#if SQ_KQUEUE
+	if (nchanges == (int)(sizeof changes / sizeof changes[0])) {
+		kevent(pollfd, changes, nchanges, NULL, 0, NULL);
+		nchanges = 0;
+	}
+	EV_SET(&changes[nchanges++], (int)fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, (void *)(((uintptr_t)tag << 1) | 1));
+#else
+	struct epoll_event ev = {.events = EPOLLIN | EPOLLONESHOT};
+	ev.data.u64 = ((uint64_t)tag << 33) | ((uint64_t)(uint32_t)fd << 1) | 1;
+	if (epoll_ctl(pollfd, EPOLL_CTL_MOD, (int)fd, &ev) < 0) epoll_ctl(pollfd, EPOLL_CTL_ADD, (int)fd, &ev);
+#endif
+	// the goroutine's own registration on fd (if still armed) was just replaced
+	if (g->armed && g->wait_fd == (int)fd) {
+		g->armed = false;
+		fd_waiters--;
+	}
+	g->wait_fd = -1;
+	g->release_stack = true;
+	idle_parked++;
+}
+
+// sq_next_idle returns the next idle connection that has become readable, parking until one does,
+// as tag<<32 | fd.
+int64_t sq_next_idle(void) {
+	while (idle_len == 0) {
+		if (idle_waiter) sq_panic_cstr("only one goroutine may wait for idle connections", __FILE__, __LINE__);
+		idle_waiter = cur_g;
+		cur_g->wait_fd = -2;
+		if (!cur_g->armed) {
+			cur_g->armed = true;
+			fd_waiters++;
+		}
+		sq_park();
+	}
+	uint32_t e = (uint32_t)idle_ready[idle_head];
+	int64_t v = (int64_t)(e >> 24) << 32 | (e & 0xffffff);
+	idle_head = (idle_head + 1) % (int64_t)(sizeof idle_ready / sizeof idle_ready[0]);
+	idle_len--;
+	return v;
+}
+
+int64_t sq_idle_count(void) { return idle_parked; }
+
+// sq_float64bits is math.Float64bits.
+uint64_t sq_float64bits(double f) {
+	uint64_t u;
+	memcpy(&u, &f, sizeof u);
+	return u;
+}
+
+// sq_float64frombits is math.Float64frombits.
+double sq_float64frombits(uint64_t u) {
+	double f;
+	memcpy(&f, &u, sizeof f);
+	return f;
 }
 
 // ---------------------------------------------------------------------------
@@ -867,7 +1178,28 @@ static int set_nonblock(int fd) {
 	return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
+// A read from a blocking pipe or terminal (stdin, typically) would stop every goroutine, and making
+// it non-blocking would change the descriptor for the parent shell too. So for those, wait for
+// readability through the poller first, parking only this goroutine. Sockets are non-blocking
+// already and regular files are always readable: they are read directly.
+static uint8_t fd_read_kind[1024]; // 0 unknown, 1 read directly, 2 poll first
+
+static bool read_needs_poll(int fd) {
+	if (fd < 0 || fd >= (int)sizeof fd_read_kind) return false;
+	if (!fd_read_kind[fd]) {
+		struct stat st;
+		int fl = fcntl(fd, F_GETFL);
+		bool p = fl >= 0 && !(fl & O_NONBLOCK) && fstat(fd, &st) == 0 && (S_ISFIFO(st.st_mode) || isatty(fd));
+		fd_read_kind[fd] = p ? 2 : 1;
+	}
+	return fd_read_kind[fd] == 2;
+}
+
 int64_t sq_read(int64_t fd, sq_bytes b) {
+	if (cur_g && read_needs_poll((int)fd)) {
+		struct pollfd p = {(int)fd, POLLIN, 0};
+		if (poll(&p, 1, 0) == 0) wait_fd((int)fd, 'r');
+	}
 	for (;;) {
 		ssize_t r = read((int)fd, b.p, (size_t)b.len);
 		if (r >= 0) return r;
@@ -959,7 +1291,10 @@ int64_t sq_httpdate(sq_bytes dst) {
 	return n;
 }
 
-int64_t sq_close(int64_t fd) { return close((int)fd) < 0 ? -errno : 0; }
+int64_t sq_close(int64_t fd) {
+	if (fd >= 0 && fd < (int64_t)sizeof fd_read_kind) fd_read_kind[fd] = 0; // the number may be reused
+	return close((int)fd) < 0 ? -errno : 0;
+}
 
 int64_t sq_open(sq_string path, int64_t flags, int64_t mode) {
 	char buf[1024];
@@ -1142,17 +1477,21 @@ static void schedule(void) {
 			if (g->state == G_DEAD) {
 				if (g->pool == &sq_main_pool) {
 					sq_flush();
+					if (stackcheck) {
+						g_release(g);
+						stack_report();
+					}
 					_exit(0); // returning from main ends the program, like Go
 				}
 				g_release(g);
 			}
-			if ((++switches & 63) == 0 && (fd_waiters > 0 || ntimers > 0)) {
+			if ((++switches & 63) == 0 && (fd_waiters > 0 || ntimers > 0 || idle_parked > 0)) {
 				fire_timers();
-				if (fd_waiters > 0) netpoll(0);
+				if (fd_waiters > 0 || idle_parked > 0) netpoll(0);
 			}
 		}
 		// nothing runnable: block in the poller until I/O or a timer fires
-		if (fd_waiters == 0 && ntimers == 0) {
+		if (fd_waiters == 0 && ntimers == 0 && idle_parked == 0) {
 			sq_flush();
 			err_write("fatal error: all goroutines are asleep - deadlock!\n");
 			_exit(2);
@@ -1162,7 +1501,7 @@ static void schedule(void) {
 			timeout = sq_timer_heap[0]->wake_at - sq_nanotime();
 			if (timeout < 0) timeout = 0;
 		}
-		if (fd_waiters > 0) {
+		if (fd_waiters > 0 || idle_parked > 0) {
 			netpoll(timeout);
 		} else if (timeout > 0) {
 			struct timespec ts = {timeout / 1000000000, timeout % 1000000000};
@@ -1172,11 +1511,39 @@ static void schedule(void) {
 	}
 }
 
+static void stack_report(void) {
+	err_write("stack check: pool, proven bytes, deepest observed bytes\n");
+	for (int64_t i = 0; i < sq_npools; i++) {
+		sq_pool *p = sq_pools[i];
+		for (int64_t k = 0; k < p->count; k++) {
+			sq_g *g = &p->gs[k];
+			if (g->state != G_FREE) {
+				int64_t u = stack_used(g);
+				if (u > p->observed) p->observed = u;
+			}
+		}
+		err_write("  ");
+		err_write(p->name);
+		err_write(" ");
+		err_int(p->stack_size);
+		err_write(" ");
+		err_int(p->observed);
+		err_write("\n");
+	}
+}
+
+static void on_term(int sig) {
+	(void)sig;
+	sq_flush();
+	if (stackcheck) stack_report();
+	_exit(0);
+}
+
 int main(int argc, char **argv) {
 	g_argc = argc;
 	g_argv = argv;
 	signal(SIGPIPE, SIG_IGN);
-	stack_t ss = {.ss_sp = sigstack, .ss_size = sizeof sigstack, .ss_flags = 0};
+	stack_t ss = {.ss_sp = sq_sigstack, .ss_size = sizeof sq_sigstack, .ss_flags = 0};
 	sigaltstack(&ss, NULL);
 	struct sigaction sa;
 	memset(&sa, 0, sizeof sa);
@@ -1189,6 +1556,11 @@ int main(int argc, char **argv) {
 #else
 	pollfd = epoll_create1(0);
 #endif
+	stackcheck = getenv("SQ_STACKCHECK") != NULL;
+	if (stackcheck) {
+		signal(SIGTERM, on_term);
+		signal(SIGINT, on_term);
+	}
 	for (int64_t i = 0; i < sq_npools; i++) pool_init(sq_pools[i]);
 	sq_go(&sq_main_pool, sq_program_main, NULL, 0);
 	schedule();

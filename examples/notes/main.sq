@@ -18,6 +18,11 @@ import (
 	"strings"
 )
 
+// At most 512 connections are served at once (more wait for a slot; idle keep-alive
+// connections don't count). That bounds the server's own worst-case memory.
+budget 128M
+pool http.serveConn 512
+
 const (
 	maxTitle  = 200
 	maxBody   = 4000
@@ -183,8 +188,6 @@ func getNote(w *http.ResponseWriter, id int) {
 
 func createNote(w *http.ResponseWriter, r *http.Request) {
 	var key [32]byte
-	var titleBuf [maxTitle]byte
-	var bodyBuf [maxBody]byte
 	title, body := "", ""
 	hasTitle := false
 	d := json.NewDecoder(r.Body)
@@ -199,9 +202,10 @@ func createNote(w *http.ResponseWriter, r *http.Request) {
 		}
 		switch k {
 		case "title":
-			title, hasTitle = d.String(titleBuf[:])
+			// decoded strings live in the request's arena, gone once the response is sent
+			title, hasTitle = d.String(make([]byte, maxTitle) in r.Arena)
 		case "body":
-			body, _ = d.String(bodyBuf[:])
+			body, _ = d.String(make([]byte, maxBody) in r.Arena)
 		default:
 			d.Skip()
 		}

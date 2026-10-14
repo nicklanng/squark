@@ -1,0 +1,24 @@
+package main
+
+// methods on a named vector type, next to the builtin vector methods
+
+type Stack [..8]int
+
+func (s *Stack) Top() int { return (*s)[len(*s)-1] }
+
+func (s Stack) Sum() int {
+	n := 0
+	for _, v := range s {
+		n += v
+	}
+	return n
+}
+
+func main() {
+	var s Stack
+	s.Push(3)
+	s.Push(4)
+	println(s.Top(), s.Sum(), len(s))
+	p := &s
+	println(p.Top(), p.Sum(), s.Pop())
+}

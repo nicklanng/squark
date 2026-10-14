@@ -1,0 +1,20 @@
+package main
+
+// a temporary created by the for post statement is read by the next condition, so it must
+// outlive the iteration that created it
+
+type T struct {
+	n   int
+	pad [8]int
+}
+
+func main() {
+	start := T{n: 0}
+	for p := &start; p.n < 3; p = &(T{n: p.n + 1}) {
+		var junk [16]int
+		for i := range 16 {
+			junk[i] = 777
+		}
+		println(p.n, junk[3])
+	}
+}

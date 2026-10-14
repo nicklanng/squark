@@ -21,39 +21,29 @@ const (
 	O_APPEND = 0x400
 )
 
-//squark:extern sq_write
-func sysWrite(fd int, b []byte) int
+extern "sq_write" func sysWrite(fd int, b []byte) int stack 8K
 
-//squark:extern sq_write_str
-func sysWriteStr(fd int, s string) int
+extern "sq_write_str" func sysWriteStr(fd int, s string) int stack 8K
 
-//squark:extern sq_read
-func sysRead(fd int, b []byte) int
+extern "sq_read" func sysRead(fd int, b []byte) int stack 8K
 
-//squark:extern sq_close
-func sysClose(fd int) int
+extern "sq_close" func sysClose(fd int) int stack 8K
 
-//squark:extern sq_open
-func sysOpen(path string, flags int, mode int) int
+extern "sq_open" func sysOpen(path string, flags int, mode int) int stack 8K
 
-//squark:extern sq_strerror
-func strerror(errno int) string
+extern "sq_strerror" func strerror(errno int) string stack 8K
 
-//squark:extern sq_exit
-func Exit(code int)
+extern "sq_exit" func Exit(code int) stack 8K
 
-//squark:extern sq_argc
-func argc() int
+extern "sq_argc" func argc() int stack 8K
 
-//squark:extern sq_argv
-func argv(i int) string
+extern "sq_argv" func argv(i int) string stack 8K
 
-//squark:extern sq_getenv
-func Getenv(name string) string
+extern "sq_getenv" func Getenv(name string) string stack 8K
 
 // Errno converts a positive errno value into an error.
 func Errno(n int) error {
-	return __error(n, strerror(n))
+	return error(n, strerror(n))
 }
 
 // NArgs returns the number of command-line arguments, including the program name.
@@ -107,6 +97,9 @@ func (f File) WriteString(s string) (int, error) {
 	n := sysWriteStr(f.fd, s)
 	if n < 0 {
 		return 0, Errno(-n)
+	}
+	if n < len(s) {
+		return n, io.ErrShortWrite
 	}
 	return n, nil
 }

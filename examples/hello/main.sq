@@ -24,13 +24,12 @@ func main() {
 	p := Point{X: 1, Y: 2}
 	p.Move(3, 4)
 	println("point:", p.X, p.Y)
-	var buf [16]int
-	s := buf[:0]
+	var squares [..16]int
 	for i := range 10 {
-		s = append(s, i*i)
+		squares.Push(i * i)
 	}
-	println("len", len(s), "cap", cap(s), "sum", sum(s...), sum(1, 2, 3))
-	m := make(map[string]int, 8)
+	println("len", len(squares), "cap", cap(squares), "sum", sum(squares[:]...), sum(1, 2, 3))
+	var m map[string]int cap 8
 	m["a"] = 1
 	m["b"] += 41
 	v, ok := m["b"]

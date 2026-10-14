@@ -1,0 +1,65 @@
+package main
+
+import "strconv"
+
+const ErrNegative = error(22, "negative input")
+const ErrTooBig = error(34, "too big")
+
+var cleanups = 0
+
+func cleanup() { cleanups++ }
+
+func parsePositive(s string) (int, error) {
+	n := try strconv.Atoi(s)
+	if n < 0 {
+		return 0, ErrNegative
+	}
+	return n, nil
+}
+
+func sum3(a, b, c string) (int, error) {
+	defer cleanup()
+	x := try parsePositive(a)
+	y := try parsePositive(b)
+	z := try parsePositive(c)
+	if x+y+z > 1000 {
+		return 0, ErrTooBig
+	}
+	return x + y + z, nil
+}
+
+func check(n int) error {
+	if n > 5 {
+		return ErrTooBig
+	}
+	return nil
+}
+
+func checkAll() error {
+	try check(1)
+	try check(9)
+	println("not reached")
+	return nil
+}
+
+func pair() (int, string, error) { return 7, "seven", nil }
+
+func usePair() (string, error) {
+	n, s := try pair()
+	_ = n
+	return s, nil
+}
+
+func main() {
+	v, err := sum3("1", "2", "3")
+	println(v, err == nil)
+	_, err = sum3("1", "-2", "3")
+	println(err.Error(), err.Code(), err == ErrNegative)
+	_, err = sum3("1", "x", "3")
+	println(err.Error(), err == strconv.ErrSyntax)
+	_, err = sum3("900", "200", "1")
+	println(err == ErrTooBig, cleanups)
+	println(checkAll().Error())
+	s, _ := usePair()
+	println(s, 64K, 2M/1K)
+}

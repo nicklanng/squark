@@ -1,0 +1,11 @@
+package main
+
+// a negative shift count panics, as in Go
+
+func main() {
+	x := 1
+	sh := 2
+	println(x << sh)
+	sh = -1
+	println(x << sh)
+}

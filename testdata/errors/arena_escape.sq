@@ -1,0 +1,44 @@
+package main
+
+type Node struct {
+	next *Node
+	name string
+}
+
+var keep *Node
+
+func leakFromArena() *Node {
+	arena a 1K {
+		n := new(Node) in a
+		return n // ERROR "cannot return reference to arena a"
+	}
+}
+
+// allocating in the caller's arena and returning it is fine
+func make2(a arena) *Node {
+	n := new(Node) in a
+	n.next = new(Node) in a
+	return n
+}
+
+func main() {
+	arena a 4K {
+		k := make2(a)
+		keep = k // ERROR "cannot escape into static memory (assigned to keep)"
+
+		n := make2(a)
+
+		var local Node
+		n.next = &local // ERROR "does not live long enough to be stored in arena a"
+
+		var outer *Node
+		{
+			arena inner 1K {
+				outer = new(Node) in inner // ERROR "does not live long enough to be stored in variable outer"
+			}
+		}
+		_ = outer
+		s := "x" + n.name in a
+		n.name = s
+	}
+}

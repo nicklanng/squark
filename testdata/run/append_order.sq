@@ -1,0 +1,41 @@
+package main
+
+// append and vector Push evaluate all their operands before storing anything
+
+var trace [..16]int
+
+func tr(n int) int {
+	trace.Push(n)
+	return n
+}
+
+func main() {
+	s := []int{1, 2}
+	s = append(s[:0], s[1], s[0])
+	println(s[0], s[1])
+
+	var buf [4]int
+	t := buf[:3]
+	t[0], t[1], t[2] = 1, 2, 3
+	t = append(t[:1], t[2], t[1], t[0])
+	println(t[0], t[1], t[2], t[3])
+
+	arena a 1K {
+		u := []int{1, 2}
+		u = append(u[:0], u[1], u[0], 9) in a
+		println(u[0], u[1], u[2])
+	}
+
+	var w [..2]int
+	w.Push(1)
+	w.Push(2)
+	w.Push(w.Pop()) // full before the argument runs, not after
+	println(len(w), w[0], w[1])
+	ok := w.TryPush(w.Pop())
+	println(ok, len(w))
+
+	var v [..4]int
+	v.Push(tr(3))
+	x := append(buf[:0], tr(1), tr(2))
+	println(len(v), len(x), len(trace), trace[0], trace[1], trace[2])
+}

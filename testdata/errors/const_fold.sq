@@ -1,0 +1,13 @@
+package main
+
+// constant folding must report errors, not crash the compiler
+
+func main() {
+	var x float64 = 2.0 / 0.0 // ERROR "division by zero"
+	y := 3.0
+	z := y / 0 // ERROR "division by zero"
+	a := "abc"[1.0] // ERROR "invalid index"
+	b := "abc"["k"] // ERROR "invalid index"
+	c := "abc"[1]
+	println(x, z, a, b, c)
+}

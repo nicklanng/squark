@@ -1,0 +1,12 @@
+package main
+
+extern "abs" func cabs(x int32) int32 // ERROR "needs a stack budget"
+
+task noPool() { // ERROR "needs a pool size"
+}
+
+task returns() int pool 1 { // ERROR "task returns cannot return values"
+	return 1
+}
+
+func main() {}

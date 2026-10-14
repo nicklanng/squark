@@ -54,6 +54,7 @@ const (
 	GEQ      // >=
 	DEFINE   // :=
 	ELLIPSIS // ...
+	DOTDOT   // ..
 
 	LPAREN // (
 	LBRACK // [
@@ -89,6 +90,14 @@ const (
 	SWITCH
 	TYPE
 	VAR
+	// squark keywords
+	ARENA
+	EXTERN
+	IN
+	TASK
+	TRY
+
+	lastKeyword = TRY
 )
 
 var tokStrings = [...]string{
@@ -97,11 +106,12 @@ var tokStrings = [...]string{
 	ADD_ASSIGN: "+=", SUB_ASSIGN: "-=", MUL_ASSIGN: "*=", QUO_ASSIGN: "/=", REM_ASSIGN: "%=", AND_ASSIGN: "&=", OR_ASSIGN: "|=",
 	XOR_ASSIGN: "^=", SHL_ASSIGN: "<<=", SHR_ASSIGN: ">>=", AND_NOT_ASSIGN: "&^=",
 	LAND: "&&", LOR: "||", ARROW: "<-", INC: "++", DEC: "--",
-	EQL: "==", LSS: "<", GTR: ">", ASSIGN: "=", NOT: "!", NEQ: "!=", LEQ: "<=", GEQ: ">=", DEFINE: ":=", ELLIPSIS: "...",
+	EQL: "==", LSS: "<", GTR: ">", ASSIGN: "=", NOT: "!", NEQ: "!=", LEQ: "<=", GEQ: ">=", DEFINE: ":=", ELLIPSIS: "...", DOTDOT: "..",
 	LPAREN: "(", LBRACK: "[", LBRACE: "{", COMMA: ",", PERIOD: ".", RPAREN: ")", RBRACK: "]", RBRACE: "}", SEMICOLON: ";", COLON: ":",
 	BREAK: "break", CASE: "case", CHAN: "chan", CONST: "const", CONTINUE: "continue", DEFAULT: "default", DEFER: "defer",
 	ELSE: "else", FOR: "for", FUNC: "func", GO: "go", IF: "if", IMPORT: "import", MAP: "map", PACKAGE: "package",
 	RANGE: "range", RETURN: "return", STRUCT: "struct", SWITCH: "switch", TYPE: "type", VAR: "var",
+	ARENA: "arena", EXTERN: "extern", IN: "in", TASK: "task", TRY: "try",
 }
 
 func (t Tok) String() string {
@@ -114,7 +124,7 @@ func (t Tok) String() string {
 var keywords = map[string]Tok{}
 
 func init() {
-	for t := BREAK; t <= VAR; t++ {
+	for t := BREAK; t <= lastKeyword; t++ {
 		keywords[tokStrings[t]] = t
 	}
 }

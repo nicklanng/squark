@@ -1,0 +1,12 @@
+package main
+
+import "errors"
+
+func mk(msg string) error { return errors.New(msg) }
+
+func main() {
+	var buf [8]byte
+	buf[0] = 'x'
+	_ = errors.New(string(buf[:1])) // ERROR "cannot escape into static memory (errors.New keeps argument 1 in static memory)"
+	_ = mk("static is fine")
+}

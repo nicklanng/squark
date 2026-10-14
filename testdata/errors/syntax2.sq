@@ -1,0 +1,24 @@
+package main
+
+const ErrBad = error(400, "bad")
+
+func plain() {}
+
+func noErr() int { return 1 }
+
+func useTry() error {
+	try noErr() // ERROR "last result is an error; noErr() returns int"
+	return nil
+}
+
+func noErrorResult() int {
+	try mayFail() // ERROR "try can only be used in a function whose last result is error"
+	return 0
+}
+
+func mayFail() error { return ErrBad }
+
+func main() {
+	go plain() // ERROR "go needs a task"
+	ErrBad = error("other") // ERROR "cannot assign to ErrBad (it is a constant)"
+}

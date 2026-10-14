@@ -31,7 +31,15 @@ struct sq_g {
 	bool ok;
 	// timers
 	int64_t wake_at;
-	int64_t heap_index;
+	int64_t heap_index; // -1 when not in the timer heap
+	// netpoll
+	int wait_fd;        // fd this goroutine is parked on, or -1
+	bool armed;         // a kqueue/epoll registration for this goroutine is outstanding
+	int wake;           // why the goroutine was last woken (WAKE_*)
+	bool guarded;       // guard page installed (done lazily on first use)
+	bool release_stack; // return the whole stack to the OS when this goroutine exits
 };
+
+enum { WAKE_NONE, WAKE_FD, WAKE_TIMER };
 
 #endif

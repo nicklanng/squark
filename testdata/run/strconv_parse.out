@@ -1,0 +1,14 @@
+_ 10 error: invalid syntax
+1_000 10 error: invalid syntax
+-_ 10 error: invalid syntax
++ 10 error: invalid syntax
+ 10 error: invalid syntax
+10 37 error: invalid base
+10 1 error: invalid base
+10 0 error: invalid base
++5 10 5
+-9223372036854775808 10 -9223372036854775808
+9223372036854775808 10 error: value out of range
+zz 36 1295
+ff 16 255
+12a 10 error: invalid syntax

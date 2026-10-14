@@ -1,0 +1,26 @@
+package main
+
+type V struct { // ERROR "invalid recursive type V"
+	x int
+	v [..2]V
+}
+
+type M struct { // ERROR "invalid recursive type M"
+	m map[int]M cap 4
+}
+
+type C struct { // ERROR "invalid recursive type C"
+	c chan C cap 4
+}
+
+type A B
+type B A // ERROR "invalid recursive type B"
+
+// fine: through a pointer or a view
+type L struct {
+	next *L
+	m    map[int]*L
+	kids []L
+}
+
+func main() {}

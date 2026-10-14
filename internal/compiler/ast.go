@@ -11,6 +11,7 @@ type ExprInfo struct {
 	T     Type
 	Const constant.Value // non-nil for constant expressions
 	Mode  Mode
+	View  Type // non-nil: the expression is storage (this type) used as a view (T)
 }
 
 func (e *ExprInfo) info() *ExprInfo { return e }
@@ -124,6 +125,7 @@ type CallExpr struct {
 	Callee     *Func  // static callee when known (function or method)
 	Variadic   int    // index where variadic args start (-1 if none packed)
 	StorageID  int    // for make(): storage slot index
+	InArena    Expr   // new/make/append/copying conversions allocate here
 }
 
 type StarExpr struct {
@@ -146,6 +148,8 @@ type BinaryExpr struct {
 	Op Tok
 	Y  Expr
 	P  Pos
+
+	InArena Expr // string concatenation allocates here
 }
 
 // ---- type expressions ----
@@ -162,18 +166,53 @@ type MapType struct {
 	P     Pos
 	Key   Expr
 	Value Expr
+	Cap   Expr // map[K]V cap N: storage
+}
+
+// VecTypeExpr is [..N]T: a bounded vector with inline storage.
+type VecTypeExpr struct {
+	ExprInfo
+	P    Pos
+	Len  Expr
+	Elem Expr
+}
+
+// ArenaType is the type `arena` (a reference to arena storage).
+type ArenaTypeExpr struct {
+	ExprInfo
+	P Pos
+}
+
+// TryExpr is `try call`.
+type TryExpr struct {
+	ExprInfo
+	P Pos
+	X Expr
+}
+
+// InExpr is `x in arena`: allocations made by x come from the arena.
+type InExpr struct {
+	ExprInfo
+	X     Expr
+	Arena Expr
+	P     Pos
 }
 
 type ChanType struct {
 	ExprInfo
 	P    Pos
 	Elem Expr
+	Cap  Expr // chan T cap N: storage
 }
 
 type Field struct {
 	Names    []*Ident
 	Type     Expr
 	Variadic bool
+
+	// provenance (parameters): `name static T`, `name T into other`
+	Static bool
+	Into   *Ident
 }
 
 type StructType struct {
@@ -187,6 +226,10 @@ type FuncType struct {
 	P       Pos
 	Params  []*Field
 	Results []*Field
+
+	// provenance (results): `... T from a, b` or `... T static`
+	From         []*Ident
+	ResultStatic bool
 }
 
 func (x *Ident) Pos() Pos        { return x.P }
@@ -195,9 +238,9 @@ func (x *CompositeLit) Pos() Pos { return x.P }
 func (x *KeyValueExpr) Pos() Pos { return x.Key.Pos() }
 func (x *ParenExpr) Pos() Pos    { return x.P }
 func (x *SelectorExpr) Pos() Pos { return x.Sel.P }
-func (x *IndexExpr) Pos() Pos    { return x.P }
-func (x *SliceExpr) Pos() Pos    { return x.P }
-func (x *CallExpr) Pos() Pos     { return x.P }
+func (x *IndexExpr) Pos() Pos    { return x.X.Pos() } // as go/ast: where the expression starts
+func (x *SliceExpr) Pos() Pos    { return x.X.Pos() }
+func (x *CallExpr) Pos() Pos     { return x.Fun.Pos() }
 func (x *StarExpr) Pos() Pos     { return x.P }
 func (x *UnaryExpr) Pos() Pos    { return x.P }
 func (x *BinaryExpr) Pos() Pos   { return x.P }
@@ -205,6 +248,10 @@ func (x *ArrayType) Pos() Pos    { return x.P }
 func (x *MapType) Pos() Pos      { return x.P }
 func (x *ChanType) Pos() Pos     { return x.P }
 func (x *StructType) Pos() Pos   { return x.P }
+func (x *ArenaTypeExpr) Pos() Pos { return x.P }
+func (x *VecTypeExpr) Pos() Pos   { return x.P }
+func (x *TryExpr) Pos() Pos       { return x.P }
+func (x *InExpr) Pos() Pos        { return x.P }
 func (x *FuncType) Pos() Pos     { return x.P }
 
 // ---- statements ----
@@ -316,12 +363,20 @@ type LabeledStmt struct {
 	P     Pos
 }
 
+// ArenaStmt is `arena NAME SIZE { ... }`.
+type ArenaStmt struct {
+	Name *Ident
+	Size Expr
+	Body *BlockStmt
+	P    Pos
+}
+
 type EmptyStmt struct{ P Pos }
 
 func (s *ExprStmt) Pos() Pos     { return s.X.Pos() }
 func (s *SendStmt) Pos() Pos     { return s.P }
 func (s *IncDecStmt) Pos() Pos   { return s.P }
-func (s *AssignStmt) Pos() Pos   { return s.P }
+func (s *AssignStmt) Pos() Pos   { return s.Lhs[0].Pos() }
 func (s *GoStmt) Pos() Pos       { return s.P }
 func (s *DeferStmt) Pos() Pos    { return s.P }
 func (s *ReturnStmt) Pos() Pos   { return s.P }
@@ -335,6 +390,7 @@ func (s *RangeStmt) Pos() Pos    { return s.P }
 func (s *DeclStmt) Pos() Pos     { return s.Decl.P }
 func (s *LabeledStmt) Pos() Pos  { return s.P }
 func (s *EmptyStmt) Pos() Pos    { return s.P }
+func (s *ArenaStmt) Pos() Pos    { return s.P }
 func (*ExprStmt) stmt()          {}
 func (*SendStmt) stmt()          {}
 func (*IncDecStmt) stmt()        {}
@@ -359,6 +415,7 @@ type ImportSpec struct {
 	Name *Ident // optional
 	Path string
 	P    Pos
+	Pkg  *Package // resolved by the loader
 }
 
 type ValueSpec struct {
@@ -383,6 +440,14 @@ type GenDecl struct {
 	Pragmas []string
 }
 
+type FuncKind int
+
+const (
+	KindFunc FuncKind = iota
+	KindTask
+	KindExtern
+)
+
 type FuncDecl struct {
 	Recv    *Field
 	Name    *Ident
@@ -390,12 +455,35 @@ type FuncDecl struct {
 	Body    *BlockStmt // nil for extern
 	Pragmas []string
 	P       Pos
+
+	Kind      FuncKind
+	ExternSym string // extern "sym" (empty: same as Name)
+	Pool      Expr   // task ... pool N
+	Stack     Expr   // ... stack N
+}
+
+// Directive is a top-level `budget N`, `link "lib"`, `cflags "..."` or `ldflags "..."`.
+type Directive struct {
+	Name   string
+	Target string // pool directive: "pkg.task"
+	Value  Expr
+	P      Pos
+}
+
+// ArenaDecl is a package-level `arena NAME SIZE`.
+type ArenaDecl struct {
+	Name *Ident
+	Size Expr
+	P    Pos
 }
 
 type File struct {
 	Path    string
 	Package string
 	Imports []*ImportSpec
-	Decls   []any // *GenDecl or *FuncDecl
-	Pragmas []string
+	Decls      []any // *GenDecl, *FuncDecl or *ArenaDecl
+	Pragmas    []string
+	Directives []*Directive
 }
+
+func (*ArenaStmt) stmt() {}

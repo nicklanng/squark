@@ -1,0 +1,17 @@
+rect 24
+total 5
+0 10 20
+-2 9
+zero small big
+true
+4 -128 -3 -1 2
+-12345 3.142
+0 true invalid syntax
+-9876
+3 a c
+key value true
+hi 2 true
+9 small true
+sum of big keys 34
+1 100 5 true
+15

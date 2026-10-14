@@ -2,97 +2,138 @@ package compiler
 
 import (
 	"fmt"
-	"math/bits"
+	"strings"
 )
 
 // Lifetime analysis: squark's replacement for Go's escape analysis.
 //
-// Where Go would move a value to the heap because a reference to it outlives its stack frame,
-// squark reports a compile error. Every reference-typed value (pointer, slice, string, map, chan,
-// or a struct/array containing one) carries two regions:
+// Where Go would move a value to the heap because a reference outlives its storage, squark
+// reports a compile error. The analysis is region inference in the style of Rust's borrow
+// checker (without ownership): every value that holds references gets a *region vector*, one
+// region variable per pointer level (level 0 = the storage it points to directly, level 1 = the
+// storage that storage points to, ...; struct fields share levels, deeper levels collapse into
+// the last). Regions are related by "outlives" constraints:
 //
-//   lo: a lower bound on how long the memory it references lives
-//   hi: an upper bound on how long that memory lives (used when storing *through* the reference)
+//   - copying a value is covariant at level 0 (the copy may claim a shorter region) and
+//     invariant below (anything stored through either copy is visible through the other);
+//   - creating storage (a variable, an arena allocation, a literal's backing array) requires
+//     whatever is stored in it to outlive it;
+//   - a function's parameters and results are regions owned by the caller, which outlive every
+//     local of the function.
 //
-// Region depths: 0 = static, 1 = owned by the caller (derived from parameters), >=2 = a local block
-// at that lexical depth. A deeper block dies sooner. Storing a reference requires that it outlive the
-// storage it is written to; returning one requires depth <= 1.
-//
-// Recursion is banned, so the call graph is a DAG and every function is analysed after its callees.
-// Each function gets a Summary of how references flow between its parameters and results, which call
-// sites check against their actual arguments. No lifetime annotations are needed.
+// A program is rejected when the constraints force a shorter-lived region (a local variable,
+// a temporary, an arena) to outlive a longer-lived one (a caller's region, static memory, an
+// outer variable). Recursion is banned, so functions are analysed callees-first and each gets a
+// Summary: the constraints its body implies between its parameters' and results' regions. Call
+// sites instantiate the summary for their arguments. No lifetime annotations are needed.
 
-type Region struct {
-	D      int
-	M      uint64 // parameter slots the reference derives from (when D == 1)
-	Src    string // description of the referenced memory, for diagnostics
-	SrcPos Pos
+// levels is the depth of region vectors; deeper pointer levels share the last region.
+const levels = 4
+
+type rkind uint8
+
+const (
+	rVar    rkind = iota // inference variable
+	rConst               // a concrete lifetime: static, the caller, or a local object
+	rParam               // a parameter level of the function being analysed
+	rResult              // a result level of the function being analysed
+)
+
+type why struct {
+	pos  Pos
+	text string
+	kind wkind
 }
 
-var static = Region{}
+// wkind classifies a constraint for choosing where to report an error.
+type wkind uint8
 
-// join returns the shorter-lived of two regions (used for lower bounds).
-func join(a, b Region) Region {
-	r := a
-	if b.D > a.D || (a.D == 0 && b.D == 0 && a.Src == "") {
-		r = b
-	}
-	r.M = a.M | b.M
-	return r
+const (
+	wStore wkind = iota // stored somewhere that may outlive it: a field, a global, a result, a channel
+	wCopy               // copied into a local variable
+	wPass               // passed as an argument
+	wDecl               // a declaration's "contents outlive the storage" constraint
+)
+
+type redge struct {
+	to  int
+	why *why
 }
 
-// meet returns the longer-lived of two regions (used for upper bounds).
-func meet(a, b Region) Region {
-	r := a
-	if b.D < a.D {
-		r = b
-	}
-	r.M = a.M | b.M
-	return r
+type rnode struct {
+	kind  rkind
+	rank  int // constants: 0 static, 1 caller, >= 2 local block depth (deeper dies sooner)
+	desc  string
+	pos   Pos
+	slot  int // rParam/rResult: index
+	level int
+	out   []redge
 }
 
-type Flow struct{ Src, Dst int }
+type vec []int
 
-// Summary describes how a function's reference-typed parameters may flow.
+// IfacePos names a level of a parameter slot or result in a summary.
+type IfacePos struct {
+	Result bool
+	Index  int
+	Level  int
+}
+
+// SumEdge says: region From outlives region To (From ≥ To).
+type SumEdge struct {
+	From, To IfacePos
+}
+
+// Summary describes how a function relates its parameters' and results' regions.
 type Summary struct {
-	RetMask   uint64 // slots whose references may be returned
-	StaticReq uint64 // slots whose references must point to static memory
-	Flows     []Flow // references from slot Src may be stored through slot Dst
+	Edges  []SumEdge
+	Static []IfacePos // regions that must be static
 }
 
-func (s *Summary) addFlow(src, dst int) {
-	if src == dst {
-		return
+func (p IfacePos) String() string {
+	if p.Result {
+		return fmt.Sprintf("result %d level %d", p.Index, p.Level)
 	}
-	for _, f := range s.Flows {
-		if f.Src == src && f.Dst == dst {
-			return
-		}
-	}
-	s.Flows = append(s.Flows, Flow{src, dst})
+	return fmt.Sprintf("arg %d level %d", p.Index, p.Level)
 }
 
 type lifetime struct {
-	prog   *Program
-	errs   ErrorList
-	seen   map[string]bool
-	fn     *Func
-	depth  int
-	report bool
-	sum    *Summary
-	inInit bool
-	change bool
+	prog *Program
+	errs ErrorList
+	seen map[string]bool
+
+	fn      *Func
+	nodes   []rnode
+	static  int
+	caller  int
+	body    int // the function body's lifetime (deferred calls run at its end)
+	vars    map[*Var]vec
+	lives   map[*Var]int
+	depth   int
+	params  []vec
+	results []vec
 }
 
-// AnalyzeLifetimes runs the lifetime checker over all functions (callees first).
+// AnalyzeLifetimes runs region inference over all functions, callees first.
 func AnalyzeLifetimes(prog *Program, order []*Func) error {
 	l := &lifetime{prog: prog, seen: map[string]bool{}}
 	for _, fn := range order {
+		if fn == prog.InitFunc {
+			continue
+		}
 		if fn.Decl == nil || fn.Decl.Body == nil {
-			fn.Summary = &Summary{}
+			fn.Summary = contractSummary(fn.Sig, len(fn.Sig.Results))
+			if fn.Summary == nil {
+				fn.Summary = &Summary{}
+			}
 			continue
 		}
 		l.function(fn)
+		if fn.Sig.HasContract {
+			// declared provenance names which parameters and results are related; the body
+			// supplies the exact pointer levels, so callers keep using the inferred summary
+			l.checkContract(fn, fn.Summary)
+		}
 	}
 	l.globals()
 	if len(l.errs) > 0 {
@@ -102,9 +143,6 @@ func AnalyzeLifetimes(prog *Program, order []*Func) error {
 }
 
 func (l *lifetime) errorf(pos Pos, format string, args ...any) {
-	if !l.report {
-		return
-	}
 	msg := fmt.Sprintf(format, args...)
 	key := pos.String() + msg
 	if l.seen[key] {
@@ -114,22 +152,241 @@ func (l *lifetime) errorf(pos Pos, format string, args ...any) {
 	l.errs = append(l.errs, &Error{pos, msg})
 }
 
-func slotOf(fn *Func, v *Var) int {
-	if fn.Sig.Recv != nil {
-		if v == fn.Sig.Recv {
-			return 0
-		}
-		return v.Index + 1
+// contractSummary turns declared provenance into a summary (nil when nothing is declared).
+func contractSummary(sig *Signature, nresults int) *Summary {
+	if sig == nil || !sig.HasContract {
+		return nil
 	}
-	return v.Index
+	s := &Summary{}
+	slot := func(i, k int) IfacePos { return IfacePos{Index: i, Level: k} }
+	res := func(i, k int) IfacePos { return IfacePos{Result: true, Index: i, Level: k} }
+	for _, p := range sig.From {
+		for r := 0; r < nresults; r++ {
+			for k := 0; k < levels; k++ {
+				s.Edges = append(s.Edges, SumEdge{slot(p, k), res(r, k)})
+				if k > 0 {
+					s.Edges = append(s.Edges, SumEdge{res(r, k), slot(p, k)})
+				}
+			}
+		}
+	}
+	for _, in := range sig.Into {
+		src, dst := in[0], in[1]
+		for k := 0; k+1 < levels; k++ {
+			s.Edges = append(s.Edges, SumEdge{slot(src, k), slot(dst, k+1)})
+			if k > 0 {
+				s.Edges = append(s.Edges, SumEdge{slot(dst, k+1), slot(src, k)})
+			}
+		}
+		// deeper levels collapse into the last one
+		s.Edges = append(s.Edges, SumEdge{slot(src, levels-1), slot(dst, levels-1)}, SumEdge{slot(dst, levels-1), slot(src, levels-1)})
+	}
+	for _, p := range sig.StaticSlots {
+		for k := 0; k < levels; k++ {
+			s.Static = append(s.Static, slot(p, k))
+		}
+	}
+	return s
 }
 
-func numSlots(fn *Func) int {
-	n := len(fn.Sig.Params)
-	if fn.Sig.Recv != nil {
-		n++
+// checkContract verifies that every flow the body implies is between parameters (and results)
+// the declared provenance relates.
+func (l *lifetime) checkContract(fn *Func, inferred *Summary) {
+	sig := fn.Sig
+	fromOK := map[int]bool{}
+	for _, p := range sig.From {
+		fromOK[p] = true
 	}
+	intoOK := map[[2]int]bool{}
+	for _, in := range sig.Into {
+		intoOK[in] = true
+	}
+	staticOK := map[int]bool{}
+	for _, p := range sig.StaticSlots {
+		staticOK[p] = true
+	}
+	slots := slotVars(fn)
+	name := func(i int) string {
+		if i < len(slots) {
+			return slots[i].Name
+		}
+		return fmt.Sprint(i)
+	}
+	reported := map[string]bool{}
+	complain := func(msg string) {
+		if !reported[msg] {
+			reported[msg] = true
+			l.errorf(fn.Decl.P, "%s", msg)
+		}
+	}
+	// declared relations, closed transitively: `s into out` and `from out` imply results may
+	// reach s
+	const result = -1
+	rel := map[int][]int{}
+	for p := range fromOK {
+		rel[p] = append(rel[p], result)
+	}
+	for in := range intoOK {
+		rel[in[0]] = append(rel[in[0]], in[1])
+	}
+	reaches := func(a, b int) bool {
+		seen := map[int]bool{a: true}
+		queue := []int{a}
+		for len(queue) > 0 {
+			x := queue[0]
+			queue = queue[1:]
+			if x == b {
+				return true
+			}
+			for _, y := range rel[x] {
+				if !seen[y] {
+					seen[y] = true
+					queue = append(queue, y)
+				}
+			}
+		}
+		return false
+	}
+	// Stores between parameters first, then results. Each complaint assumes its fix, so flows that
+	// the suggested `into`/`from` would already cover are not reported again (a.next = b; return a
+	// is one missing `b into a`, not three problems).
+	for _, e := range inferred.Edges {
+		if e.From.Result || e.To.Result {
+			continue
+		}
+		src, dst := e.From.Index, e.To.Index
+		if src == dst || reaches(src, dst) || reaches(dst, src) || staticOK[src] {
+			continue
+		}
+		// a flow between two parameters: the one stored is the one at the shallower level
+		if e.From.Level > e.To.Level {
+			src, dst = dst, src
+		}
+		complain(fmt.Sprintf("%s stores %s inside %s, but its signature does not say so: declare the parameter as `%s T into %s`", fn.FullName(), name(src), name(dst), name(src), name(dst)))
+		rel[src] = append(rel[src], dst)
+	}
+	for _, e := range inferred.Edges {
+		if e.From.Result == e.To.Result {
+			continue
+		}
+		p := e.From.Index
+		if e.From.Result {
+			p = e.To.Index
+		}
+		if !reaches(p, result) && !staticOK[p] {
+			complain(fmt.Sprintf("%s returns a reference into %s, but its signature does not say so: add `from %s` after the results", fn.FullName(), name(p), name(p)))
+			rel[p] = append(rel[p], result)
+		}
+	}
+	for _, p := range inferred.Static {
+		if !staticOK[p.Index] && !p.Result {
+			complain(fmt.Sprintf("%s keeps %s in static memory, but its signature does not say so: declare the parameter as `%s static T`", fn.FullName(), name(p.Index), name(p.Index)))
+		}
+	}
+	if sig.ResultStatic {
+		for _, e := range inferred.Edges {
+			if e.To.Result && !e.From.Result {
+				complain(fmt.Sprintf("%s is declared to return static memory, but it returns a reference into %s", fn.FullName(), name(e.From.Index)))
+			}
+		}
+	}
+}
+
+// ---- graph construction ----
+
+func (l *lifetime) reset(fn *Func) {
+	l.fn = fn
+	l.nodes = l.nodes[:0]
+	l.vars = map[*Var]vec{}
+	l.lives = map[*Var]int{}
+	l.params, l.results = nil, nil
+	l.static = l.constant(0, "static memory", Pos{})
+	l.caller = l.constant(1, "the caller", Pos{})
+	l.body = l.constant(2, "the function body", Pos{})
+}
+
+func (l *lifetime) node(k rkind) int {
+	l.nodes = append(l.nodes, rnode{kind: k})
+	return len(l.nodes) - 1
+}
+
+func (l *lifetime) constant(rank int, desc string, pos Pos) int {
+	n := l.node(rConst)
+	l.nodes[n].rank = rank
+	l.nodes[n].desc = desc
+	l.nodes[n].pos = pos
 	return n
+}
+
+func (l *lifetime) fresh() vec {
+	v := make(vec, levels)
+	for i := range v {
+		v[i] = l.node(rVar)
+	}
+	return v
+}
+
+func (l *lifetime) staticVec() vec {
+	v := make(vec, levels)
+	for i := range v {
+		v[i] = l.static
+	}
+	return v
+}
+
+// outlives records a ≥ b.
+func (l *lifetime) outlives(a, b int, w *why) {
+	if a == b {
+		return
+	}
+	l.nodes[a].out = append(l.nodes[a].out, redge{b, w})
+}
+
+func (l *lifetime) equal(a, b int, w *why) {
+	l.outlives(a, b, w)
+	l.outlives(b, a, w)
+}
+
+// assign records that src is copied into storage typed by dst.
+func (l *lifetime) assign(dst, src vec, w *why) {
+	if dst == nil || src == nil {
+		return
+	}
+	l.outlives(src[0], dst[0], w)
+	for k := 1; k < levels; k++ {
+		l.equal(src[k], dst[k], w)
+	}
+}
+
+// requireAll makes every level of v outlive region r.
+func (l *lifetime) requireAll(v vec, r int, w *why) {
+	for _, n := range v {
+		l.outlives(n, r, w)
+	}
+}
+
+func shift(v vec) vec {
+	if v == nil {
+		return nil
+	}
+	s := make(vec, levels)
+	copy(s, v[1:])
+	s[levels-1] = v[levels-1]
+	return s
+}
+
+// prepend builds the vector of a reference to storage r holding a value of vector v.
+func (l *lifetime) prepend(r int, v vec) vec {
+	out := make(vec, levels)
+	out[0] = r
+	if v == nil {
+		for i := 1; i < levels; i++ {
+			out[i] = l.node(rVar)
+		}
+		return out
+	}
+	copy(out[1:], v[:levels-1])
+	return out
 }
 
 func lifetimeOf(v *Var) int {
@@ -142,460 +399,552 @@ func lifetimeOf(v *Var) int {
 	return v.Depth
 }
 
-func (l *lifetime) function(fn *Func) {
-	l.fn = fn
-	if numSlots(fn) > 63 {
-		l.report = true
-		l.errorf(fn.Decl.P, "too many parameters")
-		return
+// life returns the constant for the storage of a variable.
+func (l *lifetime) life(v *Var) int {
+	if v.Global {
+		return l.static
 	}
-	params := fn.Sig.Params
-	if fn.Sig.Recv != nil {
-		params = append([]*Var{fn.Sig.Recv}, params...)
+	if n, ok := l.lives[v]; ok {
+		return n
 	}
-	for _, p := range params {
-		s := slotOf(fn, p)
-		r := Region{D: 1, M: 1 << s, Src: "parameter " + p.Name, SrcPos: p.Pos}
-		p.Content = r
-		p.ContentHi = r
-		p.hiSet = true
-	}
-	// iterate to a fixed point, then report
-	for i := 0; i < 20; i++ {
-		l.change = false
-		l.report = false
-		l.sum = &Summary{}
-		l.body(fn)
-		if !l.change {
-			break
+	desc := "variable " + v.Name
+	if v.Type != nil {
+		if _, ok := v.Type.Underlying().(*ArenaType); ok {
+			desc = "arena " + v.Name
 		}
 	}
-	l.report = true
-	l.sum = &Summary{}
-	l.body(fn)
-	fn.Summary = l.sum
+	n := l.constant(lifetimeOf(v), desc, v.Pos)
+	l.lives[v] = n
+	return n
 }
 
-func (l *lifetime) body(fn *Func) {
+// varVec returns the region vector of a variable, creating it (with the constraint that what it
+// points to outlives it) on first use.
+func (l *lifetime) varVec(v *Var) vec {
+	if v.Global {
+		return l.staticVec()
+	}
+	if x, ok := l.vars[v]; ok {
+		return x
+	}
+	x := l.fresh()
+	l.vars[v] = x
+	l.outlives(x[0], l.life(v), &why{v.Pos, "stored in " + l.nodes[l.life(v)].desc, wDecl})
+	return x
+}
+
+// tempVec is a reference to fresh storage living in the current block (or statically at package
+// level): the storage outlives the reference, and its contents must outlive the storage.
+func (l *lifetime) tempVec(desc string, pos Pos) vec {
+	var r int
+	if l.fn == nil {
+		r = l.static
+	} else {
+		r = l.constant(l.depth, desc, pos)
+	}
+	v := l.fresh()
+	l.outlives(r, v[0], nil)
+	l.outlives(v[1], r, &why{pos, "stored in " + desc, wDecl})
+	return v
+}
+
+// ---- functions ----
+
+func slotVars(fn *Func) []*Var {
+	ps := append([]*Var(nil), fn.Sig.Params...)
+	if fn.Sig.Recv != nil {
+		ps = append([]*Var{fn.Sig.Recv}, ps...)
+	}
+	return ps
+}
+
+func (l *lifetime) function(fn *Func) {
+	l.reset(fn)
+	for i, p := range slotVars(fn) {
+		iv := make(vec, levels)
+		for k := range iv {
+			n := l.node(rParam)
+			l.nodes[n].slot, l.nodes[n].level = i, k
+			l.nodes[n].desc = "parameter " + p.Name
+			l.nodes[n].pos = p.Pos
+			l.outlives(n, l.caller, nil)
+			iv[k] = n
+		}
+		l.params = append(l.params, iv)
+		if HasRefs(p.Type) {
+			l.assign(l.varVec(p), iv, &why{p.Pos, "parameter " + p.Name, wDecl})
+		}
+	}
+	for i := range fn.Sig.Results {
+		rv := make(vec, levels)
+		for k := range rv {
+			n := l.node(rResult)
+			l.nodes[n].slot, l.nodes[n].level = i, k
+			l.nodes[n].desc = "the function's result"
+			l.outlives(n, l.caller, nil)
+			rv[k] = n
+		}
+		l.results = append(l.results, rv)
+	}
 	l.depth = 2
 	l.stmts(fn.Decl.Body.List)
+	l.check()
+	fn.Summary = l.summarize()
 }
 
 func (l *lifetime) globals() {
-	l.fn = nil
-	l.report = true
-	l.inInit = true
+	l.reset(nil)
 	l.depth = 0
-	l.sum = &Summary{}
 	for _, pkg := range l.prog.Packages {
 		for _, vs := range pkg.GlobalInits {
 			if len(vs.Values) != len(vs.Names) {
 				continue
 			}
 			for i, x := range vs.Values {
-				lo, _ := l.regs(x)
-				if HasRefs(x.info().T) {
-					l.checkFlow(lo, static, x.Pos(), "package variable "+vs.Names[i].Name)
+				v := l.vecOf(x)
+				if v != nil {
+					l.requireAll(v, l.static, &why{x.Pos(), "stored in package variable " + vs.Names[i].Name, wStore})
 				}
 			}
 		}
 	}
-	l.inInit = false
+	l.check()
 }
 
-// ---- regions of expressions ----
+// ---- solving ----
 
-func (l *lifetime) cur() Region {
-	if l.fn == nil {
-		return static
+type pathStep struct {
+	prev int
+	why  *why
+}
+
+// check reports every constraint chain that makes a shorter-lived region outlive a longer one.
+// Each use of a short-lived object (each constraint leaving it) is searched separately, so every
+// offending statement gets its own error.
+func (l *lifetime) check() {
+	for u := range l.nodes {
+		n := &l.nodes[u]
+		if n.kind != rConst || n.rank < 2 {
+			continue
+		}
+		for _, start := range l.nodes[u].out {
+			prev := map[int]pathStep{u: {-1, nil}, start.to: {u, start.why}}
+			if t := &l.nodes[start.to]; t.kind == rConst {
+				if t.rank < n.rank {
+					l.report(u, start.to, prev)
+				}
+				continue
+			}
+			queue := []int{start.to}
+			found := -1
+			for len(queue) > 0 && found < 0 {
+				x := queue[0]
+				queue = queue[1:]
+				for _, e := range l.nodes[x].out {
+					if _, ok := prev[e.to]; ok {
+						continue
+					}
+					prev[e.to] = pathStep{x, e.why}
+					t := &l.nodes[e.to]
+					if t.kind == rConst {
+						if t.rank < n.rank {
+							found = e.to
+							break
+						}
+						continue // an equal or shorter lifetime: fine, and not a way through
+					}
+					queue = append(queue, e.to)
+				}
+			}
+			if found >= 0 {
+				l.report(u, found, prev)
+			}
+		}
 	}
-	return Region{D: l.depth, Src: "a temporary in this block"}
 }
 
-func (l *lifetime) lo(e Expr) Region {
-	lo, _ := l.regs(e)
-	return lo
+func (l *lifetime) report(u, v int, prev map[int]pathStep) {
+	// walk back from v to u. The interesting step is the last one that is not just "x is stored
+	// in variable y" (a declaration): the return, assignment, call or send that makes it escape.
+	var at, copied, passed, any *why
+	viaResult, viaParam := false, -1
+	for x := v; x != u; x = prev[x].prev {
+		st := prev[x]
+		if w := st.why; w != nil && w.pos.File != "" {
+			if any == nil {
+				any = w
+			}
+			switch w.kind {
+			case wStore:
+				if at == nil {
+					at = w
+				}
+			case wCopy:
+				if copied == nil {
+					copied = w
+				}
+			case wPass:
+				if passed == nil {
+					passed = w
+				}
+			}
+		}
+		switch l.nodes[x].kind {
+		case rResult:
+			viaResult = true
+		case rParam:
+			viaParam = x
+		}
+	}
+	for _, w := range []*why{copied, passed, any} {
+		if at == nil {
+			at = w
+		}
+	}
+	src := &l.nodes[u]
+	what := "a reference to " + src.desc
+	if src.pos.File != "" {
+		what += fmt.Sprintf(" (declared at %s:%d)", shortFile(src.pos.File), src.pos.Line)
+	}
+	pos := src.pos
+	how := ""
+	if at != nil {
+		pos = at.pos
+		how = at.text
+	}
+	dst := &l.nodes[v]
+	var msg string
+	switch {
+	case dst.rank == 0:
+		msg = what + " cannot escape into static memory"
+		if how != "" {
+			msg += " (" + how + ")"
+		}
+		msg += ": it would outlive its storage (Go would move it to the heap)"
+	case dst.rank == 1 && viaResult && viaParam < 0:
+		msg = fmt.Sprintf("cannot return %s: it lives in this function's stack frame (Go would move it to the heap); have the caller pass in the storage instead", strings.TrimPrefix(what, "a "))
+	case dst.rank == 1:
+		param := "a parameter"
+		if viaParam >= 0 {
+			param = l.nodes[viaParam].desc
+		}
+		msg = fmt.Sprintf("%s cannot be stored in memory owned by the caller (through %s)", what, param)
+		if how != "" {
+			msg += " (" + how + ")"
+		}
+		msg += ": it lives in this function's stack frame"
+	default:
+		msg = fmt.Sprintf("%s does not live long enough to be stored in %s", what, dst.desc)
+		if dst.pos.File != "" {
+			msg += fmt.Sprintf(" (declared at %s:%d)", shortFile(dst.pos.File), dst.pos.Line)
+		}
+		if how != "" && !strings.HasPrefix(how, "stored in") && !strings.HasPrefix(how, "assigned to") {
+			msg += " (" + how + ")"
+		}
+	}
+	l.errorf(pos, "%s", msg)
 }
 
-func (l *lifetime) regs(e Expr) (lo, hi Region) {
-	lo, hi = l.regs1(e)
+// summarize projects the constraint graph onto the function's parameters and results, keeping
+// only pointer levels the types actually have.
+func (l *lifetime) summarize() *Summary {
+	s := &Summary{}
+	slots := slotVars(l.fn)
+	meaningful := func(p IfacePos) bool {
+		var t Type
+		switch {
+		case p.Result && p.Index < len(l.fn.Sig.Results):
+			t = l.fn.Sig.Results[p.Index].Type
+		case !p.Result && p.Index < len(slots):
+			t = slots[p.Index].Type
+		}
+		return p.Level < refLevels(t)
+	}
+	posOf := func(n int) IfacePos {
+		x := &l.nodes[n]
+		return IfacePos{Result: x.kind == rResult, Index: x.slot, Level: x.level}
+	}
+	seenEdge := map[SumEdge]bool{}
+	for a := range l.nodes {
+		k := l.nodes[a].kind
+		if k != rParam && k != rResult {
+			continue
+		}
+		visited := map[int]bool{a: true}
+		queue := []int{a}
+		static := false
+		for len(queue) > 0 {
+			x := queue[0]
+			queue = queue[1:]
+			for _, e := range l.nodes[x].out {
+				if visited[e.to] {
+					continue
+				}
+				visited[e.to] = true
+				t := &l.nodes[e.to]
+				switch t.kind {
+				case rConst:
+					if e.to == l.static {
+						static = true
+					}
+				case rParam, rResult:
+					se := SumEdge{posOf(a), posOf(e.to)}
+					if !meaningful(se.From) || !meaningful(se.To) {
+						continue
+					}
+					if !seenEdge[se] && se.From != se.To {
+						seenEdge[se] = true
+						s.Edges = append(s.Edges, se)
+					}
+				default:
+					queue = append(queue, e.to)
+				}
+			}
+		}
+		if static && meaningful(posOf(a)) {
+			s.Static = append(s.Static, posOf(a))
+		}
+	}
+	return s
+}
+
+// ---- expressions ----
+
+// vecOf returns the region vector of an expression's value (nil if it holds no references) and
+// records the constraints its evaluation implies.
+func (l *lifetime) vecOf(e Expr) vec {
+	if e.info().View != nil {
+		// storage used as a view: a reference to the storage, whose contents keep their regions
+		return l.prepend(l.storage(e), l.vecOf1(e))
+	}
+	v := l.vecOf1(e)
 	t := e.info().T
 	if t == nil || e.info().Const != nil || !HasRefs(t) {
-		return static, static
+		return nil
 	}
-	return lo, hi
+	if v == nil {
+		v = l.fresh()
+	}
+	return v
 }
 
-func (l *lifetime) varRegs(v *Var, pos Pos) (Region, Region) {
-	if v.Global {
-		return static, static
-	}
-	if v.AddrTaken {
-		r := Region{D: lifetimeOf(v), Src: "variable " + v.Name, SrcPos: v.Pos}
-		if v.Param && !HasRefs(v.Type) {
-			return r, static
-		}
-		// stores through pointers may have put anything that outlives v into it
-		return join(r, v.Content), static
-	}
-	hi := v.ContentHi
-	if !v.hiSet {
-		hi = static
-	}
-	return v.Content, hi
-}
-
-func (l *lifetime) regs1(e Expr) (Region, Region) {
+func (l *lifetime) vecOf1(e Expr) vec {
 	switch e := e.(type) {
 	case *Ident:
 		if e.Obj != nil && e.Obj.Kind == ObjVar {
-			return l.varRegs(e.Obj.Var, e.P)
+			return l.varVec(e.Obj.Var)
 		}
-		return static, static
+		return l.staticVec()
 	case *BasicLit:
-		return static, static
+		return l.staticVec()
 	case *ParenExpr:
-		return l.regs(e.X)
+		return l.vecOf1(e.X)
 	case *SelectorExpr:
 		switch e.Kind {
 		case SelQualified:
-			return static, static
+			return l.staticVec()
 		case SelField:
+			x := l.vecOf(e.X)
 			if e.Implicit == "*" {
-				return l.lo(e.X), static
+				return shift(x)
 			}
-			return l.regs(e.X)
+			return x
 		}
-		l.regs(e.X)
-		return static, static
+		l.vecOf(e.X)
+		return nil
 	case *IndexExpr:
-		xt := e.X.info().T.Underlying()
-		l.regs(e.Index)
-		switch u := xt.(type) {
+		l.vecOf(e.Index)
+		switch e.X.info().T.Underlying().(type) {
 		case *Array:
-			return l.regs(e.X)
+			return l.vecOf(e.X)
 		case *Pointer, *Slice, *Map:
-			_ = u
-			return l.lo(e.X), static
+			return shift(l.vecOf(e.X))
 		}
-		l.regs(e.X)
-		return static, static
+		l.vecOf(e.X)
+		return nil
 	case *SliceExpr:
 		for _, ix := range []Expr{e.Lo, e.Hi, e.Max} {
 			if ix != nil {
-				l.regs(ix)
+				l.vecOf(ix)
 			}
 		}
-		switch e.X.info().T.Underlying().(type) {
-		case *Array:
-			a := l.addr(e.X)
-			return a, a
+		if _, ok := e.X.info().T.Underlying().(*Array); ok {
+			return l.prepend(l.storage(e.X), l.vecOf(e.X))
 		}
-		return l.regs(e.X)
+		return l.vecOf(e.X)
 	case *StarExpr:
-		return l.lo(e.X), static
+		return shift(l.vecOf(e.X))
 	case *UnaryExpr:
 		switch e.Op {
 		case AND:
 			if cl, ok := unparen(e.X).(*CompositeLit); ok {
-				c := l.cur()
-				lo, _ := l.regs(cl)
-				l.checkFlow(lo, c, cl.P, "composite literal")
-				return c, c
+				t := l.tempVec("a temporary in this block", cl.P)
+				l.assign(shift(t), l.vecOf(cl), &why{cl.P, "stored in a temporary", wCopy})
+				return t
 			}
-			a := l.addr(e.X)
-			return a, a
+			return l.prepend(l.storage(e.X), l.vecOf(e.X))
 		case ARROW:
-			l.regs(e.X)
-			return static, static
+			return shift(l.vecOf(e.X))
 		}
-		l.regs(e.X)
-		return static, static
+		l.vecOf(e.X)
+		return nil
 	case *BinaryExpr:
-		l.regs(e.X)
-		l.regs(e.Y)
-		return static, static
+		l.vecOf(e.X)
+		l.vecOf(e.Y)
+		if e.InArena != nil {
+			return l.alloc(e.InArena, e.P)
+		}
+		return nil
 	case *CompositeLit:
 		return l.compositeLit(e)
 	case *KeyValueExpr:
-		return l.regs(e.Value)
+		return l.vecOf(e.Value)
 	case *CallExpr:
-		return l.call(e)
+		rs := l.call(e)
+		if len(rs) > 0 {
+			return rs[0]
+		}
+		return nil
+	case *TryExpr:
+		rs := l.callResults(e.X)
+		if len(rs) > 0 {
+			return rs[0]
+		}
+		return nil
+	case *InExpr:
+		l.vecOf(e.Arena)
+		return l.vecOf1(e.X)
 	}
-	return static, static
+	return nil
 }
 
-func (l *lifetime) compositeLit(e *CompositeLit) (Region, Region) {
-	lo, hi := static, static
-	first := true
-	for _, el := range e.Elts {
-		v := el
-		if kv, ok := el.(*KeyValueExpr); ok {
-			v = kv.Value
-		}
-		elo, ehi := l.regs(v)
-		if !HasRefs(v.info().T) {
-			continue
-		}
-		lo = join(lo, elo)
-		if first {
-			hi = ehi
-			first = false
-		} else {
-			hi = meet(hi, ehi)
-		}
-	}
-	if _, ok := e.T.Underlying().(*Slice); ok {
-		// the backing array lives in the enclosing block
-		c := l.cur()
-		l.checkFlow(lo, c, e.P, "slice literal")
-		return c, c
-	}
-	return lo, hi
-}
-
-// addr returns the lifetime of the storage denoted by an addressable expression.
-func (l *lifetime) addr(e Expr) Region {
+// storage returns the region of the storage an addressable expression denotes.
+func (l *lifetime) storage(e Expr) int {
 	switch e := e.(type) {
 	case *Ident:
 		if e.Obj == nil || e.Obj.Var == nil {
-			return static
+			return l.static
 		}
-		v := e.Obj.Var
-		if v.Global {
-			return static
-		}
-		if !v.AddrTaken {
-			v.AddrTaken = true
-			l.change = true
-		}
-		return Region{D: lifetimeOf(v), Src: "variable " + v.Name, SrcPos: v.Pos}
+		return l.life(e.Obj.Var)
 	case *ParenExpr:
-		return l.addr(e.X)
+		return l.storage(e.X)
 	case *SelectorExpr:
 		if e.Kind == SelQualified {
-			return static
+			return l.static
 		}
 		if e.Implicit == "*" {
-			return l.lo(e.X)
+			return l.vecOf(e.X)[0]
 		}
-		return l.addr(e.X)
+		return l.storage(e.X)
 	case *IndexExpr:
-		l.regs(e.Index)
+		l.vecOf(e.Index)
 		if _, ok := e.X.info().T.Underlying().(*Array); ok {
-			return l.addr(e.X)
+			return l.storage(e.X)
 		}
-		return l.lo(e.X)
+		return l.vecOf(e.X)[0]
 	case *StarExpr:
-		return l.lo(e.X)
+		return l.vecOf(e.X)[0]
 	case *CompositeLit:
-		c := l.cur()
-		lo, _ := l.regs(e)
-		l.checkFlow(lo, c, e.P, "composite literal")
-		return c
+		t := l.tempVec("a temporary in this block", e.P)
+		l.assign(shift(t), l.vecOf(e), nil)
+		return t[0]
 	}
-	l.regs(e)
-	return l.cur()
+	l.vecOf(e)
+	return l.constant(l.depth, "a temporary in this block", e.Pos())
 }
 
-// ---- flow checks ----
-
-// checkFlow checks that references with lifetime lo may be stored into storage living until bound.
-func (l *lifetime) checkFlow(lo, bound Region, pos Pos, into string) {
-	if lo.D == 0 {
-		return
+func (l *lifetime) compositeLit(e *CompositeLit) vec {
+	var v vec
+	if HasRefs(e.T) {
+		v = l.fresh()
 	}
-	switch {
-	case bound.D == 0:
-		if lo.D == 1 {
-			l.sum.StaticReq |= lo.M
-			return
+	_, slice := e.T.Underlying().(*Slice)
+	var backing vec
+	if slice {
+		backing = l.tempVec("slice literal storage", e.P)
+	}
+	for _, el := range e.Elts {
+		x := el
+		if kv, ok := el.(*KeyValueExpr); ok {
+			x = kv.Value
 		}
-		l.errorf(pos, "%s cannot escape into %s: %s", describe(lo), into, escapeHint(into))
-	case bound.D == 1:
-		if lo.D == 1 {
-			for s := lo.M; s != 0; s &= s - 1 {
-				src := bits.TrailingZeros64(s)
-				for d := bound.M; d != 0; d &= d - 1 {
-					l.sum.addFlow(src, bits.TrailingZeros64(d))
-				}
-			}
-			return
+		ev := l.vecOf(x)
+		if ev == nil {
+			continue
 		}
-		l.errorf(pos, "%s cannot be stored in %s, which outlives this function (in Go it would escape to the heap)", describe(lo), into)
-	default:
-		if lo.D > bound.D {
-			l.errorf(pos, "%s does not live long enough to be stored in %s", describe(lo), into)
+		if slice {
+			l.assign(shift(backing), ev, &why{x.Pos(), "stored in slice literal storage", wCopy})
+		} else {
+			l.assign(v, ev, nil)
 		}
 	}
+	if slice {
+		return backing
+	}
+	return v
 }
 
-func escapeHint(into string) string {
-	return "it would outlive its stack frame (Go would move it to the heap); only references to package-level variables or constants can be stored there"
-}
-
-func describe(r Region) string {
-	if r.Src == "" {
-		return "a reference to local memory"
+// alloc returns the vector of a fresh object allocated in arena expression a.
+func (l *lifetime) alloc(a Expr, pos Pos) vec {
+	av := l.vecOf(a)
+	r := l.fresh()
+	if av == nil {
+		return r
 	}
-	if r.SrcPos.File != "" {
-		return fmt.Sprintf("a reference to %s (declared at %s:%d)", r.Src, shortFile(r.SrcPos.File), r.SrcPos.Line)
+	l.outlives(av[0], r[0], nil)
+	// everything stored in arena memory shares the arena's contents region, which outlives it
+	for k := 1; k < levels; k++ {
+		l.equal(r[k], av[k], &why{pos, "stored in arena memory", wDecl})
 	}
-	return "a reference to " + r.Src
-}
-
-func shortFile(f string) string {
-	for i := len(f) - 1; i >= 0; i-- {
-		if f[i] == '/' {
-			return f[i+1:]
-		}
-	}
-	return f
-}
-
-func targetName(e Expr) string {
-	return exprString(e)
-}
-
-// store records an assignment of a value with regions (lo, hi) to the target expression.
-func (l *lifetime) store(target Expr, lo, hi Region, pos Pos) {
-	if isBlank(target) {
-		return
-	}
-	if !HasRefs(target.info().T) {
-		l.walkTarget(target)
-		return
-	}
-	switch t := target.(type) {
-	case *Ident:
-		if t.Obj == nil || t.Obj.Var == nil {
-			return
-		}
-		l.storeVar(t.Obj.Var, lo, hi, pos)
-		return
-	case *ParenExpr:
-		l.store(t.X, lo, hi, pos)
-		return
-	case *SelectorExpr:
-		if t.Kind == SelQualified {
-			l.checkFlow(lo, static, pos, "package variable "+exprString(t))
-			return
-		}
-		if t.Implicit == "*" {
-			_, phi := l.regs(t.X)
-			l.checkFlow(lo, phi, pos, exprString(t))
-			return
-		}
-		l.store(t.X, lo, hi, pos)
-		return
-	case *IndexExpr:
-		l.regs(t.Index)
-		switch t.X.info().T.Underlying().(type) {
-		case *Array:
-			l.store(t.X, lo, hi, pos)
-		case *Map:
-			_, mhi := l.regs(t.X)
-			l.checkFlow(lo, mhi, pos, exprString(t.X))
-		default:
-			_, phi := l.regs(t.X)
-			l.checkFlow(lo, phi, pos, exprString(t))
-		}
-		return
-	case *StarExpr:
-		_, phi := l.regs(t.X)
-		l.checkFlow(lo, phi, pos, exprString(t))
-		return
-	}
-}
-
-func (l *lifetime) walkTarget(target Expr) {
-	switch t := target.(type) {
-	case *IndexExpr:
-		l.regs(t.X)
-		l.regs(t.Index)
-		if m, ok := t.X.info().T.Underlying().(*Map); ok && HasRefs(m.Key) {
-			_, mhi := l.regs(t.X)
-			l.checkFlow(l.lo(t.Index), mhi, t.Index.Pos(), "map "+exprString(t.X))
-		}
-	case *SelectorExpr:
-		l.walkTarget(t.X)
-	case *StarExpr:
-		l.regs(t.X)
-	case *ParenExpr:
-		l.walkTarget(t.X)
-	}
-}
-
-func (l *lifetime) storeVar(v *Var, lo, hi Region, pos Pos) {
-	if v.Global {
-		l.checkFlow(lo, static, pos, "package variable "+v.Name)
-		return
-	}
-	nc := join(v.Content, lo)
-	if nc.D != v.Content.D || nc.M != v.Content.M {
-		v.Content = nc
-		l.change = true
-	}
-	if !v.hiSet {
-		v.ContentHi = hi
-		v.hiSet = true
-		l.change = true
-	} else {
-		nh := meet(v.ContentHi, hi)
-		if nh.D != v.ContentHi.D || nh.M != v.ContentHi.M {
-			v.ContentHi = nh
-			l.change = true
-		}
-	}
-	lt := lifetimeOf(v)
-	if lo.D > lt {
-		l.errorf(pos, "%s does not live long enough to be stored in %s (declared at %s:%d)", describe(lo), v.Name, shortFile(v.Pos.File), v.Pos.Line)
-	}
+	return r
 }
 
 // ---- calls ----
 
-type slotVal struct {
-	lo, hi Region
-	pos    Pos
+func (l *lifetime) callResults(x Expr) []vec {
+	if call, ok := unparen(x).(*CallExpr); ok {
+		return l.call(call)
+	}
+	return []vec{l.vecOf(x)}
 }
 
-func (l *lifetime) callSlots(e *CallExpr, sig *Signature) []slotVal {
-	var slots []slotVal
+func (l *lifetime) argSlots(e *CallExpr, sig *Signature) []vec {
+	var slots []vec
 	if se, ok := unparen(e.Fun).(*SelectorExpr); ok && se.Kind == SelMethod {
-		var lo, hi Region
+		var rv vec
 		switch se.Implicit {
 		case "&":
-			a := l.addr(se.X)
-			lo, hi = a, a
+			rv = l.prepend(l.storage(se.X), l.vecOf(se.X))
 		case "*":
-			lo, hi = l.lo(se.X), static
+			rv = shift(l.vecOf(se.X))
 		default:
-			lo, hi = l.regs(se.X)
+			rv = l.vecOf(se.X)
 		}
 		if !HasRefs(se.Method.Sig.Recv.Type) {
-			lo, hi = static, static
+			rv = nil
 		}
-		slots = append(slots, slotVal{lo, hi, se.X.Pos()})
+		slots = append(slots, rv)
 	} else {
-		l.regs(e.Fun)
+		l.vecOf(e.Fun)
 	}
-	if e.Variadic >= 0 && !e.Ellipsis {
+	if e.Variadic >= 0 && !e.Ellipsis && sig.Variadic {
 		for i := 0; i < e.Variadic && i < len(e.Args); i++ {
-			lo, hi := l.regs(e.Args[i])
-			slots = append(slots, slotVal{lo, hi, e.Args[i].Pos()})
+			slots = append(slots, l.vecOf(e.Args[i]))
 		}
-		c := l.cur()
+		elem := sig.Params[len(sig.Params)-1].Type.Underlying().(*Slice).Elem
+		var t vec
+		if HasRefs(&Slice{Elem: elem}) {
+			t = l.tempVec("the variadic argument list", e.P)
+		}
 		for _, a := range e.Args[min(e.Variadic, len(e.Args)):] {
-			lo, _ := l.regs(a)
-			l.checkFlow(lo, c, a.Pos(), "variadic argument list")
+			if av := l.vecOf(a); av != nil && t != nil {
+				l.assign(shift(t), av, &why{a.Pos(), "stored in the variadic argument list", wCopy})
+			}
 		}
-		slots = append(slots, slotVal{c, c, e.P})
-		return slots
+		return append(slots, t)
 	}
 	for _, a := range e.Args {
-		lo, hi := l.regs(a)
-		slots = append(slots, slotVal{lo, hi, a.Pos()})
+		slots = append(slots, l.vecOf(a))
 	}
 	return slots
 }
@@ -603,7 +952,7 @@ func (l *lifetime) callSlots(e *CallExpr, sig *Signature) []slotVal {
 func (l *lifetime) summaries(e *CallExpr, sig *Signature) []*Summary {
 	if e.Callee != nil {
 		if e.Callee.Summary == nil {
-			return []*Summary{{}}
+			return nil
 		}
 		return []*Summary{e.Callee.Summary}
 	}
@@ -616,97 +965,188 @@ func (l *lifetime) summaries(e *CallExpr, sig *Signature) []*Summary {
 	return out
 }
 
-func (l *lifetime) applySummary(sums []*Summary, slots []slotVal, what string) (Region, Region) {
-	res := static
-	for _, s := range sums {
-		for i := range slots {
-			if s.StaticReq&(1<<i) != 0 {
-				l.checkFlow(slots[i].lo, static, slots[i].pos, "static storage via "+what)
-			}
-			if s.RetMask&(1<<i) != 0 {
-				res = join(res, slots[i].lo)
-			}
+func describeArg(slot int, hasRecv bool) string {
+	if hasRecv {
+		if slot == 0 {
+			return "its receiver"
 		}
-		for _, f := range s.Flows {
-			if f.Src < len(slots) && f.Dst < len(slots) {
-				l.checkFlow(slots[f.Src].lo, slots[f.Dst].hi, slots[f.Src].pos, fmt.Sprintf("storage reachable from argument %d of %s", f.Dst+1, what))
-			}
-		}
+		return fmt.Sprintf("argument %d", slot)
 	}
-	return res, static
+	return fmt.Sprintf("argument %d", slot+1)
 }
 
-func (l *lifetime) call(e *CallExpr) (Region, Region) {
-	if e.Conversion {
-		lo, hi := l.regs(e.Args[0])
-		if basicKind(e.T) == Rawptr || basicKind(e.T) == Uintptr {
-			return static, static
+func describeSlot(name string, slot int, hasRecv bool) string {
+	if hasRecv {
+		if slot == 0 {
+			return "the receiver of " + name
 		}
-		return lo, hi
+		return fmt.Sprintf("argument %d of %s", slot, name)
+	}
+	return fmt.Sprintf("argument %d of %s", slot+1, name)
+}
+
+// applyCall instantiates the callee's summary for this call and returns the result vectors.
+func (l *lifetime) applyCall(e *CallExpr, sig *Signature, slots []vec) []vec {
+	name := exprString(e.Fun)
+	hasRecv := e.Callee != nil && e.Callee.Sig.Recv != nil
+	if e.Callee != nil && e.Callee.Extern != "" && !e.Callee.Sig.HasContract {
+		// C functions without declared provenance are trusted: results are treated as static
+		var out []vec
+		for range sig.Results {
+			out = append(out, l.staticVec())
+		}
+		return out
+	}
+	params := make([]vec, len(slots))
+	for i, a := range slots {
+		params[i] = l.fresh()
+		if a != nil {
+			l.assign(params[i], a, &why{e.P, "passed as " + describeSlot(name, i, hasRecv), wPass})
+		}
+	}
+	results := make([]vec, len(sig.Results))
+	for i := range results {
+		results[i] = l.fresh()
+	}
+	at := func(p IfacePos) int {
+		if p.Result {
+			return results[p.Index][p.Level]
+		}
+		if p.Index < len(params) {
+			return params[p.Index][p.Level]
+		}
+		return l.node(rVar)
+	}
+	for _, s := range l.summaries(e, sig) {
+		for _, se := range s.Edges {
+			var text string
+			switch {
+			case se.To.Result:
+				text = "returned by " + name
+			case se.From.Result:
+				text = "used by " + name
+			default:
+				text = fmt.Sprintf("%s stores %s inside %s", name, describeArg(se.From.Index, hasRecv), describeArg(se.To.Index, hasRecv))
+			}
+			kind := wStore
+			if se.To.Result || se.From.Result {
+				kind = wPass
+			}
+			l.outlives(at(se.From), at(se.To), &why{e.P, text, kind})
+		}
+		for _, p := range s.Static {
+			l.outlives(at(p), l.static, &why{e.P, name + " keeps " + describeArg(p.Index, hasRecv) + " in static memory", wStore})
+		}
+	}
+	return results
+}
+
+func (l *lifetime) call(e *CallExpr) []vec {
+	if e.Conversion {
+		x := l.vecOf(e.Args[0])
+		if e.InArena != nil {
+			return []vec{l.alloc(e.InArena, e.P)}
+		}
+		if basicKind(e.T) == Rawptr || basicKind(e.T) == Uintptr {
+			return nil
+		}
+		return []vec{x}
 	}
 	switch e.Builtin {
 	case "":
 	case "append":
-		slo, shi := l.regs(e.Args[0])
-		var et Type
-		if st, ok := e.Args[0].info().T.Underlying().(*Slice); ok {
-			et = st.Elem
-		}
-		for _, a := range e.Args[1:] {
-			alo, _ := l.regs(a)
-			if et != nil && HasRefs(et) {
-				l.checkFlow(alo, shi, a.Pos(), exprString(e.Args[0]))
+		s := l.vecOf(e.Args[0])
+		res := s
+		if e.InArena != nil && s != nil {
+			// the result is s's backing array or a new one in the arena
+			a := l.alloc(e.InArena, e.P)
+			res = l.fresh()
+			l.outlives(s[0], res[0], nil)
+			l.outlives(a[0], res[0], nil)
+			for k := 1; k < levels; k++ {
+				l.equal(res[k], s[k], nil)
+				l.equal(res[k], a[k], nil)
 			}
 		}
-		return slo, shi
-	case "copy":
-		_, dhi := l.regs(e.Args[0])
-		slo, _ := l.regs(e.Args[1])
-		if st, ok := e.Args[0].info().T.Underlying().(*Slice); ok && HasRefs(st.Elem) {
-			l.checkFlow(slo, dhi, e.Args[1].Pos(), exprString(e.Args[0]))
-		}
-		return static, static
-	case "make":
-		for _, a := range e.Args[1:] {
-			l.regs(a)
-		}
-		if l.fn == nil {
-			return static, static
-		}
-		c := Region{D: l.depth, Src: "make() storage", SrcPos: e.P}
-		return c, c
-	case "__error":
-		l.regs(e.Args[0])
-		lo, _ := l.regs(e.Args[1])
-		l.checkFlow(lo, static, e.Args[1].Pos(), "an error value (error messages must be static strings)")
-		return static, static
-	case "min", "max":
-		r := static
-		for _, a := range e.Args {
-			r = join(r, l.lo(a))
-		}
-		return r, static
-	case "error.Error", "error.Code":
-		if se, ok := unparen(e.Fun).(*SelectorExpr); ok {
-			l.regs(se.X)
-		}
-		return static, static
-	default:
-		for _, a := range e.Args {
-			if e.Builtin == "delete" {
-				l.regs(a)
+		for i, a := range e.Args[1:] {
+			av := l.vecOf(a)
+			if av == nil || res == nil {
 				continue
 			}
-			l.regs(a)
+			w := &why{a.Pos(), "appended to " + exprString(e.Args[0]), wStore}
+			if e.Ellipsis && i == 0 {
+				l.assign(shift(res), shift(av), w)
+			} else {
+				l.assign(shift(res), av, w)
+			}
 		}
-		return static, static
+		return []vec{res}
+	case "copy":
+		d := l.vecOf(e.Args[0])
+		s := l.vecOf(e.Args[1])
+		if d != nil && s != nil {
+			l.assign(shift(d), shift(s), &why{e.Args[1].Pos(), "copied into " + exprString(e.Args[0]), wStore})
+		}
+		return nil
+	case "new":
+		return []vec{l.alloc(e.InArena, e.P)}
+	case "make":
+		for _, a := range e.Args[1:] {
+			l.vecOf(a)
+		}
+		if e.InArena != nil {
+			return []vec{l.alloc(e.InArena, e.P)}
+		}
+		return []vec{l.tempVec("make() storage", e.P)}
+	case "__error":
+		for _, a := range e.Args[:len(e.Args)-1] {
+			l.vecOf(a)
+		}
+		msg := e.Args[len(e.Args)-1]
+		if mv := l.vecOf(msg); mv != nil {
+			l.requireAll(mv, l.static, &why{msg.Pos(), "used as an error message, which must be static", wStore})
+		}
+		return nil
+	case "min", "max":
+		var res vec
+		if HasRefs(e.T) {
+			res = l.fresh()
+		}
+		for _, a := range e.Args {
+			if av := l.vecOf(a); av != nil && res != nil {
+				l.assign(res, av, nil)
+			}
+		}
+		return []vec{res}
+	case "vec.Push", "vec.TryPush":
+		se := unparen(e.Fun).(*SelectorExpr)
+		dst := l.vecOf1(se.X)
+		if v := l.vecOf(e.Args[0]); v != nil && dst != nil {
+			l.assign(dst, v, &why{e.Args[0].Pos(), "pushed onto " + exprString(se.X), wStore})
+		}
+		return nil
+	case "vec.Pop":
+		se := unparen(e.Fun).(*SelectorExpr)
+		return []vec{l.vecOf1(se.X)}
+	case "vec.Clear":
+		l.vecOf1(unparen(e.Fun).(*SelectorExpr).X)
+		return nil
+	case "error.Error", "error.Code", "arena.Used", "arena.Left", "arena.Cap":
+		if se, ok := unparen(e.Fun).(*SelectorExpr); ok {
+			l.vecOf(se.X)
+		}
+		return []vec{l.staticVec()}
+	default:
+		for _, a := range e.Args {
+			l.vecOf(a)
+		}
+		return nil
 	}
 	sig, _ := e.Fun.info().T.Underlying().(*Signature)
 	if sig == nil {
-		return static, static
+		return nil
 	}
-	slots := l.callSlots(e, sig)
-	return l.applySummary(l.summaries(e, sig), slots, exprString(e.Fun))
+	return l.applyCall(e, sig, l.argSlots(e, sig))
 }
 
 // ---- statements ----
@@ -723,18 +1163,62 @@ func (l *lifetime) block(list []Stmt) {
 	l.depth--
 }
 
+// store records `target = value`. Copies into local variables are told apart from stores into
+// fields, elements and globals, which is where escapes usually happen.
+func (l *lifetime) store(target Expr, value vec, w *why) {
+	if isBlank(target) {
+		return
+	}
+	if w != nil && w.kind == wStore {
+		if id, ok := unparen(target).(*Ident); ok && id.Obj != nil && id.Obj.Var != nil && !id.Obj.Var.Global {
+			w.kind = wCopy
+		}
+	}
+	if m, ok := l.mapStore(target); ok {
+		if value != nil && m != nil {
+			l.assign(shift(m), value, w)
+		}
+		return
+	}
+	tv := l.vecOf(target)
+	if value == nil || tv == nil {
+		return
+	}
+	l.assign(tv, value, w)
+}
+
+// mapStore handles a write through `m[k]` (=, op= or ++/--), which may insert k: the key must then
+// outlive the map's contents. It returns m's vec, and false if target is not a map index.
+func (l *lifetime) mapStore(target Expr) (vec, bool) {
+	ix, ok := unparen(target).(*IndexExpr)
+	if !ok {
+		return nil, false
+	}
+	if _, ok := ix.X.info().T.Underlying().(*Map); !ok {
+		return nil, false
+	}
+	m := l.vecOf(ix.X)
+	if kv := l.vecOf(ix.Index); kv != nil && m != nil {
+		l.assign(shift(m), kv, &why{ix.Index.Pos(), "used as a key in " + exprString(ix.X), wStore})
+	}
+	return m, true
+}
+
 func (l *lifetime) stmt(s Stmt) {
 	switch s := s.(type) {
 	case *ExprStmt:
-		l.regs(s.X)
+		l.vecOf(s.X)
 	case *SendStmt:
-		l.regs(s.Chan)
-		lo, _ := l.regs(s.Value)
-		l.checkFlow(lo, static, s.Value.Pos(), "a channel (values sent on channels are shared between goroutines)")
+		l.vecOf(s.Chan)
+		if v := l.vecOf(s.Value); v != nil {
+			l.requireAll(v, l.static, &why{s.Value.Pos(), "sent on a channel, which shares it with other goroutines", wStore})
+		}
 	case *IncDecStmt:
-		l.walkTarget(s.X)
+		if _, ok := l.mapStore(s.X); !ok {
+			l.vecOf(s.X)
+		}
 	case *AssignStmt:
-		l.assign(s)
+		l.assignStmt(s)
 	case *GoStmt:
 		l.goStmt(s)
 	case *DeferStmt:
@@ -748,7 +1232,7 @@ func (l *lifetime) stmt(s Stmt) {
 		if s.Init != nil {
 			l.stmt(s.Init)
 		}
-		l.regs(s.Cond)
+		l.vecOf(s.Cond)
 		l.stmt(s.Body)
 		if s.Else != nil {
 			l.stmt(s.Else)
@@ -760,11 +1244,11 @@ func (l *lifetime) stmt(s Stmt) {
 			l.stmt(s.Init)
 		}
 		if s.Tag != nil {
-			l.regs(s.Tag)
+			l.vecOf(s.Tag)
 		}
 		for _, cc := range s.Cases {
 			for _, x := range cc.List {
-				l.regs(x)
+				l.vecOf(x)
 			}
 			l.block(cc.Body)
 		}
@@ -775,7 +1259,7 @@ func (l *lifetime) stmt(s Stmt) {
 			l.stmt(s.Init)
 		}
 		if s.Cond != nil {
-			l.regs(s.Cond)
+			l.vecOf(s.Cond)
 		}
 		if s.Post != nil {
 			l.stmt(s.Post)
@@ -784,25 +1268,24 @@ func (l *lifetime) stmt(s Stmt) {
 		l.depth--
 	case *RangeStmt:
 		l.depth++
-		var klo, khi, vlo, vhi Region
-		switch u := s.X.info().T.Underlying().(type) {
+		x := l.vecOf(s.X)
+		var kv, vv vec
+		switch s.X.info().T.Underlying().(type) {
 		case *Array:
-			vlo, vhi = l.regs(s.X)
+			vv = x
 		case *Pointer, *Slice:
-			vlo = l.lo(s.X)
-			vhi = static
+			vv = shift(x)
 		case *Map:
-			_ = u
-			klo = l.lo(s.X)
-			vlo = klo
-		default:
-			l.regs(s.X)
+			kv, vv = shift(x), shift(x)
+		case *Chan:
+			kv = shift(x)
 		}
+		w := &why{s.P, "assigned to a range variable", wCopy}
 		if s.Key != nil {
-			l.store(s.Key, klo, khi, s.P)
+			l.store(s.Key, kv, w)
 		}
 		if s.Value != nil {
-			l.store(s.Value, vlo, vhi, s.P)
+			l.store(s.Value, vv, w)
 		}
 		l.stmt(s.Body)
 		l.depth--
@@ -813,44 +1296,71 @@ func (l *lifetime) stmt(s Stmt) {
 		for _, vs := range s.Decl.Values {
 			if len(vs.Values) == len(vs.Names) {
 				for i, x := range vs.Values {
-					lo, hi := l.regs(x)
-					l.store(vs.Names[i], lo, hi, x.Pos())
+					l.store(vs.Names[i], l.vecOf(x), &why{x.Pos(), "assigned to " + vs.Names[i].Name, wStore})
 				}
 			} else if len(vs.Values) == 1 {
-				lo, hi := l.regs(vs.Values[0])
-				for _, n := range vs.Names {
-					l.store(n, lo, hi, vs.Values[0].Pos())
+				rs := l.callResults(vs.Values[0])
+				for i, n := range vs.Names {
+					if i < len(rs) {
+						l.store(n, rs[i], &why{vs.Values[0].Pos(), "assigned to " + n.Name, wStore})
+					}
 				}
 			}
 		}
 	case *LabeledStmt:
 		l.stmt(s.Stmt)
+	case *ArenaStmt:
+		l.depth++
+		v := s.Name.Obj.Var
+		// the arena variable points at the arena's storage, which lives exactly as long as this block
+		av := l.fresh()
+		arena := l.life(v)
+		l.equal(av[0], arena, nil)
+		l.outlives(av[1], arena, &why{s.P, "stored in arena " + v.Name, wDecl})
+		l.vars[v] = av
+		l.stmt(s.Body)
+		l.depth--
 	}
 }
 
-func (l *lifetime) assign(s *AssignStmt) {
+func (l *lifetime) assignStmt(s *AssignStmt) {
 	if s.Tok != ASSIGN && s.Tok != DEFINE {
-		l.walkTarget(s.Lhs[0])
-		l.regs(s.Rhs[0])
+		// op-assign values are never references (string + needs an arena), but m[k] op= v inserts k
+		if _, ok := l.mapStore(s.Lhs[0]); !ok {
+			l.vecOf(s.Lhs[0])
+		}
+		l.vecOf(s.Rhs[0])
 		return
 	}
 	if len(s.Lhs) == len(s.Rhs) {
-		type pair struct{ lo, hi Region }
-		vals := make([]pair, len(s.Rhs))
+		vals := make([]vec, len(s.Rhs))
 		for i, x := range s.Rhs {
-			vals[i].lo, vals[i].hi = l.regs(x)
+			vals[i] = l.vecOf(x)
 		}
 		for i, t := range s.Lhs {
-			l.store(t, vals[i].lo, vals[i].hi, s.Rhs[i].Pos())
+			l.store(t, vals[i], &why{s.Rhs[i].Pos(), "assigned to " + exprString(t), wStore})
 		}
 		return
 	}
-	lo, hi := l.regs1(s.Rhs[0])
-	for _, t := range s.Lhs {
-		if t.info().T != nil && HasRefs(t.info().T) {
-			l.store(t, lo, hi, s.Rhs[0].Pos())
-		} else {
-			l.store(t, static, static, s.Rhs[0].Pos())
+	var rs []vec
+	switch r := unparen(s.Rhs[0]).(type) {
+	case *IndexExpr:
+		if r.CommaOk {
+			rs = []vec{l.vecOf(r), nil}
+		}
+	case *UnaryExpr:
+		if r.CommaOk {
+			rs = []vec{l.vecOf(r), nil}
+		}
+	case *TryExpr:
+		rs = l.callResults(r.X)
+	}
+	if rs == nil {
+		rs = l.callResults(s.Rhs[0])
+	}
+	for i, t := range s.Lhs {
+		if i < len(rs) {
+			l.store(t, rs[i], &why{s.Rhs[0].Pos(), "assigned to " + exprString(t), wStore})
 		}
 	}
 }
@@ -858,26 +1368,24 @@ func (l *lifetime) assign(s *AssignStmt) {
 func (l *lifetime) goStmt(s *GoStmt) {
 	call := s.Call
 	sig := call.Callee.Sig
-	slots := l.callSlots(call, sig)
+	slots := l.argSlots(call, sig)
 	for i, sl := range slots {
-		what := fmt.Sprintf("goroutine argument %d", i+1)
-		if sig.Recv != nil && i == 0 {
-			what = "goroutine receiver"
+		if sl == nil {
+			continue
 		}
-		if sl.lo.D != 0 {
-			l.checkFlow(sl.lo, static, sl.pos, what+" (a goroutine can outlive the function that starts it)")
-		}
+		what := describeSlot(exprString(call.Fun), i, sig.Recv != nil)
+		l.requireAll(sl, l.static, &why{call.P, "passed as " + what + " to a new goroutine, which can outlive this function", wStore})
 	}
-	l.applySummary(l.summaries(call, sig), slots, exprString(call.Fun))
+	l.applyCall(call, sig, slots)
 }
 
 func (l *lifetime) deferStmt(s *DeferStmt) {
 	call := s.Call
+	w := &why{s.P, "passed to a deferred call, which runs when the function returns", wStore}
 	if call.Builtin != "" {
 		for _, a := range call.Args {
-			lo, _ := l.regs(a)
-			if lo.D > 2 {
-				l.errorf(a.Pos(), "%s does not live until the deferred call runs", describe(lo))
+			if v := l.vecOf(a); v != nil {
+				l.outlives(v[0], l.body, w)
 			}
 		}
 		return
@@ -886,23 +1394,13 @@ func (l *lifetime) deferStmt(s *DeferStmt) {
 	if sig == nil {
 		return
 	}
-	slots := l.callSlots(call, sig)
+	slots := l.argSlots(call, sig)
 	for _, sl := range slots {
-		if sl.lo.D > 2 {
-			l.errorf(sl.pos, "%s does not live until the deferred call runs at function exit", describe(sl.lo))
+		if sl != nil {
+			l.outlives(sl[0], l.body, w)
 		}
 	}
-	l.applySummary(l.summaries(call, sig), slots, exprString(call.Fun))
-}
-
-func (l *lifetime) checkReturn(lo Region, pos Pos) {
-	switch {
-	case lo.D == 0:
-	case lo.D == 1:
-		l.sum.RetMask |= lo.M
-	default:
-		l.errorf(pos, "cannot return %s: it lives in this function's stack frame (Go would move it to the heap); have the caller pass in the storage instead", describe(lo)[2:])
-	}
+	l.applyCall(call, sig, slots)
 }
 
 func (l *lifetime) returnStmt(s *ReturnStmt) {
@@ -910,18 +1408,84 @@ func (l *lifetime) returnStmt(s *ReturnStmt) {
 		return
 	}
 	if len(s.Results) == 0 {
-		for _, r := range l.fn.Sig.Results {
+		for i, r := range l.fn.Sig.Results {
 			if r.Name != "" && HasRefs(r.Type) {
-				lo, _ := l.varRegs(r, s.P)
-				l.checkReturn(lo, s.P)
+				l.assign(l.results[i], l.varVec(r), &why{s.P, "returned", wStore})
 			}
 		}
 		return
 	}
-	for _, x := range s.Results {
-		lo, _ := l.regs1(x)
-		if HasRefs(x.info().T) {
-			l.checkReturn(lo, x.Pos())
+	if len(s.Results) == 1 && len(l.results) > 1 {
+		rs := l.callResults(s.Results[0])
+		for i := range l.results {
+			if i < len(rs) && rs[i] != nil {
+				l.assign(l.results[i], rs[i], &why{s.P, "returned", wStore})
+			}
+		}
+		return
+	}
+	for i, x := range s.Results {
+		if v := l.vecOf(x); v != nil && i < len(l.results) {
+			l.assign(l.results[i], v, &why{x.Pos(), "returned", wStore})
 		}
 	}
+}
+
+func shortFile(f string) string {
+	for i := len(f) - 1; i >= 0; i-- {
+		if f[i] == '/' {
+			return f[i+1:]
+		}
+	}
+	return f
+}
+
+// refLevels is how many pointer levels a type actually has (at most levels); region constraints
+// below that are vacuous.
+func refLevels(t Type) int {
+	return refLevels1(t, map[Type]bool{})
+}
+
+func refLevels1(t Type, seen map[Type]bool) int {
+	if t == nil {
+		return 0
+	}
+	if seen[t] {
+		return levels
+	}
+	seen[t] = true
+	defer delete(seen, t)
+	deeper := func(x Type) int { return min(levels, 1+refLevels1(x, seen)) }
+	switch u := t.Underlying().(type) {
+	case *Basic:
+		if u.Kind == String || u.Kind == UntypedString {
+			return 1
+		}
+		return 0
+	case *Pointer:
+		return deeper(u.Elem)
+	case *Slice:
+		return deeper(u.Elem)
+	case *Chan:
+		return deeper(u.Elem)
+	case *Map:
+		return max(deeper(u.Key), deeper(u.Value))
+	case *ArenaType:
+		return levels
+	case *Array:
+		return refLevels1(u.Elem, seen)
+	case *VecType:
+		return refLevels1(u.Elem, seen)
+	case *ChanStore:
+		return refLevels1(u.Elem, seen)
+	case *MapStore:
+		return max(refLevels1(u.Key, seen), refLevels1(u.Value, seen))
+	case *Struct:
+		n := 0
+		for _, f := range u.Fields {
+			n = max(n, refLevels1(f.Type, seen))
+		}
+		return n
+	}
+	return 0
 }
