@@ -145,6 +145,8 @@ for k, v := range seen {}
 var v [..8]int
 v.Push(1)            // panics if len(v) == 8
 ok := v.TryPush(2)   // false if full
+v.Append(xs)         // appends a []int; panics if it doesn't all fit
+ok = v.TryAppend(xs) // false (and appends nothing) if it doesn't all fit
 x := v.Pop()         // panics if empty
 v.Clear()            // len(v) = 0
 len(v); cap(v)       // cap is the constant 8
@@ -154,7 +156,10 @@ for i, x := range v {}
 w := [..4]Point{{1, 2}, {3, 4}}   // literal: len 2, cap 4
 ```
 
-`Push`, `TryPush`, `Pop` and `Clear` need an addressable vector. `len`, `cap`, indexing and
+A byte vector's `Append` and `TryAppend` take a string too: a `[..N]byte` holds text by value, so
+it can go on a shared channel to another thread (`string(v[:])` reads it back).
+
+`Push`, `TryPush`, `Append`, `TryAppend`, `Pop` and `Clear` need an addressable vector. `len`, `cap`, indexing and
 `range` also work on a vector that isn't in a variable (a call's result), reading a copy; its
 elements can't then be assigned or have their address taken. A pointer to a vector works like the
 vector (`p.Push(x)`, `len(p)`, `p[i]`), as a pointer to an array does. Vectors aren't comparable

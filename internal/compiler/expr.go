@@ -857,8 +857,12 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 			sig = &Signature{Results: []*Var{{Type: vt.Elem}}}
 		case "Clear":
 			sig = &Signature{}
+		case "Append": // a []T, or a string for a byte vector (see call.go)
+			sig = &Signature{Params: []*Var{{Type: &Slice{Elem: vt.Elem}}}}
+		case "TryAppend":
+			sig = &Signature{Params: []*Var{{Type: &Slice{Elem: vt.Elem}}}, Results: []*Var{{Type: tBool}}}
 		default:
-			c.errorf(e.Sel.P, "%s.%s undefined (vectors have Push, TryPush, Pop and Clear)", exprString(e.X), name)
+			c.errorf(e.Sel.P, "%s.%s undefined (vectors have Push, TryPush, Append, TryAppend, Pop and Clear)", exprString(e.X), name)
 			c.invalid(e)
 			return
 		}
@@ -940,7 +944,7 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 		}
 	}
 	if _, ok := t.Underlying().(*VecType); ok {
-		c.errorf(e.Sel.P, "%s.%s undefined (vectors have Push, TryPush, Pop and Clear)", exprString(e.X), name)
+		c.errorf(e.Sel.P, "%s.%s undefined (vectors have Push, TryPush, Append, TryAppend, Pop and Clear)", exprString(e.X), name)
 	} else {
 		c.errorf(e.Sel.P, "%s.%s undefined (type %s has no field or method %s)", exprString(e.X), name, t, name)
 	}
@@ -948,7 +952,11 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 }
 
 func isVecMethod(name string) bool {
-	return name == "Push" || name == "TryPush" || name == "Pop" || name == "Clear"
+	switch name {
+	case "Push", "TryPush", "Append", "TryAppend", "Pop", "Clear":
+		return true
+	}
+	return false
 }
 
 // ---- index & slice ----

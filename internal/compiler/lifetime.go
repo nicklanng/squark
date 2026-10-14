@@ -1125,6 +1125,13 @@ func (l *lifetime) call(e *CallExpr) []vec {
 			l.assign(dst, v, &why{e.Args[0].Pos(), "pushed onto " + exprString(se.X), wStore})
 		}
 		return nil
+	case "vec.Append", "vec.TryAppend":
+		se := unparen(e.Fun).(*SelectorExpr)
+		dst := l.vecOf1(se.X)
+		if s := l.vecOf(e.Args[0]); s != nil && dst != nil {
+			l.assign(dst, shift(s), &why{e.Args[0].Pos(), "appended to " + exprString(se.X), wStore})
+		}
+		return nil
 	case "vec.Pop":
 		se := unparen(e.Fun).(*SelectorExpr)
 		return []vec{l.vecOf1(se.X)}

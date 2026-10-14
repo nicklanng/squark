@@ -871,7 +871,7 @@ func (g *gen) builtinCall(e *CallExpr) string {
 		t := e.T.(*Pointer).Elem
 		ct := g.ctype(t)
 		return fmt.Sprintf("((%s*)sq_arena_zero(%s, sizeof(%s), _Alignof(%s), __FILE__, __LINE__))", ct, g.expr(e.InArena), ct, ct)
-	case "vec.Push", "vec.TryPush", "vec.Pop", "vec.Clear":
+	case "vec.Push", "vec.TryPush", "vec.Append", "vec.TryAppend", "vec.Pop", "vec.Clear":
 		se := unparen(e.Fun).(*SelectorExpr)
 		vt := se.X.info().T.Underlying().(*VecType)
 		p := g.tmp()
@@ -885,6 +885,21 @@ func (g *gen) builtinCall(e *CallExpr) string {
 				return fmt.Sprintf("({ %sbool _ok = %s->len < %d; if (_ok) %s->a[%s->len++] = %s; _ok; })", head, p, vt.Len, p, p, v)
 			}
 			return fmt.Sprintf("({ %sif (%s->len >= %d) sq_panic_cstr(\"vector is full (capacity %d)\", __FILE__, __LINE__); %s->a[%s->len++] = %s; })", head, p, vt.Len, vt.Len, p, p, v)
+		case "vec.Append", "vec.TryAppend":
+			// a []T or (byte vectors) a string: both have .p and .len
+			s, at := g.tmp(), args[0].info().T
+			if isString(at) {
+				head += fmt.Sprintf("sq_string %s = %s; ", s, g.coerce(args[0], tString))
+			} else {
+				st := &Slice{Elem: vt.Elem}
+				head += fmt.Sprintf("%s %s = %s; ", g.ctype(st), s, g.coerce(args[0], st))
+			}
+			fits := fmt.Sprintf("%s->len + %s.len <= %d", p, s, vt.Len)
+			cp := fmt.Sprintf("if (%s.len) memmove(%s->a + %s->len, %s.p, (size_t)%s.len * sizeof(%s)); %s->len += %s.len;", s, p, p, s, s, g.ctype(vt.Elem), p, s)
+			if e.Builtin == "vec.TryAppend" {
+				return fmt.Sprintf("({ %sbool _ok = %s; if (_ok) { %s } _ok; })", head, fits, cp)
+			}
+			return fmt.Sprintf("({ %sif (!(%s)) sq_panic_cstr(\"vector is full (capacity %d)\", __FILE__, __LINE__); %s })", head, fits, vt.Len, cp)
 		case "vec.Pop":
 			return fmt.Sprintf("({ %sif (%s->len == 0) sq_panic_cstr(\"pop from an empty vector\", __FILE__, __LINE__); %s->a[--%s->len]; })", head, p, p, p)
 		}
@@ -971,7 +986,8 @@ func (g *gen) builtinCall(e *CallExpr) string {
 		se := unparen(e.Fun).(*SelectorExpr)
 		return "(" + g.expr(se.X) + ").code"
 	}
-	return "0"
+	// a builtin the checker accepts but code generation doesn't know: never compile it to nothing
+	panic(fmt.Sprintf("squark compiler bug: no code generation for builtin %q", e.Builtin))
 }
 
 func (g *gen) printArg(a Expr) string {

@@ -75,7 +75,19 @@ func (c *Checker) call(e *CallExpr) {
 			default:
 				e.Builtin = "error." + f.Sel.Name
 			}
-			c.args(e, sig)
+			if vt, ok := f.X.info().T.Underlying().(*VecType); ok && (e.Builtin == "vec.Append" || e.Builtin == "vec.TryAppend") && len(e.Args) == 1 {
+				// a byte vector also takes a string
+				if !c.valueExpr(e.Args[0], nil) {
+					c.invalid(e)
+					return
+				}
+				c.defaultUntyped(e.Args[0])
+				if !(isString(e.Args[0].info().T) && basicKind(vt.Elem) == Uint8) {
+					c.checkArg(e.Args[0], sig.Params, 0, sig, e, true)
+				}
+			} else {
+				c.args(e, sig)
+			}
 			switch len(sig.Results) {
 			case 0:
 				e.T, e.Mode = tInvalid, ModeNoValue
