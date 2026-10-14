@@ -1,0 +1,13 @@
+n=12 b=true null=true {"n": 12, "b": true, "x": [1, -0.5e-3, {"y": null}, "s\\\"q"], "z": null} -> end=true err=nil
+n=0 b=false {"n": -0, "b": false, "x": 0} -> end=true err=nil
+{"x": @@@} -> end=false err=json: syntax error
+{"x": nul} -> end=false err=json: syntax error
+{"x": "abc} -> end=false err=json: syntax error
+n=0 {"n": 007} -> end=false err=json: syntax error
+n=0 {"n": 1.5} -> end=false err=json: unexpected value type
+n=0 {"n": 1e3} -> end=false err=json: unexpected value type
+b=false {"b": truex} -> end=false err=json: syntax error
+{"x": 1 2} -> end=false err=json: syntax error
+{"x": 1.} -> end=false err=json: syntax error
+{"x": -} -> end=false err=json: syntax error
+null=false {"z": 1} -> end=false err=json: syntax error

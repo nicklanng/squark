@@ -1,0 +1,56 @@
+package main
+
+// json.Decoder follows the JSON grammar: numbers (no leading zeros; a fraction or exponent is not
+// an Int), literals that end at a delimiter, and Skip rejects what isn't a value.
+
+import "json"
+
+var src [128]byte
+
+func try1(doc string) {
+	n := copy(src[:], doc)
+	d := json.NewDecoder(src[:n])
+	var key [16]byte
+	d.BeginObject()
+	for {
+		k, ok := d.Field(key[:])
+		if !ok {
+			break
+		}
+		switch k {
+		case "n":
+			v, _ := d.Int()
+			print("n=", v, " ")
+		case "b":
+			v, _ := d.Bool()
+			print("b=", v, " ")
+		case "z":
+			print("null=", d.Null(), " ")
+		default:
+			d.Skip()
+		}
+	}
+	end := d.End()
+	print(doc, " -> end=", end, " err=")
+	if d.Err != nil {
+		println(d.Err.Error())
+	} else {
+		println("nil")
+	}
+}
+
+func main() {
+	try1(`{"n": 12, "b": true, "x": [1, -0.5e-3, {"y": null}, "s\\\"q"], "z": null}`)
+	try1(`{"n": -0, "b": false, "x": 0}`)
+	try1(`{"x": @@@}`)
+	try1(`{"x": nul}`)
+	try1(`{"x": "abc}`)
+	try1(`{"n": 007}`)
+	try1(`{"n": 1.5}`)
+	try1(`{"n": 1e3}`)
+	try1(`{"b": truex}`)
+	try1(`{"x": 1 2}`)
+	try1(`{"x": 1.}`)
+	try1(`{"x": -}`)
+	try1(`{"z": 1}`)
+}

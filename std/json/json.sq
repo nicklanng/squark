@@ -324,22 +324,100 @@ func (d *Decoder) hex4() rune {
 	return r
 }
 
-// Int decodes an integer.
+// number scans a JSON number at d.pos (RFC 8259: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?)
+// and returns where it ends and whether it is an integer (no fraction or exponent).
+func (d *Decoder) number() (int, bool) {
+	p := d.pos
+	if p < len(d.data) && d.data[p] == '-' {
+		p++
+	}
+	switch {
+	case p < len(d.data) && d.data[p] == '0':
+		p++
+	case p < len(d.data) && d.data[p] >= '1' && d.data[p] <= '9':
+		p = d.digits(p)
+	default:
+		d.fail(ErrSyntax)
+		return p, false
+	}
+	isInt := true
+	if p < len(d.data) && d.data[p] == '.' {
+		q := d.digits(p + 1)
+		if q == p+1 {
+			d.fail(ErrSyntax)
+			return q, false
+		}
+		p, isInt = q, false
+	}
+	if p < len(d.data) && (d.data[p] == 'e' || d.data[p] == 'E') {
+		p++
+		if p < len(d.data) && (d.data[p] == '+' || d.data[p] == '-') {
+			p++
+		}
+		q := d.digits(p)
+		if q == p {
+			d.fail(ErrSyntax)
+			return q, false
+		}
+		p, isInt = q, false
+	}
+	return p, isInt
+}
+
+// digits returns the end of the run of digits starting at p.
+func (d *Decoder) digits(p int) int {
+	for p < len(d.data) && d.data[p] >= '0' && d.data[p] <= '9' {
+		p++
+	}
+	return p
+}
+
+// delim checks that a number or literal ends here: at the end of the data, whitespace, or the
+// next separator (so 1x, truex and nullable are errors, not 1, true and null).
+func (d *Decoder) delim() bool {
+	if d.pos >= len(d.data) {
+		return true
+	}
+	switch d.data[d.pos] {
+	case ' ', '\t', '\n', '\r', ',', ']', '}':
+		return true
+	}
+	d.fail(ErrSyntax)
+	return false
+}
+
+// literal consumes word (true, false or null) if it is next, followed by a delimiter.
+func (d *Decoder) literal(word string) bool {
+	if len(d.data)-d.pos < len(word) || string(d.data[d.pos:d.pos+len(word)]) != word {
+		return false
+	}
+	d.pos += len(word)
+	return d.delim()
+}
+
+// Int decodes an integer. A number with a fraction or exponent is ErrType (it is consumed).
 func (d *Decoder) Int() (int, bool) {
 	if d.Err != nil {
 		return 0, false
 	}
-	d.ws()
-	start := d.pos
-	if d.pos < len(d.data) && d.data[d.pos] == '-' {
-		d.pos++
-	}
-	for d.pos < len(d.data) && d.data[d.pos] >= '0' && d.data[d.pos] <= '9' {
-		d.pos++
-	}
-	v, err := strconv.Atoi(string(d.data[start:d.pos]))
-	if err != nil {
+	c := d.peek()
+	if c != '-' && (c < '0' || c > '9') {
 		d.fail(ErrType)
+		return 0, false
+	}
+	start := d.pos
+	end, isInt := d.number()
+	if d.Err != nil {
+		return 0, false
+	}
+	d.pos = end
+	if !isInt || !d.delim() {
+		d.fail(ErrType)
+		return 0, false
+	}
+	v, err := strconv.Atoi(string(d.data[start:end]))
+	if err != nil {
+		d.fail(ErrType) // out of range
 		return 0, false
 	}
 	return v, true
@@ -351,17 +429,23 @@ func (d *Decoder) Bool() (bool, bool) {
 		return false, false
 	}
 	d.ws()
-	rest := string(d.data[d.pos:])
-	if len(rest) >= 4 && rest[:4] == "true" {
-		d.pos += 4
+	if d.literal("true") {
 		return true, true
 	}
-	if len(rest) >= 5 && rest[:5] == "false" {
-		d.pos += 5
+	if d.Err == nil && d.literal("false") {
 		return false, true
 	}
 	d.fail(ErrType)
 	return false, false
+}
+
+// Null consumes a null if it is the next value and reports whether it was (a missing or optional
+// value; anything else is left for the other methods).
+func (d *Decoder) Null() bool {
+	if d.Err != nil || d.peek() != 'n' {
+		return false
+	}
+	return d.literal("null")
 }
 
 // Skip skips one value of any type (iteratively; nesting is tracked with a counter).
@@ -395,13 +479,19 @@ func (d *Decoder) Skip() bool {
 		case c == 0:
 			d.fail(ErrSyntax)
 			return false
+		case c == 't' || c == 'f' || c == 'n':
+			if !d.literal("true") && !d.literal("false") && !d.literal("null") {
+				d.fail(ErrSyntax)
+				return false
+			}
 		default:
-			for d.pos < len(d.data) {
-				c = d.data[d.pos]
-				if c == ',' || c == '}' || c == ']' || c == ' ' || c == '\n' || c == '\t' || c == '\r' {
-					break
-				}
-				d.pos++
+			end, _ := d.number()
+			if d.Err != nil {
+				return false
+			}
+			d.pos = end
+			if !d.delim() {
+				return false
 			}
 		}
 		if depth <= 0 {

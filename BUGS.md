@@ -455,7 +455,7 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 - [x] **E8. Arrays and structs of shared channels are rejected, with a self-contradicting error**
   (missing feature + bug) — fixed: shared vars may hold channels in arrays and structs (set up eagerly by shard 0, element by element); the error names the field holding a reference (`Msg.Body is a string`); examples/chat uses an array of relay channels; tests: `testdata/run/shared_chan_array.sq` (also under TSan), `testdata/errors/shared_chan_array.sq` `shared var reqs [4]chan Req cap 8` says "chan Req cap 8 can't be shared
   (... or a channel ...)". Needed for a request channel per thread or a reply channel per worker.
-- [ ] **E9. `json.Decoder` accepts invalid JSON** (bug) `Skip` accepts `@@@` and `nul`; `Int`
+- [x] **E9. `json.Decoder` accepts invalid JSON** (bug) — fixed: numbers follow the JSON grammar (a fraction or exponent is ErrType for Int, consumed), literals must end at a delimiter, Skip accepts only values; new `Null()`; test: `testdata/run/json_strict.sq` `Skip` accepts `@@@` and `nul`; `Int`
   accepts `007`, and on `1.5`/`1e3` returns `(1, true)` with the error surfacing later as a syntax
   error; `Bool` accepts `truex`.
 - [ ] **E10. Errors cascade from invalid types** (polish) One mistake reports many: `sort.Slice(&v,

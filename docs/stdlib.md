@@ -253,6 +253,7 @@ func (d *json.Decoder) Field(keybuf []byte) (string, bool) from keybuf
 func (d *json.Decoder) String(buf []byte) (string, bool) from buf
 func (d *json.Decoder) Int() (int, bool)
 func (d *json.Decoder) Bool() (bool, bool)
+func (d *json.Decoder) Null() bool
 func (d *json.Decoder) Skip() bool
 func (d *json.Decoder) End() bool
 
