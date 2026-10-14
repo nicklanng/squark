@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -689,5 +690,62 @@ func main() {
 	out, err := exec.Command(bin, addr).CombinedOutput()
 	if err != nil || string(out) != "false\ntrue\n" {
 		t.Errorf("got %q, %v (want the sleep to last its full time)", out, err)
+	}
+}
+
+// TestNoHeapAtRuntime runs testdata/heapcount/prog with an allocation counter injected and checks
+// that nothing allocates after startup: not the runtime, not the std packages, and not the libc
+// functions they call (glibc's strerror and macOS's first gmtime_r both used to).
+func TestNoHeapAtRuntime(t *testing.T) {
+	var src, env string
+	switch runtime.GOOS {
+	case "darwin":
+		src, env = "count_darwin.c", "DYLD_INSERT_LIBRARIES"
+	case "linux":
+		src, env = "count_linux.c", "LD_PRELOAD"
+	default:
+		t.Skip("no allocation counter for " + runtime.GOOS)
+	}
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "count.so")
+	if out, err := exec.Command("clang", "-O2", "-shared", "-fPIC", "-o", lib, filepath.Join("../../testdata/heapcount", src)).CombinedOutput(); err != nil {
+		t.Fatalf("building the counter: %v\n%s", err, out)
+	}
+	bin := filepath.Join(dir, "prog")
+	if _, err := Build(Options{Dir: "../../testdata/heapcount/prog", Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	free := func() string {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		return l.Addr().String()
+	}
+	counts := filepath.Join(dir, "counts")
+	cmd := exec.Command(bin, free(), free(), filepath.Join(dir, "file.txt"))
+	cmd.Env = append(os.Environ(), env+"="+lib, "HEAPCOUNT_FILE="+counts)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// the first launch of a fresh binary can be slow on macOS: wait for the counter's first report
+	// (100ms after it loads), which comes well inside the program's initial 400ms pause
+	var before []byte
+	for i := 0; i < 500 && len(before) == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+		before, _ = os.ReadFile(counts)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	after, _ := os.ReadFile(counts)
+	if len(before) == 0 || out.String() != "true\n" {
+		t.Fatalf("counter or program failed: counts %q, output %q", before, out.String())
+	}
+	if string(before) != string(after) {
+		t.Errorf("heap allocations after startup: %q before the work, %q after", before, after)
 	}
 }

@@ -345,6 +345,15 @@ choice is given for each.
   Fix: in `Write`/`WriteString`/`WriteByte`, drop the bytes (but count them) when `w.head`; never
   switch a HEAD response to chunked.
 
+- [x] **R19. First HTTP response heap-allocated on macOS** (bug, found 2026-10-14 checking the no-heap claim)
+  `sq_httpdate` called `gmtime_r`, whose first call on macOS sets up time-zone state and
+  notifications: 49 allocations, once. — fixed: UTC date by arithmetic (`utc_date`, checked
+  against `gmtime_r` on 43k timestamps); test: `TestNoHeapAtRuntime`
+- [x] **R20. Every failed syscall heap-allocated on Linux** (bug, same check)
+  `os.Errno` builds its message with `strerror`, and glibc's translates it, allocating twice per
+  call. — fixed: `strerrordesc_np` on glibc ≥ 2.32 (static, untranslated); test:
+  `TestNoHeapAtRuntime` (fails with 1000 extra allocations if reverted)
+
 ## P3: minor / polish
  — fixed: `spill` counts and drops HEAD body bytes instead of chunking; Content-Length = dropped + buffered; test: `TestHTTP` (HEAD then GET on the same connection)
 - [x] **P9. Error positions point at `(` / the operator instead of the expression start**
@@ -427,3 +436,6 @@ Append one line per work session: date, items closed, anything left half-done.
   (`sigstack`), fixed; the whole suite passes on Linux arm64. G list: C1, C2, C8, P5, R17, T17
   fixed; C7 partly fixed (map op-assign), rest documented with C4, C9, T16 in spec §5/§6.
   All items closed. Nothing committed.
+- 2026-10-14: checked the no-heap claim at run time with an injected allocation counter: R19, R20
+  found and fixed; `TestNoHeapAtRuntime` (macOS + Linux) now guards it. Exception, as documented:
+  the `sqlite` package's C library allocates.

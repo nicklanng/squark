@@ -1263,14 +1263,41 @@ int64_t sq_writev2(int64_t fd, sq_bytes a, sq_bytes b) {
 	return done;
 }
 
+// utc_date fills the date and time fields of tm for Unix time t (UTC, proleptic Gregorian),
+// using Howard Hinnant's civil_from_days.
+static void utc_date(time_t t, struct tm *tm) {
+	int64_t days = (int64_t)t / 86400, secs = (int64_t)t % 86400;
+	if (secs < 0) {
+		secs += 86400;
+		days--;
+	}
+	tm->tm_hour = (int)(secs / 3600);
+	tm->tm_min = (int)(secs / 60 % 60);
+	tm->tm_sec = (int)(secs % 60);
+	tm->tm_wday = (int)((days % 7 + 11) % 7); // 1970-01-01 was a Thursday
+	int64_t z = days + 719468;
+	int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+	int64_t doe = z - era * 146097;
+	int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	int64_t mp = (5 * doy + 2) / 153;
+	int64_t d = doy - (153 * mp + 2) / 5 + 1;
+	int64_t m = mp < 10 ? mp + 3 : mp - 9;
+	tm->tm_mday = (int)d;
+	tm->tm_mon = (int)(m - 1);
+	tm->tm_year = (int)(yoe + era * 400 + (m <= 2) - 1900);
+}
+
 // sq_httpdate writes an RFC 1123 date ("Mon, 02 Jan 2006 15:04:05 GMT", 29 bytes), cached per second.
 int64_t sq_httpdate(sq_bytes dst) {
 	static char cache[32];
 	static time_t cached_at = -1;
 	time_t now = time(NULL);
 	if (now != cached_at) {
+		// UTC by arithmetic, not gmtime_r: on macOS its first call sets up time-zone state and
+		// notifications with ~50 heap allocations, and UTC needs none of that
 		struct tm tm;
-		gmtime_r(&now, &tm);
+		utc_date(now, &tm);
 		static const char days[] = "SunMonTueWedThuFriSat";
 		static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
 		char *p = cache;
@@ -1417,8 +1444,19 @@ sq_string sq_getenv(sq_string name) {
 	return (sq_string){(const uint8_t *)v, (int64_t)strlen(v)};
 }
 
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 32))
+const char *strerrordesc_np(int errnum);
+#endif
+
 sq_string sq_strerror(int64_t err) {
-	const char *s = strerror((int)err);
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 32))
+	// glibc's strerror looks up a translation, which heap-allocates on every call;
+	// strerrordesc_np returns the same untranslated text as a static string
+	const char *s = strerrordesc_np((int)err);
+	if (!s) s = "unknown error";
+#else
+	const char *s = strerror((int)err); // macOS: a static string, no allocation
+#endif
 	return (sq_string){(const uint8_t *)s, (int64_t)strlen(s)};
 }
 

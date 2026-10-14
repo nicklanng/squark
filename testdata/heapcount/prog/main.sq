@@ -1,0 +1,131 @@
+package main
+
+// Run by TestNoHeapAtRuntime under an allocation counter. It pauses so the startup count can be
+// read, then uses every std package except sqlite (whose C library has its own allocator) and
+// serves HTTP requests to itself, then pauses again for the final count.
+
+import (
+	"bytes"
+	"errors"
+	"http"
+	"json"
+	"math"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+	"utf8"
+)
+
+const ErrMine = error(7, "mine")
+
+var sum int
+var page [20000]byte
+
+func handle(w *http.ResponseWriter, r *http.Request) {
+	if r.Path == "/big" {
+		w.Write(page[:]) // larger than the write buffer: chunked
+		return
+	}
+	w.WriteString("hello ")
+	w.WriteString(r.QueryValue("name"))
+}
+
+task serve(addr string) pool 1 {
+	if err := http.ListenAndServe(addr, handle); err != nil {
+		panic(err)
+	}
+}
+
+task echo(l net.Listener) pool 1 {
+	c, err := l.Accept()
+	if err != nil {
+		return
+	}
+	var b [64]byte
+	for {
+		n, err := c.Read(b[:])
+		if err != nil || n == 0 {
+			return
+		}
+		c.Write(b[:n])
+	}
+}
+
+func get(addr, req string, buf []byte) int {
+	c, err := net.Dial(addr)
+	if err != nil {
+		panic(err)
+	}
+	c.WriteString(req)
+	total := 0
+	for {
+		n, err := c.Read(buf)
+		if err != nil || n == 0 {
+			break
+		}
+		total += n
+	}
+	c.Close()
+	return total
+}
+
+func main() {
+	time.Sleep(400 * time.Millisecond) // startup count is read here
+	go serve(os.Arg(2))
+	l, err := net.Listen(os.Arg(1))
+	if err != nil {
+		panic(err)
+	}
+	go echo(l)
+	c, err := net.Dial(os.Arg(1))
+	if err != nil {
+		panic(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	var buf [512]byte
+	var store [256]byte
+	for i := 0; i < 500; i++ {
+		if _, err := os.Open("/nonexistent/squark"); err != nil {
+			sum += len(err.Error())
+		}
+		f, err := os.Create(os.Arg(3))
+		if err == nil {
+			f.WriteString("hello, file\n")
+			f.Close()
+		}
+		f, err = os.Open(os.Arg(3))
+		if err == nil {
+			n, _ := f.Read(buf[:])
+			sum += n
+			f.Close()
+		}
+		sum += len(os.Getenv("HOME"))
+		b := strconv.AppendFloat(buf[:0], math.Sqrt(float64(i))+math.Pow(1.5, 3)+math.Sin(1), 6)
+		v, _ := strconv.Atoi("12345")
+		sum += len(b) + v + strings.Count("a,b,c", ",") + utf8.RuneCountInString("héllo")
+		var parts [4]string
+		sum += len(strings.Split("x y z", " ", parts[:]))
+		j := json.AppendString(buf[:0], "q\"uote é")
+		d := json.NewDecoder(j)
+		if s, ok := d.String(store[:]); ok {
+			sum += len(s)
+		}
+		bb := bytes.NewBuffer(store[:0])
+		bb.WriteString("buffered")
+		sum += bb.Len()
+		if errors.Is(ErrMine, ErrMine) {
+			sum++
+		}
+		sum += int(time.Since(time.Now()).Nanoseconds() & 1)
+		c.WriteString("ping")
+		n, _ := c.Read(buf[:])
+		sum += n
+		sum += get(os.Arg(2), "GET /?name=x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
+		sum += get(os.Arg(2), "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
+		sum += get(os.Arg(2), "HEAD /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
+	}
+	println(sum > 0)
+	time.Sleep(400 * time.Millisecond) // final count is read here
+}
