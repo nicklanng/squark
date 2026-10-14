@@ -215,7 +215,8 @@ var table [64K]byte                               // 4K, 16M, 1G size literals
 
 There's no `new` or `make` without an arena, no string `+` without an arena, and no recursion. There
 are no closures or method values, which would need captured state somewhere. There are no
-interfaces or generics yet; both can be done without a heap and are next.
+interfaces or generic types; for code over several types, a parameter can be `anytype` (Zig-style:
+each call makes a copy of the function for its argument types, as `sort.Slice` does).
 
 ## How the checking works
 
@@ -272,7 +273,8 @@ docs/design.md      the language design and its rationale
 
 ## Not done yet
 
-- Interfaces and generics.
+- Interfaces and generic types: left out so far; `anytype` parameters cover the cases found in the
+  standard library and examples.
 - Provenance contracts on function types. Indirect calls use whole-program inference instead.
 - One SQLite connection per thread: a slow query no longer stalls its thread, but the thread's
   other goroutines that need the database wait for it (a small pool per thread would let them in).

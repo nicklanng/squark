@@ -1,206 +1,149 @@
 {
-  "date": "2026-10-14T23:16:09+01:00",
+  "date": "2026-10-14T23:38:31+01:00",
   "machine": "Apple M4, 10 cores, 16 GiB, darwin/arm64",
   "duration": "10s",
   "connections": 64,
-  "compute": [
-    {
-      "bench": "sieve 50M",
-      "impl": "go",
-      "seconds": 0.15,
-      "max_rss_bytes": 55050240,
-      "output": "3001134"
-    },
-    {
-      "bench": "sieve 50M",
-      "impl": "squark",
-      "seconds": 0.14,
-      "max_rss_bytes": 51363840,
-      "output": "3001134"
-    },
-    {
-      "bench": "nbody 50M",
-      "impl": "go",
-      "seconds": 1.52,
-      "max_rss_bytes": 4407296,
-      "output": "-0.169075164\n-0.169059907"
-    },
-    {
-      "bench": "nbody 50M",
-      "impl": "squark",
-      "seconds": 1.13,
-      "max_rss_bytes": 1409024,
-      "output": "-0.169075164\n-0.169059907"
-    },
-    {
-      "bench": "wordfreq 100MiB",
-      "impl": "go",
-      "seconds": 0.46,
-      "max_rss_bytes": 217677824,
-      "output": "902730 ka\n662579 ra\n619085 si\n618524 zo\n616136 el\n603914 da\n603157 ston\n585062 ber\n577049 dro\n567018 mar"
-    },
-    {
-      "bench": "wordfreq 100MiB",
-      "impl": "squark",
-      "seconds": 0.33,
-      "max_rss_bytes": 8060928,
-      "output": "902730 ka\n662579 ra\n619085 si\n618524 zo\n616136 el\n603914 da\n603157 ston\n585062 ber\n577049 dro\n567018 mar"
-    },
-    {
-      "bench": "json encode 2M",
-      "impl": "go",
-      "seconds": 2.66,
-      "max_rss_bytes": 5095424,
-      "output": "1449888890"
-    },
-    {
-      "bench": "json encode 2M",
-      "impl": "squark",
-      "seconds": 0.56,
-      "max_rss_bytes": 1392640,
-      "output": "1449888890"
-    }
-  ],
+  "compute": null,
   "http": [
     {
       "impl": "squark",
       "scenario": "GET /health",
-      "rps": 223593.39102792495,
-      "p50_us": 279.552,
-      "p99_us": 567.296,
+      "rps": 221969.8092240402,
+      "p50_us": 281.6,
+      "p99_us": 492.544,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.496887083,
-      "server_peak_rss_bytes": 7192576,
+      "server_cpu_s": 9.577986791,
+      "server_peak_rss_bytes": 7389184,
       "server_peak_threads": 4
     },
     {
       "impl": "squark",
       "scenario": "GET /notes/1",
-      "rps": 195483.08967278007,
-      "p50_us": 322.56,
-      "p99_us": 465.92,
+      "rps": 188962.124978328,
+      "p50_us": 332.8,
+      "p99_us": 484.352,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.875204083,
-      "server_peak_rss_bytes": 7192576,
+      "server_cpu_s": 9.809848417,
+      "server_peak_rss_bytes": 7389184,
       "server_peak_threads": 4
     },
     {
       "impl": "squark",
       "scenario": "mix 80/10/10",
-      "rps": 143759.08337042414,
-      "p50_us": 435.2,
-      "p99_us": 620.544,
+      "rps": 139882.85147997542,
+      "p50_us": 445.44,
+      "p99_us": 653.312,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.809253084,
-      "server_peak_rss_bytes": 9224192,
+      "server_cpu_s": 9.8000895,
+      "server_peak_rss_bytes": 9338880,
       "server_peak_threads": 4
     },
     {
       "impl": "go",
       "scenario": "GET /health",
-      "rps": 177020.96361344337,
-      "p50_us": 330.752,
+      "rps": 175500.24871644937,
+      "p50_us": 334.848,
       "p99_us": 1126.4,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 43.741443875,
-      "server_peak_rss_bytes": 22282240,
-      "server_peak_threads": 20
+      "server_cpu_s": 43.921923125,
+      "server_peak_rss_bytes": 22872064,
+      "server_peak_threads": 19
     },
     {
       "impl": "go",
       "scenario": "GET /notes/1",
-      "rps": 107954.70335262091,
-      "p50_us": 178.688,
-      "p99_us": 2318.336,
+      "rps": 106372.94049357767,
+      "p50_us": 180.736,
+      "p99_us": 2334.72,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 42.946493999,
-      "server_peak_rss_bytes": 22462464,
-      "server_peak_threads": 20
+      "server_cpu_s": 43.164064667,
+      "server_peak_rss_bytes": 23101440,
+      "server_peak_threads": 19
     },
     {
       "impl": "go",
       "scenario": "mix 80/10/10",
-      "rps": 82110.13032891763,
-      "p50_us": 1017.856,
-      "p99_us": 2318.336,
+      "rps": 79657.6815985511,
+      "p50_us": 1038.336,
+      "p99_us": 2351.104,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 36.234633125,
-      "server_peak_rss_bytes": 23986176,
-      "server_peak_threads": 20
+      "server_cpu_s": 35.960832791,
+      "server_peak_rss_bytes": 24559616,
+      "server_peak_threads": 19
     },
     {
       "impl": "go GOMAXPROCS=1",
       "scenario": "GET /health",
-      "rps": 152024.6923301307,
-      "p50_us": 416.768,
-      "p99_us": 788.48,
+      "rps": 148647.06472914942,
+      "p50_us": 424.96,
+      "p99_us": 796.672,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.975389333,
-      "server_peak_rss_bytes": 15843328,
+      "server_cpu_s": 9.975169084,
+      "server_peak_rss_bytes": 15695872,
       "server_peak_threads": 4
     },
     {
       "impl": "go GOMAXPROCS=1",
       "scenario": "GET /notes/1",
-      "rps": 116089.17275935011,
-      "p50_us": 546.816,
-      "p99_us": 980.992,
+      "rps": 115067.79559646882,
+      "p50_us": 550.912,
+      "p99_us": 997.376,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.994194917,
-      "server_peak_rss_bytes": 15990784,
+      "server_cpu_s": 9.99174125,
+      "server_peak_rss_bytes": 15826944,
       "server_peak_threads": 4
     },
     {
       "impl": "go GOMAXPROCS=1",
       "scenario": "mix 80/10/10",
-      "rps": 79716.49478738234,
-      "p50_us": 792.576,
-      "p99_us": 1478.656,
+      "rps": 79309.59516036272,
+      "p50_us": 796.672,
+      "p99_us": 1486.848,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.941770708,
-      "server_peak_rss_bytes": 17219584,
+      "server_cpu_s": 9.934522541,
+      "server_peak_rss_bytes": 17088512,
       "server_peak_threads": 4
     }
   ],
   "servers": [
     {
       "impl": "squark",
-      "startup_ms": 3.132,
-      "idle_rss_bytes": 3063808,
-      "rss_with_idle_conns_bytes": 5046272,
+      "startup_ms": 4.752,
+      "idle_rss_bytes": 3260416,
+      "rss_with_idle_conns_bytes": 5160960,
       "idle_conns": 5000,
       "per_conn_kib": -0.816
     },
     {
       "impl": "go",
-      "startup_ms": 5.581,
-      "idle_rss_bytes": 9502720,
-      "rss_with_idle_conns_bytes": 116539392,
+      "startup_ms": 8.562,
+      "idle_rss_bytes": 9650176,
+      "rss_with_idle_conns_bytes": 116359168,
       "idle_conns": 5000,
-      "per_conn_kib": 18.0768
+      "per_conn_kib": 17.9296
     },
     {
       "impl": "go GOMAXPROCS=1",
-      "startup_ms": 5.474,
-      "idle_rss_bytes": 9158656,
-      "rss_with_idle_conns_bytes": 112508928,
+      "startup_ms": 5.465,
+      "idle_rss_bytes": 8830976,
+      "rss_with_idle_conns_bytes": 110575616,
       "idle_conns": 5000,
-      "per_conn_kib": 18.6112
+      "per_conn_kib": 18.2592
     }
   ],
   "binary_sizes": {
     "gocompute": 3870338,
     "gonotes": 9501826,
-    "notes": 131464,
+    "notes": 132104,
     "sq-jsonenc": 93000,
     "sq-nbody": 110232,
     "sq-sieve": 92952,

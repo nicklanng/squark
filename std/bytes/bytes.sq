@@ -4,6 +4,7 @@ package bytes
 import (
 	"io"
 	"strconv"
+	"strings"
 )
 
 // Buffer appends into storage supplied by the caller. It never grows: writes that do not fit
@@ -85,27 +86,12 @@ func Equal(a, b []byte) bool {
 	return string(a) == string(b)
 }
 
-// IndexByte returns the index of the first c in s, or -1.
-func IndexByte(s []byte, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
-}
+// IndexByte returns the index of the first c in s, or -1. (string(s) is a view of s, not a copy,
+// so the byte-slice functions are the strings package's.)
+func IndexByte(s []byte, c byte) int { return strings.IndexByte(string(s), c) }
 
 // Index returns the index of the first sep in s, or -1.
-func Index(s, sep []byte) int {
-	n := len(sep)
-	for i := 0; i+n <= len(s); i++ {
-		if string(s[i:i+n]) == string(sep) {
-			return i
-		}
-	}
-	return -1
-}
+func Index(s, sep []byte) int { return strings.Index(string(s), string(sep)) }
 
-func HasPrefix(s, prefix []byte) bool {
-	return len(s) >= len(prefix) && string(s[:len(prefix)]) == string(prefix)
-}
+// HasPrefix reports whether s begins with prefix.
+func HasPrefix(s, prefix []byte) bool { return strings.HasPrefix(string(s), string(prefix)) }

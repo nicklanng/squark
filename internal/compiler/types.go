@@ -321,6 +321,13 @@ type Func struct {
 	Intrinsic string
 	IsTask    bool
 	StackLimit int64 // asserted upper bound (stack N on a task or function)
+
+	// anytype parameters (see generic.go)
+	Generic   bool    // a template: has anytype parameters; never compiled itself
+	Instances []*Func // its instances so far
+	GenericOf *Func   // for an instance: its template
+	TypeArgs  []Type  // for an instance: the types of its anytype parameters
+	InstPos   Pos     // for an instance: the call that made it
 }
 
 func (f *Func) FullName() string {

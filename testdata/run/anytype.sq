@@ -1,0 +1,88 @@
+package main
+
+import (
+	"bytes"
+	"json"
+	"os"
+	"sort"
+)
+
+type Entry struct {
+	word  string
+	count int
+}
+
+func byCount(a, b Entry) bool {
+	if a.count != b.count {
+		return a.count > b.count
+	}
+	return a.word < b.word
+}
+
+func desc(a, b int) bool { return a > b }
+
+// total works for any slice or array of ints
+func total(xs anytype) int {
+	t := 0
+	for i := 0; i < len(xs); i++ {
+		t += xs[i]
+	}
+	return t
+}
+
+// both calls another generic function
+func both(xs anytype, ys anytype) int { return total(xs) + total(ys) }
+
+func size(m anytype) int { return len(m) }
+
+var counts map[string]int cap 8
+
+func main() {
+	xs := []int{5, 2, 9, 1, 5, 6}
+	sort.Ints(xs)
+	println(xs[0], xs[1], xs[2], xs[3], xs[4], xs[5])
+	sort.Slice(xs, desc)
+	println(xs[0], xs[5], sort.IsSorted(xs, desc))
+
+	es := []Entry{{"b", 2}, {"a", 2}, {"c", 7}, {"d", 1}}
+	sort.Slice(es, byCount)
+	for _, e := range es {
+		print(e.word, e.count, " ")
+	}
+	println()
+
+	words := []string{"pear", "apple", "fig"}
+	sort.Strings(words)
+	println(words[0], words[1], words[2])
+
+	arr := [3]int{1, 2, 3}
+	println(total(xs), total(arr), total(xs[:2]), both(arr, xs))
+
+	counts["x"] = 1
+	counts["y"] = 2
+	println(size(counts), size("four"))
+
+	var store [64]byte
+	b := bytes.NewBuffer(store[:0])
+	json.WriteString(&b, "say \"hi\"\n")
+	println(b.String())
+	json.WriteString(os.Stdout, "tab\there")
+	println()
+
+	// an empty string, and one over the 256-byte chunk with 2-byte characters across the boundary
+	var big [1024]byte
+	bb := bytes.NewBuffer(big[:0])
+	json.WriteString(&bb, "")
+	long := "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+	json.WriteString(&bb, long)
+	out := bb.String()
+	println(out[:2], len(out), len(long)+4, out[len(out)-3:])
+
+	// the same bytes as AppendString, for every kind of escape
+	var x [128]byte
+	var y [128]byte
+	odd := "q\"b\\s\n\t\x01 bad\xff\xc3 ls\u2028 é"
+	yb := bytes.NewBuffer(y[:0])
+	json.WriteString(&yb, odd)
+	println(string(json.AppendString(x[:0], odd)) == yb.String())
+}

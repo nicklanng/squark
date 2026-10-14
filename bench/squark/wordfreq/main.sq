@@ -6,6 +6,7 @@ package main
 import (
 	"io"
 	"os"
+	"sort"
 	"strconv"
 )
 
@@ -49,35 +50,6 @@ func less(a, b Entry) bool {
 		return a.count > b.count
 	}
 	return a.word < b.word
-}
-
-// heapSort sorts entries with an explicit loop: no recursion, no closures.
-func heapSort(es []Entry) {
-	n := len(es)
-	for start := n/2 - 1; start >= 0; start-- {
-		siftDown(es, start, n)
-	}
-	for end := n - 1; end > 0; end-- {
-		es[0], es[end] = es[end], es[0]
-		siftDown(es, 0, end)
-	}
-}
-
-func siftDown(es []Entry, root, n int) {
-	for {
-		child := 2*root + 1
-		if child >= n {
-			return
-		}
-		if child+1 < n && less(es[child], es[child+1]) {
-			child++
-		}
-		if !less(es[root], es[child]) {
-			return
-		}
-		es[root], es[child] = es[child], es[root]
-		root = child
-	}
 }
 
 func main() {
@@ -130,7 +102,7 @@ func main() {
 	}
 	f.Close()
 	all := entries[:nentries]
-	heapSort(all)
+	sort.Slice(all, less)
 	var line [128]byte
 	for i := 0; i < len(all) && i < 10; i++ {
 		out := strconv.AppendInt(line[:0], all[i].count)

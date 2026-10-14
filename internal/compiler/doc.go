@@ -187,9 +187,9 @@ func DocPackage(p *Package, all bool) string {
 		}
 	}
 	var funcs []entry
-	for _, f := range p.Funcs {
-		if f.RecvType != nil || !show(f.Name) || f.Sig == nil {
-			continue
+	for _, f := range append(p.Funcs, p.Generics...) {
+		if f.RecvType != nil || !show(f.Name) || f.Sig == nil || f.GenericOf != nil {
+			continue // instances are documented by their template
 		}
 		funcs = append(funcs, entry{f.Decl.P, DocLine(f)})
 	}

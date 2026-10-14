@@ -19,6 +19,7 @@ func init() {
 	}
 	universe.Insert(&Object{Kind: ObjType, Name: "uint8", Type: tUint8, state: 2})
 	universe.Insert(&Object{Kind: ObjType, Name: "rune", Type: tInt32, state: 2})
+	universe.Insert(&Object{Kind: ObjType, Name: "anytype", Type: tAnyType, state: 2})
 	universe.Insert(&Object{Kind: ObjType, Name: "error", Type: tError, state: 2})
 	universe.Insert(&Object{Kind: ObjConst, Name: "true", Type: tUntypedBool, Const: constant.MakeBool(true), state: 2})
 	universe.Insert(&Object{Kind: ObjConst, Name: "false", Type: tUntypedBool, Const: constant.MakeBool(false), state: 2})
@@ -53,6 +54,10 @@ type Checker struct {
 	calleeIdent *Ident    // identifier being checked as the callee of a direct call
 	goCall      *CallExpr // call being checked as the operand of a go statement
 	allocArena  Expr      // innermost `in` arena, while checking its operand
+
+	anyParams bool    // resolving a plain function's parameters: anytype is allowed
+	pending   []*Func // instances of generic functions whose bodies are still to check
+	inst      *Func   // the instance being checked (for error messages)
 }
 
 // Check type-checks the whole program.
@@ -69,9 +74,37 @@ func Check(prog *Program) error {
 	if len(c.errs) > 0 {
 		return c.errs
 	}
+	// generic functions are templates: only their instances are checked and compiled
+	keep := prog.Funcs[:0]
+	for _, f := range prog.Funcs {
+		if !f.Generic {
+			keep = append(keep, f)
+		}
+	}
+	prog.Funcs = keep
+	for _, pkg := range prog.Packages {
+		kept := pkg.Funcs[:0]
+		for _, f := range pkg.Funcs {
+			if f.Generic {
+				pkg.Generics = append(pkg.Generics, f)
+			} else {
+				kept = append(kept, f)
+			}
+		}
+		pkg.Funcs = kept
+	}
 	for _, pkg := range prog.Packages {
 		c.pkg = pkg
 		c.checkBodies(pkg)
+	}
+	for len(c.pending) > 0 { // instances made so far (their bodies may make more)
+		inst := c.pending[0]
+		c.pending = c.pending[1:]
+		c.pkg = inst.Pkg
+		c.setFile(c.fileOf(inst.Decl.P))
+		c.inst = inst
+		c.funcBody(inst)
+		c.inst = nil
 	}
 	if len(c.errs) > 0 {
 		return c.errs
@@ -88,7 +121,11 @@ func Check(prog *Program) error {
 }
 
 func (c *Checker) errorf(pos Pos, format string, args ...any) {
-	c.errs = append(c.errs, &Error{pos, fmt.Sprintf(format, args...)})
+	msg := fmt.Sprintf(format, args...)
+	if c.inst != nil {
+		msg += c.instanceNote()
+	}
+	c.errs = append(c.errs, &Error{pos, msg})
 }
 
 func isExported(name string) bool {
@@ -489,7 +526,10 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			}
 			named.Methods = append(named.Methods, fn)
 		}
+		c.anyParams = recv == nil && d.Kind == KindFunc
 		fn.Sig = c.signature(d.Type, recv)
+		c.anyParams = false
+		fn.Generic = hasAnyParam(fn.Sig)
 		if d.Pool != nil {
 			if n, ok := c.constSize(d.Pool, "pool size"); ok {
 				if n < 1 {
@@ -814,8 +854,15 @@ func cloneExpr(x Expr) Expr {
 func (c *Checker) signature(ft *FuncType, recv *Var) *Signature {
 	sig := &Signature{Recv: recv}
 	idx := 0
+	anyParams := c.anyParams
+	c.anyParams = false // only in this signature's own parameter list
 	for i, f := range ft.Params {
+		c.anyParams = anyParams
 		t := c.typExpr(f.Type)
+		c.anyParams = false
+		if f.Variadic && t == tAnyType {
+			c.errorf(f.Type.Pos(), "a variadic parameter can't be anytype")
+		}
 		if f.Variadic {
 			if i != len(ft.Params)-1 || len(f.Names) > 1 {
 				c.errorf(f.Type.Pos(), "can only use ... with final parameter in list")
@@ -912,6 +959,10 @@ func (c *Checker) typExpr1(x Expr) Type {
 		}
 		if o.Kind != ObjType {
 			c.errorf(e.P, "%s is not a type", e.Name)
+			return tInvalid
+		}
+		if o.Type == tAnyType && !c.anyParams {
+			c.errorf(e.P, "anytype is only allowed as the type of a function's parameter")
 			return tInvalid
 		}
 		e.Obj = o

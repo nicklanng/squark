@@ -19,8 +19,9 @@ current.
    declared capacity (`map[K]V cap N`), and channels have one (`chan T cap N`).
 5. **No recursion**, direct or indirect, because every stack size is proven at compile time. Use a
    loop with an explicit stack such as a `[..N]T` vector.
-6. **No closures, method values, interfaces or generics.** Use named functions, func-typed values of
-   named functions, `switch`, and concrete types.
+6. **No closures, method values, interfaces or generic types.** Use named functions, func-typed
+   values of named functions, `switch`, and concrete types. For code that works on several types,
+   a function's parameters can be `anytype` (§4): each call makes a copy for its argument types.
 7. **`go` only starts a `task`:** `task f(args) pool N { ... }`. Tasks have no results. Arguments to
    `go` and values sent on channels must not reference stack or arena memory.
 8. **Errors are values with a static message:** `const ErrX = error(404, "not found")`. They can't
@@ -107,8 +108,8 @@ arena ...
 | `chan T` | channel view (no direction types) |
 | `*T`, `struct{...}`, `func(...) ...` | as Go. A func value can only be a named top-level function |
 
-Not supported: interfaces, generics, complex numbers, type aliases, embedded fields, local type
-declarations, directional channel types.
+Not supported: interfaces, generic types (functions can take `anytype` parameters, §4), complex
+numbers, type aliases, embedded fields, local type declarations, directional channel types.
 
 ### Storage and views
 
@@ -201,6 +202,26 @@ extern "slow_query" func query(q string) int stack 128K blocking // runs on a he
 - While a goroutine waits or runs elsewhere, others on its thread run, so C state they share
   needs a lock: the runtime's `sq_gmutex` (in `sq_rt.h`) parks waiting goroutines instead of
   blocking the thread.
+
+### anytype parameters
+
+```go
+func Slice(s anytype, less anytype) { ... }  // sort.Slice(entries, byCount)
+func WriteString(w anytype, s string) { ... } // json.WriteString(&buf, s), json.WriteString(w, s)
+```
+
+A parameter of type `anytype` takes its type from each call, as in Zig: the compiler makes a copy
+of the function for each combination of argument types it is called with (an instance), and
+checks, proves and compiles each copy like any other function. The body may use the parameter
+however its type allows (index it, call it, call its methods); a type that doesn't fit is an error
+at the call, reported where the body uses it, with the instance named ("in sort.Slice with
+s []main.Entry, called at main.go:40"). Nothing happens at run time and nothing is boxed; each
+instance is code, as if written by hand for those types. Storage passed as `anytype` (a map or
+channel with `cap`) becomes its view, and untyped constants their default type.
+
+Only plain functions take `anytype` parameters (not methods, tasks or externs), not as their
+variadic parameter, and results have ordinary types. A function with `anytype` parameters can only
+be called, not used as a value.
 
 ### Provenance (optional)
 
@@ -396,6 +417,9 @@ must not outlive the memory it points to:
 | `shared var X: T can't be shared` | share numbers, strings, bools, errors or arrays/structs of them; keep everything else per thread |
 | `a shared channel's elements can't hold references` | send an index, ID or fixed-size array instead of a string or slice |
 | `time.After can only be used as a select case` | `select { case <-time.After(d): ... }`; to just wait, `time.Sleep(d)` |
+| `anytype is only allowed as the type of a function's parameter` | make the function take it as a parameter; results, variables and fields have concrete types |
+| `F has anytype parameters: it can only be called` | wrap the call in a named function with concrete parameter types, and pass that |
+| `... (in pkg.F with x T, called at file:line)` | the error is in F's body for that argument type: pass a type that supports what F does with it |
 | `only tasks can be preemptible` | mark the task the work runs in; functions it calls yield too |
 | `only extern functions can be blocking` | drop `blocking`; squark code waits by parking already (channels, I/O, sleeps) |
 | `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (error constants, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |

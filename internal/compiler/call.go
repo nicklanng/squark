@@ -85,6 +85,19 @@ func (c *Checker) call(e *CallExpr) {
 			return
 		}
 	}
+	var pre []bool // arguments instantiate has checked
+	if e.Callee != nil && e.Callee.Generic {
+		inst, checked := c.instantiate(e)
+		if inst == nil {
+			c.invalid(e)
+			return
+		}
+		e.Callee, sig, pre = inst, inst.Sig, checked
+		e.Fun.info().T = inst.Sig // code generation reads the callee's types from here
+		if se, ok := unparen(e.Fun).(*SelectorExpr); ok {
+			se.Sel.T = inst.Sig
+		}
+	}
 	if isTimeAfter(e.Callee) && e != c.afterCall {
 		c.errorf(e.P, "time.After can only be used as a select case (case <-time.After(d):): it has no channel to return")
 	}
@@ -99,7 +112,14 @@ func (c *Checker) call(e *CallExpr) {
 	} else {
 		owner.Indirect = append(owner.Indirect, sig)
 	}
-	c.args(e, sig)
+	if pre != nil {
+		for i, a := range e.Args {
+			c.checkArg(a, sig.Params, i, sig, e, pre[i])
+		}
+		c.arity(e, sig, len(e.Args))
+	} else {
+		c.args(e, sig)
+	}
 	switch len(sig.Results) {
 	case 0:
 		e.T, e.Mode = tInvalid, ModeNoValue

@@ -1,0 +1,17 @@
+package main
+
+var x anytype // ERROR "anytype is only allowed as the type of a function's parameter"
+
+func ret() anytype { // ERROR "anytype is only allowed as the type of a function's parameter"
+	return 0
+}
+
+type T struct{}
+
+func (t T) m(a anytype) {} // ERROR "anytype is only allowed as the type of a function's parameter"
+
+task tk(a anytype) pool 1 {} // ERROR "anytype is only allowed as the type of a function's parameter"
+
+func many(xs ...anytype) {} // ERROR "a variadic parameter can't be anytype"
+
+func main() {}

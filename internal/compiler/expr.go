@@ -354,6 +354,10 @@ func (c *Checker) ident(e *Ident) {
 		if c.calleeIdent == e {
 			return
 		}
+		if o.Func.Generic {
+			c.errorf(e.P, "%s has anytype parameters: it can only be called (each call makes a copy for its argument types)", e.Name)
+			return
+		}
 		o.Func.AddrTaken = true
 		if o.Func.Extern != "" {
 			c.errorf(e.P, "cannot take the value of extern function %s", e.Name)
@@ -739,7 +743,9 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 				e.T, e.Mode = obj.Type, ModeType
 			case ObjFunc:
 				e.T, e.Mode = obj.Func.Sig, ModeValue
-				if !callee {
+				if !callee && obj.Func.Generic {
+					c.errorf(e.Sel.P, "%s has anytype parameters: it can only be called (each call makes a copy for its argument types)", exprString(e))
+				} else if !callee {
 					obj.Func.AddrTaken = true
 					if obj.Func.Extern != "" {
 						c.errorf(e.Sel.P, "cannot take the value of extern function %s", exprString(e))

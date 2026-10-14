@@ -1,0 +1,54 @@
+// Package sort sorts slices of any element type in place. less(a, b) reports whether a goes
+// before b. Heap sort: O(n log n) comparisons, no extra memory, no recursion; not stable (equal
+// elements may change order).
+package sort
+
+// Slice sorts s ([]T for any T) by less (a func(a, b T) bool).
+func Slice(s anytype, less anytype) {
+	n := len(s)
+	for start := n/2 - 1; start >= 0; start-- {
+		siftDown(s, less, start, n)
+	}
+	for end := n - 1; end > 0; end-- {
+		s[0], s[end] = s[end], s[0]
+		siftDown(s, less, 0, end)
+	}
+}
+
+// siftDown restores the max-heap below root in s[:n].
+func siftDown(s anytype, less anytype, root, n int) {
+	for {
+		child := 2*root + 1
+		if child >= n {
+			return
+		}
+		if child+1 < n && less(s[child], s[child+1]) {
+			child++
+		}
+		if !less(s[root], s[child]) {
+			return
+		}
+		s[root], s[child] = s[child], s[root]
+		root = child
+	}
+}
+
+// IsSorted reports whether s is sorted by less.
+func IsSorted(s anytype, less anytype) bool {
+	for i := 1; i < len(s); i++ {
+		if less(s[i], s[i-1]) {
+			return false
+		}
+	}
+	return true
+}
+
+func intLess(a, b int) bool { return a < b }
+
+func stringLess(a, b string) bool { return a < b }
+
+// Ints sorts s in increasing order.
+func Ints(s []int) { Slice(s, intLess) }
+
+// Strings sorts s in increasing order.
+func Strings(s []string) { Slice(s, stringLess) }

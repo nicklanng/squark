@@ -44,6 +44,24 @@ func Atoi(s string) (int, error)
 func ParseInt(s string, base int) (int, error)
 func ParseBool(s string) (bool, error)
 
+package strings
+
+func HasPrefix(s string, prefix string) bool
+func HasSuffix(s string, suffix string) bool
+func IndexByte(s string, c byte) int
+func LastIndexByte(s string, c byte) int
+func Index(s string, sep string) int
+func Contains(s string, substr string) bool
+func TrimSpace(s string) string from s
+func TrimPrefix(s string, prefix string) string from s
+func TrimSuffix(s string, suffix string) string from s
+func Cut(s string, sep string) (string, string, bool) from s
+func EqualFold(a string, b string) bool
+func AppendLower(dst []byte, s string) []byte from dst
+func Split(s string into out, sep string, out []string) []string from out
+func Fields(s string into out, out []string) []string from out
+func Count(s string, sub string) int
+
 package bytes
 
 type Buffer struct {
@@ -107,24 +125,6 @@ func Open(path string) (os.File, error)
 func Create(path string) (os.File, error)
 func OpenFile(path string, flag int, perm int) (os.File, error)
 func FromFd(fd int) os.File
-
-package strings
-
-func HasPrefix(s string, prefix string) bool
-func HasSuffix(s string, suffix string) bool
-func IndexByte(s string, c byte) int
-func LastIndexByte(s string, c byte) int
-func Index(s string, sep string) int
-func Contains(s string, substr string) bool
-func TrimSpace(s string) string from s
-func TrimPrefix(s string, prefix string) string from s
-func TrimSuffix(s string, suffix string) string from s
-func Cut(s string, sep string) (string, string, bool) from s
-func EqualFold(a string, b string) bool
-func AppendLower(dst []byte, s string) []byte from dst
-func Split(s string into out, sep string, out []string) []string from out
-func Fields(s string into out, out []string) []string from out
-func Count(s string, sub string) int
 
 package time
 
@@ -256,6 +256,7 @@ func (d *json.Decoder) Skip() bool
 func (d *json.Decoder) End() bool
 
 func AppendString(dst []byte, s string) []byte from dst
+func WriteString(w anytype, s string)
 func AppendInt(dst []byte, v int) []byte from dst
 func AppendBool(dst []byte, v bool) []byte from dst
 func NewDecoder(data []byte) json.Decoder from data
@@ -265,6 +266,13 @@ package runtime
 extern func Shard() int stack 1024
 extern func Shards() int stack 1024
 extern func Gosched() stack 1024
+
+package sort
+
+func Slice(s anytype, less anytype)
+func IsSorted(s anytype, less anytype) bool
+func Ints(s []int)
+func Strings(s []string)
 
 package sqlite
 

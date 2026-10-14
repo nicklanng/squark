@@ -48,6 +48,7 @@ type Package struct {
 	Imports []*Package
 
 	Funcs   []*Func
+	Generics []*Func // functions with anytype parameters (templates; their instances are in Funcs)
 	Globals []*Var
 	GlobalInits []*ValueSpec
 	Types   []*Named
