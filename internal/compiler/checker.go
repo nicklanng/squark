@@ -166,7 +166,7 @@ func (c *Checker) collect(pkg *Package) {
 				case VAR:
 					for _, vs := range d.Values {
 						for _, name := range vs.Names {
-							v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg}
+							v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, Shared: d.Shared, ReadOnly: d.Shared}
 							o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f}
 							v.Obj = o
 							name.Obj = o
@@ -308,7 +308,7 @@ func isErrorConstExpr(x Expr) bool {
 		return e.Builtin == "__error" || isErrorCall(e)
 	}
 	v := readOnlyVar(x)
-	return v != nil && v.ArenaSize == 0
+	return v != nil && v.ArenaSize == 0 && !v.Shared
 }
 
 func isErrorCall(e *CallExpr) bool {
@@ -622,6 +622,11 @@ func (c *Checker) globalVarSpec(vs *ValueSpec) {
 		}
 		if n.Obj.Var.ConstData {
 			c.checkConstData(n.Name, x)
+		}
+		if n.Obj.Var.Shared {
+			if bad := constDataType(t, map[Type]bool{}); bad != nil && t != tInvalid {
+				c.errorf(x.Pos(), "shared var %s: %s can't be shared (only numbers, strings, bools, errors and arrays or structs of them: nothing a shared value points to could be kept read-only)", n.Name, bad)
+			}
 		}
 		n.Obj.Var.Type = t
 		n.Obj.Type = t

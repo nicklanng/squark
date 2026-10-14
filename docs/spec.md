@@ -40,6 +40,7 @@ current.
 - **Contextual words** (identifiers elsewhere):
   - `pool` and `stack` after a signature.
   - `from` and `static` after results.
+  - `shared` before a package-level `var`.
   - `static` before a parameter type, and `into` after one.
   - `cap` after a `map`/`chan` type.
   - `budget`, `pool`, `workers`, `threads`, `link`, `cflags` and `ldflags` as top-level directives.
@@ -223,6 +224,19 @@ Both are read-only data in the binary, shared by every scheduler thread (`thread
 indexing, ranging and copying them work as for variables; assigning to them or their elements,
 taking their address, slicing them and calling pointer methods on them are errors. Copy into a
 variable first (`t := primes`) to get something writable.
+
+For data computed when the program starts, `shared var` declares one copy for all scheduler
+threads:
+
+```go
+shared var crcTable = makeTable()   // may call functions, read files, query SQLite
+```
+
+Its initializer runs once, on the first scheduler thread and in order with the other package
+initializers, before any other thread starts. Afterwards it is read-only, with the same rules as
+constants. Its type is limited to numbers, strings, bools, errors and arrays or structs of them,
+because nothing a shared slice, map or pointer refers to could be kept read-only. A plain `var` is
+one copy per scheduler thread.
 
 ## 5. Expressions
 

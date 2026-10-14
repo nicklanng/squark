@@ -53,19 +53,20 @@ type gen struct {
 	nextLbl  int
 	file     string
 
-	goSites      strings.Builder // trampolines
-	pools        map[*Func]*PoolInfo
-	poolOrder    []*PoolInfo
-	globals      strings.Builder // members of struct sq_globals: package variables, one copy per shard
-	statics      strings.Builder // members for storage hoisted from package-level initializers
-	staticNames  []string        // their names, macro'd to sq_gl-> inside the init function only
-	arenaInits   strings.Builder
-	constGlobals strings.Builder // error constants: static const, shared by all shards
-	constInit    map[*Var]Expr   // constants' initializers
-	constC       map[*Var]string // their C values, inlined where one constant's initializer uses
+	goSites       strings.Builder // trampolines
+	pools         map[*Func]*PoolInfo
+	poolOrder     []*PoolInfo
+	globals       strings.Builder // members of struct sq_globals: package variables, one copy per shard
+	statics       strings.Builder // members for storage hoisted from package-level initializers
+	staticNames   []string        // their names, macro'd to sq_gl-> inside the init function only
+	arenaInits    strings.Builder
+	constGlobals  strings.Builder // error constants: static const, shared by all shards
+	sharedGlobals strings.Builder // shared vars: one static copy, set before the other shards start
+	constInit     map[*Var]Expr   // constants' initializers
+	constC        map[*Var]string // their C values, inlined where one constant's initializer uses
 	// another (a const variable isn't a constant expression in C); functions read them by name
 	inConstInit bool
-	usesGlobals  bool            // the function being generated reads or writes a package variable
+	usesGlobals bool // the function being generated reads or writes a package variable
 }
 
 // constValue returns a constant's C value (computed once).
@@ -153,7 +154,7 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 	for _, p := range prog.Packages {
 		for _, vs := range p.GlobalInits {
 			for i, n := range vs.Names {
-				if v := n.Obj.Var; v != nil && v.ReadOnly && v.ArenaSize == 0 && i < len(vs.Values) {
+				if v := n.Obj.Var; v != nil && v.ReadOnly && v.ArenaSize == 0 && !v.Shared && i < len(vs.Values) {
 					constInit[v] = vs.Values[i]
 				}
 			}
@@ -175,6 +176,12 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 				v.CName = member
 				_ = x
 				fmt.Fprintf(&g.constGlobals, "static const %s = %s;\n", g.decl(v.Type, member), g.constValue(v))
+				continue
+			}
+			if v.Shared {
+				// one copy for every shard, set by shard 0 before the others start
+				v.CName = member
+				fmt.Fprintf(&g.sharedGlobals, "static %s;\n", g.decl(v.Type, member))
 				continue
 			}
 			v.CName = "sq_gl->" + member
@@ -208,8 +215,9 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 			fmt.Fprintf(&b, "extern sq_pool %s;\n", p.CName)
 		}
 	}
-	b.WriteString("\n// error constants: shared by all shards\n")
+	b.WriteString("\n// constants and shared vars: one copy for all shards\n")
 	b.WriteString(g.constGlobals.String())
+	b.WriteString(g.sharedGlobals.String())
 	b.WriteString("\n// package variables: one copy per shard (scheduler thread)\nstruct sq_globals {\n")
 	b.WriteString(g.globals.String())
 	b.WriteString(g.statics.String())
@@ -224,7 +232,8 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 	b.WriteString(funcs.String())
 	b.WriteString(initFn)
 	mainName := prog.MainFunc.CName
-	fmt.Fprintf(&b, "\nvoid sq_program_main(void *args) {\n\t(void)args;\n\tsq_init_globals();\n\t%s();\n}\n", mainName)
+	// shard 0 initializes first (including shared vars), then the other shards start (threads N)
+	fmt.Fprintf(&b, "\nvoid sq_program_main(void *args) {\n\t(void)args;\n\tbool first = sq_shard_id() == 0;\n\tsq_init_globals(first);\n\tif (first) sq_start_shards();\n\t%s();\n}\n", mainName)
 	return &Output{MainC: b.String(), Pools: g.poolOrder}, nil
 }
 
@@ -804,8 +813,12 @@ func (g *gen) initFunction() string {
 			}
 			for i, x := range vs.Values {
 				v := vs.Names[i].Obj.Var
-				if !strings.HasPrefix(v.CName, "sq_gl->") && v.ArenaSize == 0 {
-					continue // an error constant, initialized statically
+				if !strings.HasPrefix(v.CName, "sq_gl->") && v.ArenaSize == 0 && !v.Shared {
+					continue // a constant, initialized statically
+				}
+				if v.Shared {
+					g.line("if (first) { // shared var: set once, on shard 0, before the others start")
+					g.ind++
 				}
 				g.lineDirective(x.Pos())
 				g.hoisted = nil
@@ -818,6 +831,10 @@ func (g *gen) initFunction() string {
 				}
 				g.hoisted = nil
 				g.line("%s = %s;", v.CName, val)
+				if v.Shared {
+					g.ind--
+					g.line("}")
+				}
 			}
 		}
 	}
@@ -825,7 +842,7 @@ func (g *gen) initFunction() string {
 	for _, n := range g.staticNames {
 		fmt.Fprintf(&b, "#define %s (sq_gl->%s)\n", n, n)
 	}
-	b.WriteString("\nstatic void sq_init_globals(void) {\n\tstruct sq_globals *const sq_gl = sq_globals_self;\n")
+	b.WriteString("\nstatic void sq_init_globals(bool first) {\n\tstruct sq_globals *const sq_gl = sq_globals_self;\n\t(void)first;\n")
 	b.WriteString(g.arenaInits.String())
 	b.WriteString(body.String())
 	b.WriteString("}\n")

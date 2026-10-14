@@ -191,6 +191,8 @@ extern int64_t sq_shard_count;     // scheduler threads in this process
 extern const int64_t sq_threads;   // threads N (0: one per core)
 extern const size_t sq_globals_size; // generated: one shard's package variables
 void sq_globals_set(void *p);        // generated: point this thread at a shard's package variables
+int64_t sq_shard_id(void);
+void sq_start_shards(void);          // shard 0, once its package variables (and shared vars) are set
 void sq_program_main(void *args);
 
 #endif

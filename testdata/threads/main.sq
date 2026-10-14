@@ -15,11 +15,17 @@ threads 4
 
 var served int
 
+// read by every shard: TestThreadsRace checks the reads don't race with its initialization
+shared var greeting = "shard"
+
 func handle(w *http.ResponseWriter, r *http.Request) {
 	if r.Path == "/crash" {
 		panic("crash requested")
 	}
 	served++
+	if len(greeting) != 5 {
+		panic("shared var not initialized")
+	}
 	var b [48]byte
 	out := strconv.AppendInt(b[:0], runtime.Shard())
 	out = append(out, ':')

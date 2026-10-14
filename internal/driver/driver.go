@@ -208,7 +208,7 @@ func Build(opt Options) (*Result, error) {
 	// functions that run only on a scheduler thread's own stack (or the signal stack), never on a
 	// goroutine's: their frames don't count against goroutine stacks
 	schedulerOnly := map[string]bool{"main": true, "schedule": true, "on_fault": true, "netpoll": true,
-		"shard_run": true, "shard_thread": true, "shard_new": true, "run_workers": true, "fire_timers": true}
+		"shard_run": true, "shard_thread": true, "shard_new": true, "start_shards": true, "run_workers": true, "fire_timers": true}
 	for name, sz := range rtFrames {
 		if schedulerOnly[name] {
 			continue

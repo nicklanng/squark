@@ -154,6 +154,7 @@ typedef struct sq_shard {
 	time_t date_cached_at;
 	int64_t id;        // 0 .. sq_shard_count-1
 	bool main_done;    // this shard's main has returned; it keeps serving its other goroutines
+	bool start_pending; // shard 0: start the other shards from the scheduler's stack
 	struct {
 		int fd;
 		int entry; // in listen_table
@@ -1373,6 +1374,8 @@ int64_t sq_httpdate(sq_bytes dst) {
 }
 
 static void listener_closed(int fd);
+static void start_shards(void);
+static void *shard_thread(void *arg);
 
 int64_t sq_close(int64_t fd) {
 	if (fd >= 0 && fd < (int64_t)sizeof sq_self->fd_read_kind) sq_self->fd_read_kind[fd] = 0; // the number may be reused
@@ -1660,6 +1663,10 @@ static void schedule(void) {
 			TSAN_SWITCH(g->tsan_fiber);
 			sq_ctx_switch(&sq_self->sched_ctx, &g->ctx);
 			sq_self->cur_g = NULL;
+			if (sq_self->start_pending) {
+				sq_self->start_pending = false;
+				start_shards();
+			}
 			if (g->state == G_DEAD) {
 				if (g->pool->index == sq_main_pool.index) {
 					sq_flush();
@@ -1893,6 +1900,31 @@ static void shard_run(void) {
 	schedule();
 }
 
+// start_shards creates shards 1..n-1 (on shard 0's scheduler stack).
+static void start_shards(void) {
+	for (int64_t i = 1; i < sq_shard_count; i++) {
+		pthread_t t;
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+		sq_shard *s = shard_new();
+		s->id = i;
+		if (pthread_create(&t, &attr, shard_thread, s) != 0) {
+			err_write("fatal error: cannot start scheduler threads\n");
+			_exit(2);
+		}
+		pthread_attr_destroy(&attr);
+	}
+}
+
+// sq_start_shards is called by shard 0's main goroutine once package variables and shared vars
+// are initialized: everything it wrote is visible to the new threads (pthread_create orders it).
+void sq_start_shards(void) {
+	if (sq_shard_count <= 1) return;
+	sq_self->start_pending = true;
+	sq_gosched(); // the scheduler creates the threads on its own stack, then resumes us
+}
+
 static void *shard_thread(void *arg) {
 	sq_self = arg;
 	sq_globals_set(sq_self->globals);
@@ -1926,19 +1958,6 @@ int main(int argc, char **argv) {
 	atomic_store(&live_shards, n);
 	sq_self->sigstack = sq_sigstack; // shard 0 runs on this thread, with the static copies
 	sq_self->sigstack_size = sizeof sq_sigstack;
-	for (int64_t i = 1; i < n; i++) {
-		pthread_t t;
-		pthread_attr_t attr;
-		pthread_attr_init(&attr);
-		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-		sq_shard *s = shard_new();
-		s->id = i;
-		if (pthread_create(&t, &attr, shard_thread, s) != 0) {
-			err_write("fatal error: cannot start scheduler threads\n");
-			_exit(2);
-		}
-		pthread_attr_destroy(&attr);
-	}
-	shard_run();
+	shard_run(); // the other shards start once shard 0 has initialized (sq_start_shards)
 	return 0;
 }

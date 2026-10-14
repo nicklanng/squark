@@ -111,11 +111,15 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
       shard (same machinery as error constants). Writes, `&`, slicing and pointer-method calls on
       them (or their elements/fields) are errors. Done: `testdata/run/const_composite.sq`,
       `testdata/errors/const_composite.sq`, `const_data.sq`; builds with clang and gcc.
-- [ ] 2.8b `shared var x = expr`: initialized once, on shard 0 in its main goroutine (so the
+- [x] 2.8b `shared var x = expr`: initialized once, on shard 0 in its main goroutine (so the
       initializer may do I/O) before the other shards start; read-only afterwards with the same
       rules as constants. Types limited to what can't be written through (numbers, strings, bools,
       errors, arrays and structs of them), since there's no way to freeze what a slice or pointer
-      points to.
+      points to. — done: shared vars are one static copy;
+      `sq_program_main` initializes shard 0 (shared vars guarded by `first`), then
+      `sq_start_shards` has shard 0's scheduler create the other threads. Tests:
+      `testdata/run/shared_var.sq` (fails if shards start before init), error tests, and
+      `TestThreadsRace` now reads a shared var from every shard.
 - [ ] 2.9 Cross-shard channels.
 
 **Done when** one process uses every core with no data races by construction, and matches or
@@ -152,3 +156,4 @@ first thing to consider instead.
 - 2026-10-14: 2.2 done.
 - 2026-10-14: 2.3–2.7 done; 2.6b (TSan) done after. Next: 2.8 shared immutable data, 2.9 cross-shard
   channels.
+- 2026-10-14: 2.8a (constant composites) and 2.8b (shared var) done. Next: 2.9 cross-shard channels.

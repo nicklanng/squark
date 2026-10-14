@@ -1421,6 +1421,9 @@ var _ = strconv.Itoa
 
 // constWhat says why x is read-only: "it is a constant", or "T is a constant" for part of T.
 func constWhat(x, root Expr) string {
+	if v := readOnlyVar(root); v != nil && v.Shared {
+		return exprString(root) + " is a shared var, read-only after initialization"
+	}
 	if unparen(x) == unparen(root) {
 		return "it is a constant"
 	}

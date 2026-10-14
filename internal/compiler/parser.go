@@ -117,6 +117,17 @@ func (p *parser) file(path string) *File {
 	}
 	for p.tok.tok != EOF {
 		if p.tok.tok == IDENT {
+			if p.tok.lit == "shared" && p.peek().tok == VAR {
+				// shared var x = expr: one copy for all scheduler threads, read-only after init
+				pragmas := p.tok.pragmas
+				p.next()
+				d := p.genDecl()
+				d.Shared = true
+				d.Pragmas = pragmas
+				p.semi()
+				f.Decls = append(f.Decls, d)
+				continue
+			}
 			switch p.tok.lit {
 			case "budget", "link", "cflags", "ldflags", "pool", "workers", "threads":
 				d := &Directive{Name: p.tok.lit, P: p.tok.pos}
