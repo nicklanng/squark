@@ -1,0 +1,20 @@
+jobs: 48 sorted: true
+per kind: 16 16 16
+primes below 8000000 = 539777
+  job  1 primes   41538
+  job  4 primes   36960
+  job 46 primes   31516
+  job  2 checksum 0xfb02ca3c
+  job  5 checksum 0x3b79ce76
+  job 47 checksum 0x45694566
+  job  3 fetch    0x4641a512
+  job  6 fetch    0x67e611ac
+  job 48 fetch    0x884bc387
+largest checksums:
+  job  2 checksum 0xfb02ca3c
+  job 14 checksum 0xf5f6a967
+  job 20 checksum 0xeedb5acf
+combined: 5e99930f
+jobs overlapped (busy time > wall time): true
+every job handled once: true
+threads used > 1: true

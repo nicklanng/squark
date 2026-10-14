@@ -1,0 +1,473 @@
+// jsonq reads a JSON array of orders and prints a report: totals per customer, the best-selling
+// items, counts by status, and the large settled orders re-emitted as JSON.
+//
+//	jsonq [FILE]     (with no FILE it reads a built-in dataset that includes bad records)
+//
+// It shows the json pull decoder, an arena holding every decoded string and item slice (no
+// heap), error values with codes and `try`, sort.Slice with anytype, and JSON encoding with
+// json.WriteString and json.AppendInt. Bad records are reported by record and line, and skipped.
+package main
+
+import (
+	"bytes"
+	"io"
+	"json"
+	"os"
+	"sort"
+	"strconv"
+	"utf8"
+)
+
+const (
+	maxInput  = 64K
+	maxOrders = 512
+	maxItems  = 16   // per order
+	maxKeys   = 256  // distinct customers, distinct SKUs
+	bigOrder  = 1500 // cents: settled orders at least this large are re-emitted as JSON
+)
+
+const (
+	ErrNotArray  = error(100, "input is not a JSON array")
+	ErrTruncated = error(101, "input ends inside the array")
+	ErrTrailing  = error(102, "data after the closing ]")
+	ErrNotObject = error(103, "record is not an object")
+	ErrNoID      = error(104, "missing or non-positive id")
+	ErrDupID     = error(105, "duplicate id")
+	ErrNoName    = error(106, "missing customer")
+	ErrNoItems   = error(107, "order has no items")
+	ErrBadQty    = error(108, "item quantity must be positive")
+	ErrBadPrice  = error(109, "item price must not be negative")
+	ErrBadStatus = error(110, "unknown status")
+	ErrTooLarge  = error(111, "input larger than 64K")
+	ErrTooMany   = error(112, "too many orders")
+	ErrManyItems = error(113, "too many items in one order")
+	ErrManyKeys  = error(114, "too many distinct customers or SKUs")
+)
+
+const statuses = [4]string{"paid", "pending", "shipped", "refunded"}
+
+type Item struct {
+	SKU   string
+	Qty   int
+	Price int // cents
+}
+
+type Order struct {
+	ID       int
+	Customer string
+	Status   int // index into statuses
+	Items    []Item
+}
+
+func (o *Order) Total() int {
+	t := 0
+	for _, it := range o.Items {
+		t += it.Qty * it.Price
+	}
+	return t
+}
+
+// ---- splitting the array into records ----
+
+// scanner hands out the top-level array's elements one at a time, so that a bad record can be
+// reported with its line and skipped: a json.Decoder stops at its first error.
+type scanner struct {
+	data      []byte
+	pos, line int
+}
+
+func (s *scanner) space() {
+	for ; s.pos < len(s.data); s.pos++ {
+		switch s.data[s.pos] {
+		case '\n':
+			s.line++
+		case ' ', '\t', '\r':
+		default:
+			return
+		}
+	}
+}
+
+// next returns the next element and the line it starts on, or ok == false after the final ']'.
+func (s *scanner) next() (rec []byte, line int, ok bool, err error) {
+	s.space()
+	line = s.line
+	if s.pos < len(s.data) && s.data[s.pos] == ']' {
+		s.pos++
+		s.space()
+		if s.pos < len(s.data) {
+			return nil, s.line, false, ErrTrailing
+		}
+		return nil, line, false, nil
+	}
+	start, depth, inStr := s.pos, 0, false
+	for ; s.pos < len(s.data); s.pos++ {
+		c := s.data[s.pos]
+		switch {
+		case c == '\n':
+			s.line++
+		case inStr && c == '\\':
+			s.pos++
+		case c == '"':
+			inStr = !inStr
+		case inStr:
+		case c == '{' || c == '[':
+			depth++
+		case c == '}' || c == ']':
+			depth--
+		}
+		if depth < 0 || depth == 0 && !inStr && c == ',' {
+			break
+		}
+	}
+	if s.pos >= len(s.data) {
+		return nil, line, false, ErrTruncated
+	}
+	rec = s.data[start:s.pos]
+	if s.data[s.pos] == ',' {
+		s.pos++
+	}
+	return rec, line, true, nil
+}
+
+// ---- decoding one record ----
+
+// number and text turn the decoder's (value, ok) results into (value, error) for try.
+func number(d *json.Decoder) (int, error) {
+	n, ok := d.Int()
+	if !ok {
+		return 0, d.Err
+	}
+	return n, nil
+}
+
+// text decodes a string into scratch and copies it into the arena.
+func text(d *json.Decoder, scratch []byte, a arena) (string, error) {
+	s, ok := d.String(scratch)
+	if !ok {
+		return "", d.Err
+	}
+	return string([]byte(s) in a), nil // string(s) in a would not copy: s is already a string
+}
+
+func decodeItem(d *json.Decoder, a arena) (Item, error) {
+	var it Item
+	var key, scratch [64]byte
+	if !d.BeginObject() {
+		return it, ErrNotObject
+	}
+	for {
+		k, ok := d.Field(key[:])
+		if !ok {
+			break
+		}
+		switch k {
+		case "sku":
+			it.SKU = try text(d, scratch[:], a)
+		case "qty":
+			it.Qty = try number(d)
+		case "price":
+			it.Price = try number(d)
+		default:
+			d.Skip()
+		}
+	}
+	return it, d.Err
+}
+
+func decodeOrder(rec []byte, a arena) (Order, error) {
+	o := Order{Status: -1}
+	var key, scratch [64]byte
+	d := json.NewDecoder(rec)
+	if !d.BeginObject() {
+		return o, ErrNotObject
+	}
+	for {
+		k, ok := d.Field(key[:])
+		if !ok {
+			break
+		}
+		switch k {
+		case "id":
+			o.ID = try number(&d)
+		case "customer":
+			o.Customer = try text(&d, scratch[:], a)
+		case "status":
+			s, _ := d.String(scratch[:]) // compared, not kept: no copy needed
+			o.Status = statusIndex(s)
+		case "items":
+			if !d.BeginArray() {
+				return o, d.Err
+			}
+			// collect the items on the stack, then copy them into the arena at their exact size
+			// (append(o.Items, it) in a would leave each outgrown slice behind in the arena)
+			var items [..maxItems]Item
+			for d.More() {
+				if !items.TryPush(try decodeItem(&d, a)) {
+					return o, ErrManyItems
+				}
+			}
+			o.Items = make([]Item, len(items)) in a
+			copy(o.Items, items[:])
+		default:
+			d.Skip()
+		}
+	}
+	if !d.End() {
+		return o, d.Err
+	}
+	return o, nil
+}
+
+func statusIndex(s string) int {
+	for i, name := range statuses {
+		if s == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func validate(o *Order, seen map[int]bool) error {
+	switch {
+	case o.ID <= 0:
+		return ErrNoID
+	case seen[o.ID]:
+		return ErrDupID
+	case o.Customer == "":
+		return ErrNoName
+	case len(o.Items) == 0:
+		return ErrNoItems
+	case o.Status < 0:
+		return ErrBadStatus
+	}
+	for _, it := range o.Items {
+		if it.Qty <= 0 {
+			return ErrBadQty
+		}
+		if it.Price < 0 {
+			return ErrBadPrice
+		}
+	}
+	return nil
+}
+
+// ---- the report ----
+
+type Tally struct {
+	Key    string
+	Count  int // orders (for customers) or units (for items)
+	Amount int // cents
+}
+
+func byAmount(a, b Tally) bool {
+	if a.Amount != b.Amount {
+		return a.Amount > b.Amount
+	}
+	return a.Key < b.Key
+}
+
+func byCount(a, b Tally) bool {
+	if a.Count != b.Count {
+		return a.Count > b.Count
+	}
+	return a.Key < b.Key
+}
+
+// add adds to key's tally in v, creating it if index doesn't have it yet.
+func add(v *[..maxKeys]Tally, index map[string]int, key string, count, amount int) error {
+	i, ok := index[key]
+	if !ok {
+		i = len(*v)
+		if !(*v).TryPush(Tally{Key: key}) { // v.TryPush and v[i] don't work through a pointer
+			return ErrManyKeys
+		}
+		index[key] = i
+	}
+	(*v)[i].Count += count
+	(*v)[i].Amount += amount
+	return nil
+}
+
+func appendCents(dst []byte, c int) []byte {
+	dst = strconv.AppendInt(append(dst, '$'), c/100)
+	return append(dst, '.', byte('0'+c/10%10), byte('0'+c%10))
+}
+
+// appendPadded appends s padded with spaces to width characters (not bytes).
+func appendPadded(dst []byte, s string, width int) []byte {
+	dst = append(dst, s...)
+	for i := utf8.RuneCountInString(s); i < width; i++ {
+		dst = append(dst, ' ')
+	}
+	return dst
+}
+
+func printTallies(title string, ts []Tally, unit string) {
+	println(title)
+	var line [128]byte
+	for _, t := range ts {
+		out := appendPadded(append(line[:0], "  "...), t.Key, 14)
+		out = appendPadded(strconv.AppendInt(out, t.Count), unit, 9)
+		os.Stdout.Write(append(appendCents(out, t.Amount), '\n'))
+	}
+}
+
+// emitJSON writes the settled orders of at least bigOrder cents as a JSON array.
+func emitJSON(orders []Order) {
+	var store [4K]byte
+	var num [24]byte
+	b := bytes.NewBuffer(store[:0])
+	b.WriteByte('[')
+	n := 0
+	for i := range orders {
+		o := &orders[i]
+		if s := statuses[o.Status]; s != "paid" && s != "shipped" || o.Total() < bigOrder {
+			continue
+		}
+		if n++; n > 1 {
+			b.WriteByte(',')
+		}
+		b.WriteString("\n  {\"id\":")
+		b.Write(json.AppendInt(num[:0], o.ID))
+		b.WriteString(",\"customer\":")
+		json.WriteString(&b, o.Customer)
+		b.WriteString(",\"skus\":[")
+		for j, it := range o.Items {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			json.WriteString(&b, it.SKU)
+		}
+		b.WriteString("],\"total\":")
+		b.Write(json.AppendInt(num[:0], o.Total()))
+		b.WriteByte('}')
+	}
+	b.WriteString("\n]\n")
+	os.Stdout.Write(b.Bytes())
+}
+
+func reject(n, line int, err error) {
+	var msg [128]byte
+	out := strconv.AppendInt(append(msg[:0], "record "...), n)
+	out = strconv.AppendInt(append(out, " (line "...), line)
+	out = append(append(out, "): "...), err.Error()...)
+	out = strconv.AppendInt(append(out, " [code "...), err.Code())
+	os.Stdout.Write(append(out, "]\n"...))
+}
+
+func report(data []byte, a arena) error {
+	s := scanner{data: data, line: 1}
+	if s.space(); s.pos >= len(data) || data[s.pos] != '[' {
+		return ErrNotArray
+	}
+	s.pos++
+	var orders [..maxOrders]Order
+	var seen map[int]bool cap maxOrders
+	bad := 0
+	for n := 1; ; n++ {
+		rec, line, ok, err := s.next()
+		if err == nil && ok {
+			var o Order
+			if o, err = decodeOrder(rec, a); err == nil {
+				if err = validate(&o, seen); err == nil {
+					if !orders.TryPush(o) {
+						return ErrTooMany
+					}
+					seen[o.ID] = true
+					continue
+				}
+			}
+		}
+		if err == nil {
+			break
+		}
+		reject(n, line, err)
+		bad++
+		if !ok {
+			break // the array itself is broken: report what was read so far
+		}
+	}
+	println(len(orders), "orders accepted,", bad, "rejected")
+	println()
+
+	var customers, items [..maxKeys]Tally
+	var custIndex, skuIndex map[string]int cap maxKeys
+	var byStatus [len(statuses)]int
+	for i := range orders {
+		o := &orders[i]
+		try add(&customers, custIndex, o.Customer, 1, o.Total())
+		byStatus[o.Status]++
+		for _, it := range o.Items {
+			try add(&items, skuIndex, it.SKU, it.Qty, it.Qty*it.Price)
+		}
+	}
+	sort.Slice(customers, byAmount)
+	printTallies("totals by customer:", customers, " orders")
+	sort.Slice(items, byCount)
+	printTallies("top items:", items[:min(len(items), 3)], " units")
+	println("orders by status:")
+	var line [64]byte
+	for i, name := range statuses {
+		out := appendPadded(append(line[:0], "  "...), name, 14)
+		os.Stdout.Write(append(strconv.AppendInt(out, byStatus[i]), '\n'))
+	}
+	println()
+	println("settled orders of", bigOrder/100, "dollars or more:")
+	emitJSON(orders)
+	return nil
+}
+
+// The built-in dataset. Records 4 to 12 are each bad in a different way.
+const sample = `[
+  {"id": 1, "customer": "ann", "status": "paid",
+   "items": [{"sku": "a1", "qty": 2, "price": 350}, {"sku": "b7", "qty": 1, "price": 1299}]},
+  {"id": 2, "customer": "bob", "status": "pending", "items": [{"sku": "a1", "qty": 1, "price": 350}]},
+  {"id": 3, "customer": "cy \"the kid\"", "status": "shipped", "note": {"gift": true, "tags": ["x", "]"]},
+   "items": [{"sku": "c3", "qty": 5, "price": 499}]},
+  {"customer": "dan", "status": "paid", "items": [{"sku": "a1", "qty": 1, "price": 350}]},
+  {"id": 5, "customer": "eve", "status": "lost", "items": [{"sku": "a1", "qty": 1, "price": 350}]},
+  {"id": 6, "customer": "fay", "status": "paid", "items": [{"sku": "d4", "qty": 0, "price": 100}]},
+  {"id": 7, "customer": "gus", "status": "paid", "items": [{"sku": "d4", "qty": 1, "price": "100"}]},
+  {"id": 8, "customer": "hal", "status": "paid", "items": [{"sku": "d4", "qty": 1, "price": 1.5}]},
+  {"id": 9, "customer": null, "status": "paid", "items": [{"sku": "d4", "qty": 1, "price": 100}]},
+  {"id": 2, "customer": "bob", "status": "paid", "items": [{"sku": "b7", "qty": 1, "price": 1299}]},
+  {"id": 11, "customer": "ivy", "status": "paid", "items": []},
+  42,
+  {"id": 13, "customer": "ann", "status": "shipped", "items": [{"sku": "c3", "qty": 2, "price": 499},
+   {"sku": "cr\u00e8me", "qty": 3, "price": 250}]},
+  {"id": 14, "customer": "bob", "status": "refunded", "items": [{"sku": "b7", "qty": 1, "price": 1299}]},
+  {"id": 15, "customer": "ann", "status": "pending", "items": [{"sku": "a1", "qty": 4, "price": 350}]}
+]
+`
+
+var input [maxInput]byte
+
+func main() {
+	n := copy(input[:], sample)
+	if os.NArgs() > 1 {
+		f, err := os.Open(os.Arg(1))
+		if err == nil {
+			n, err = f.ReadFull(input[:])
+			f.Close()
+			if err == io.EOF {
+				err = nil // a short read: the whole file fit
+			} else if err == nil {
+				err = ErrTooLarge // filled the buffer (or exactly 64K)
+			}
+		}
+		if err != nil {
+			println("jsonq:", os.Arg(1), ":", err.Error())
+			os.Exit(1)
+		}
+	}
+	// A decoded string is no longer than its JSON text and an Item (32 bytes) little more than
+	// the shortest JSON item ({"sku":"","qty":1,"price":0}), so twice the input always fits.
+	arena store 2 * maxInput {
+		if err := report(input[:n], store); err != nil {
+			println("jsonq:", err.Error())
+			os.Exit(1)
+		}
+		println("arena used", store.Used(), "of", store.Cap(), "bytes")
+	}
+}

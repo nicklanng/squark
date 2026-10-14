@@ -1,0 +1,46 @@
+alice heard:
+  ERR say NICK name first
+  * alice joined
+  * bob joined
+  * carol joined
+  alice: hi all
+  bob: hey alice
+  carol: sorry, cat on keyboard
+  * bob left
+  * eve joined
+  eve: bye carol
+  * carol left
+  BYE
+  (disconnected)
+bob heard:
+  * bob joined
+  * carol joined
+  alice: hi all
+  bob: hey alice
+  carol: sorry, cat on keyboard
+  BYE
+  (disconnected)
+carol heard:
+  ERR nick in use
+  * carol joined
+  alice: hi all
+  bob: hey alice
+  users: alice bob carol
+  ERR line too long
+  carol: sorry, cat on keyboard
+  * bob left
+  * eve joined
+  eve: bye carol
+  (hung up)
+dave heard:
+  ERR timed out
+  (disconnected)
+eve heard:
+  * eve joined
+  users: alice carol eve
+  eve: bye carol
+  * carol left
+  * alice left
+  BYE
+  (disconnected)
+room closed: 36 lines sent, 0 dropped

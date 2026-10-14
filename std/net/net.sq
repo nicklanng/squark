@@ -20,6 +20,8 @@ type Conn struct {
 
 extern "sq_listen_tcp" func listenTCP(host string, port int, backlog int) int stack 8K
 
+extern "sq_local_port" func localPort(fd int) int stack 8K
+
 extern "sq_accept" func accept(fd int) int stack 8K
 
 extern "sq_dial_tcp" func dialTCP(host string, port int) int stack 8K
@@ -80,6 +82,9 @@ func (l Listener) Accept() (Conn, error) {
 	}
 	return Conn{fd: fd}, nil
 }
+
+// Port returns the port l listens on: the one the system chose, after Listen(":0").
+func (l Listener) Port() int { return localPort(l.fd) }
 
 func (l Listener) Close() error {
 	if r := sysClose(l.fd); r < 0 {

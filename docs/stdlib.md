@@ -162,6 +162,7 @@ type Listener struct {
 	// unexported fields
 }
 func (l net.Listener) Accept() (net.Conn, error)
+func (l net.Listener) Port() int
 func (l net.Listener) Close() error
 type Conn struct {
 	// unexported fields

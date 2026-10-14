@@ -1,0 +1,70 @@
+== connection 1: every command
+> PING
+< -ERR unknown command
+> (empty line)
+< -ERR unknown command
+> SET greeting hello world
+< +OK
+> GET greeting
+< $hello world
+> GET missing
+< _
+> SET
+< -ERR wrong number of arguments
+> SET lonely
+< -ERR wrong number of arguments
+> GET a b
+< -ERR wrong number of arguments
+> DEL
+< -ERR wrong number of arguments
+> INCR counter
+< :1
+> INCR counter
+< :2
+> incr counter
+< :3
+> INCR greeting
+< -ERR value is not an integer
+> INCR a b
+< -ERR wrong number of arguments
+> set Name squark
+< +OK
+> DEL greeting
+< :1
+> DEL greeting
+< :0
+> SET zebra 1
+< +OK
+> SET apple 2
+< +OK
+> SET zebra 26
+< +OK
+> KEYS
+< *4
+< $Name
+< $apple
+< $counter
+< $zebra
+> SET 0123456789012345678901234567890123456789012345678901234567890123456789 too-long
+< -ERR key or value too long
+> GET counter / INCR counter (pipelined in one write)
+< $3
+< :4
+> GET apple (split across two writes)
+< $2
+> QUIT
+< +BYE
+  (server closed the connection)
+  server: connection ended after 26 commands: quit
+== connection 2: the store outlives connections; then idle
+> GET counter
+< $4
+  (client goes quiet)
+< -ERR idle timeout
+  (server closed the connection)
+  server: connection ended after 1 commands: idle timeout
+== connection 3: a line longer than the server's buffer
+> 512 bytes without a newline
+< -ERR line too long
+  (server closed the connection)
+  server: connection ended after 0 commands: line too long

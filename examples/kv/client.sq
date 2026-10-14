@@ -1,0 +1,197 @@
+package main
+
+import (
+	"io"
+	"net"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// script is what the test client sends on its first connection, one command per line.
+const script = [...]string{
+	"PING",
+	"",
+	"SET greeting hello world",
+	"GET greeting",
+	"GET missing",
+	"SET",
+	"SET lonely",
+	"GET a b",
+	"DEL",
+	"INCR counter",
+	"INCR counter",
+	"incr counter",
+	"INCR greeting",
+	"INCR a b",
+	"set Name squark",
+	"DEL greeting",
+	"DEL greeting",
+	"SET zebra 1",
+	"SET apple 2",
+	"SET zebra 26",
+	"KEYS",
+	"SET 0123456789012345678901234567890123456789012345678901234567890123456789 too-long",
+}
+
+const clientTimeout = 2 * time.Second
+
+// readReply reads one reply (a *n reply is followed by n lines) and prints it.
+func readReply(lr *lineReader) error {
+	line := try lr.readLine(clientTimeout)
+	println("<", line)
+	if !strings.HasPrefix(line, "*") {
+		return nil
+	}
+	n := try strconv.Atoi(line[1:])
+	for i := 0; i < n; i++ {
+		println("<", try lr.readLine(clientTimeout))
+	}
+	return nil
+}
+
+func send(c net.Conn, lr *lineReader, cmd string) error {
+	if cmd == "" {
+		println("> (empty line)")
+	} else {
+		println(">", cmd)
+	}
+	var buf [maxLine]byte
+	n := copy(buf[:], cmd)
+	buf[n] = '\n'
+	try c.Write(buf[:n+1])
+	return readReply(lr)
+}
+
+// expectClose reads until the server closes the connection.
+func expectClose(lr *lineReader) {
+	for {
+		line, err := lr.readLine(clientTimeout)
+		if err == io.EOF {
+			println("  (server closed the connection)")
+			return
+		}
+		if err != nil {
+			println("  (read error:", err.Error(), ")")
+			return
+		}
+		println("<", line)
+	}
+}
+
+// waitClosed waits for the server's report on a finished connection.
+func waitClosed() {
+	select {
+	case s := <-closed:
+		println("  server: connection ended after", s.commands, "commands:", errText(s.reason))
+	case <-time.After(clientTimeout):
+		println("  server: no report")
+	}
+}
+
+func dial(port int) (net.Conn, error) {
+	var addr [32]byte
+	a := strconv.AppendInt(append(addr[:0], "127.0.0.1:"...), port)
+	return net.Dial(string(a))
+}
+
+func runScript(port int) error {
+	println("== connection 1: every command")
+	c := try dial(port)
+	defer c.Close()
+	lr := lineReader{c: c}
+	for _, cmd := range script {
+		try send(c, &lr, cmd)
+	}
+
+	println("> GET counter / INCR counter (pipelined in one write)")
+	try c.WriteString("GET counter\nINCR counter\n")
+	try readReply(&lr)
+	try readReply(&lr)
+
+	println("> GET apple (split across two writes)")
+	try c.WriteString("GE")
+	time.Sleep(5 * time.Millisecond)
+	try c.WriteString("T apple\r\n")
+	try readReply(&lr)
+
+	try send(c, &lr, "QUIT")
+	expectClose(&lr)
+	waitClosed()
+
+	println("== connection 2: the store outlives connections; then idle")
+	c2 := try dial(port)
+	defer c2.Close()
+	lr2 := lineReader{c: c2}
+	try send(c2, &lr2, "GET counter")
+	println("  (client goes quiet)")
+	expectClose(&lr2)
+	waitClosed()
+
+	println("== connection 3: a line longer than the server's buffer")
+	c3 := try dial(port)
+	defer c3.Close()
+	lr3 := lineReader{c: c3}
+	// exactly a buffer's worth: the server reads all of it before closing, so the close is a clean
+	// FIN (closing with unread data would send a reset, which can overtake the error reply)
+	var long [maxLine]byte
+	for i := range long {
+		long[i] = 'x'
+	}
+	println(">", len(long), "bytes without a newline")
+	try c3.Write(long[:])
+	expectClose(&lr3)
+	waitClosed()
+	return nil
+}
+
+func main() {
+	port := -1
+	idle := 30 * time.Second
+	for i := 1; i < os.NArgs(); i++ {
+		switch os.Arg(i) {
+		case "-port", "--port":
+			i++
+			port, _ = strconv.Atoi(os.Arg(i))
+		case "-idle", "--idle":
+			i++
+			ms, _ := strconv.Atoi(os.Arg(i))
+			idle = time.Duration(ms) * time.Millisecond
+		}
+	}
+
+	if port < 0 {
+		// Test mode. Every thread runs main, but only the first serves and runs the client, so
+		// the transcript is the same with any number of threads.
+		if runtime.Shard() != 0 {
+			return
+		}
+		quiet = true
+		l, err := net.Listen("127.0.0.1:0")
+		if err != nil {
+			println("listen:", err.Error())
+			os.Exit(1)
+		}
+		go acceptLoop(l, 50*time.Millisecond)
+		if err := runScript(l.Port()); err != nil {
+			println("client:", err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+
+	var addr [32]byte
+	a := strconv.AppendInt(append(addr[:0], ':'), port)
+	l, err := net.Listen(string(a))
+	if err != nil {
+		println("listen:", err.Error())
+		os.Exit(1)
+	}
+	if runtime.Shard() == 0 {
+		println("kv listening on", string(a), "with", runtime.Shards(), "threads")
+	}
+	go acceptLoop(l, idle)
+	select {} // serve until killed
+}

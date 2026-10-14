@@ -1,0 +1,277 @@
+// kv is a small Redis-like key-value server over TCP with a line protocol:
+//
+//	SET key value   -> +OK              (value is the rest of the line)
+//	GET key         -> $value, or _ when the key is missing
+//	DEL key         -> :1 if it existed, else :0
+//	INCR key        -> :n, the value after adding 1 (a missing key counts as 0)
+//	KEYS            -> *n, then one $key line per key, sorted
+//	QUIT            -> +BYE, and the server closes the connection
+//
+// Errors are lines starting with -ERR. A connection that sends nothing for a while is closed.
+//
+// It shows a store without a heap (fixed slots, a free list and a map whose string keys view the
+// slots), a line reader over net.Conn with an idle timeout, select with time.After, sort.Strings,
+// and threads. Run with no arguments it is its own test: it serves on a port the system picks
+// and drives a scripted client over real TCP. `squark run examples/kv -port 6380` runs a server
+// (try: nc localhost 6380).
+//
+// Threads: every scheduler thread runs main and has its own store (thread var), so under
+// `threads auto` a key is seen by connections on the thread that set it. Routing each key to an
+// owner thread would need a reply channel per connection, and shared channels can't be put in an
+// array; run with SQUARK_THREADS=1 for one store shared by every connection.
+package main
+
+import (
+	"bytes"
+	"net"
+	"os"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+threads auto
+
+const (
+	maxKeys  = 1024
+	maxKey   = 64
+	maxValue = 256
+	maxLine  = 512
+)
+
+const (
+	ErrLineTooLong = error(1, "line too long")
+	ErrIdle        = error(2, "idle timeout")
+	ErrStoreFull   = error(3, "store full")
+	ErrUnknown     = error(4, "unknown command")
+	ErrArgs        = error(5, "wrong number of arguments")
+	ErrNotInteger  = error(6, "value is not an integer")
+	ErrTooLong     = error(7, "key or value too long")
+)
+
+// ---- the store: one per scheduler thread ----
+
+type entry struct {
+	key  [maxKey]byte
+	klen int
+	val  [maxValue]byte
+	vlen int
+}
+
+thread var slots [maxKeys]entry
+thread var index map[string]int cap maxKeys // key (a view of its slot's key bytes) -> slot
+thread var free [..maxKeys]int
+thread var used int // slots handed out so far; free holds the ones given back
+
+func get(key string) (string, bool) {
+	i, ok := index[key]
+	if !ok {
+		return "", false
+	}
+	return string(slots[i].val[:slots[i].vlen]), true
+}
+
+func set(key string, val string) error {
+	i, ok := index[key]
+	if !ok {
+		switch {
+		case len(free) > 0:
+			i = free.Pop()
+		case used < maxKeys:
+			i = used
+			used++
+		default:
+			return ErrStoreFull
+		}
+		e := &slots[i]
+		e.klen = copy(e.key[:], key)
+		index[string(e.key[:e.klen])] = i
+	}
+	slots[i].vlen = copy(slots[i].val[:], val)
+	return nil
+}
+
+func del(key string) bool {
+	i, ok := index[key]
+	if ok {
+		delete(index, key)
+		free.Push(i)
+	}
+	return ok
+}
+
+// ---- reading lines ----
+
+type lineReader struct {
+	c    net.Conn
+	buf  [maxLine]byte
+	r, w int
+}
+
+// readLine returns the next line without its line ending. It views lr.buf, so it is valid until
+// the next call. With idle > 0 it gives up with ErrIdle when nothing arrives for that long.
+func (lr *lineReader) readLine(idle time.Duration) (string, error) {
+	for {
+		if i := bytes.IndexByte(lr.buf[lr.r:lr.w], '\n'); i >= 0 {
+			line := string(lr.buf[lr.r : lr.r+i])
+			lr.r += i + 1
+			return strings.TrimSuffix(line, "\r"), nil
+		}
+		if lr.r > 0 {
+			lr.w = copy(lr.buf[:], lr.buf[lr.r:lr.w])
+			lr.r = 0
+		}
+		if lr.w == len(lr.buf) {
+			return "", ErrLineTooLong
+		}
+		if idle > 0 && !lr.c.WaitReadable(idle) {
+			return "", ErrIdle
+		}
+		n, err := lr.c.Read(lr.buf[lr.w:])
+		if err != nil {
+			return "", err
+		}
+		lr.w += n
+	}
+}
+
+// ---- the server ----
+
+type connStats struct {
+	commands int
+	reason   error
+}
+
+thread var closed chan connStats cap 8 // each connection reports here when it ends
+thread var quiet bool                   // test mode: report to closed instead of printing
+
+// errLine appends err as a -ERR reply line.
+func errLine(out []byte, err error) []byte {
+	return append(append(append(out, "-ERR "...), err.Error()...), '\n')
+}
+
+// execute runs one command line and appends its reply to out. A failure is an error constant,
+// which the caller sends as a -ERR line; quit reports QUIT.
+func execute(line string, out []byte) (reply []byte, quit bool, err error) {
+	name, rest, _ := strings.Cut(strings.TrimSpace(line), " ")
+	var fields [2]string // one more than any command takes, to notice extra arguments
+	args := strings.Fields(rest, fields[:])
+	var lower [8]byte
+	cmd := name
+	if len(name) <= len(lower) {
+		cmd = string(strings.AppendLower(lower[:0], name))
+	}
+	switch cmd {
+	case "set":
+		key, val, ok := strings.Cut(strings.TrimSpace(rest), " ")
+		if !ok {
+			return out, false, ErrArgs
+		}
+		if len(key) > maxKey || len(val) > maxValue {
+			return out, false, ErrTooLong
+		}
+		try set(key, val)
+		return append(out, "+OK\n"...), false, nil
+	case "get", "del", "incr":
+		if len(args) != 1 {
+			return out, false, ErrArgs
+		}
+	case "keys":
+		var keys [..maxKeys]string
+		for k := range index {
+			keys.Push(k)
+		}
+		sort.Strings(keys[:])
+		out = append(strconv.AppendInt(append(out, '*'), len(keys)), '\n')
+		for _, k := range keys {
+			out = append(append(append(out, '$'), k...), '\n')
+		}
+		return out, false, nil
+	case "quit":
+		return append(out, "+BYE\n"...), true, nil
+	default:
+		return out, false, ErrUnknown
+	}
+
+	key := args[0]
+	v, ok := get(key)
+	n := 0
+	switch cmd {
+	case "get":
+		if !ok {
+			return append(out, "_\n"...), false, nil
+		}
+		return append(append(append(out, '$'), v...), '\n'), false, nil
+	case "del":
+		if ok {
+			del(key)
+			n = 1
+		}
+	case "incr":
+		if ok {
+			if n, err = strconv.Atoi(v); err != nil {
+				return out, false, ErrNotInteger
+			}
+		}
+		n++
+		var num [24]byte
+		try set(key, string(strconv.AppendInt(num[:0], n)))
+	}
+	return append(strconv.AppendInt(append(out, ':'), n), '\n'), false, nil
+}
+
+task serveConn(c net.Conn, idle time.Duration) pool 64 {
+	defer c.Close()
+	lr := lineReader{c: c}
+	// room for the largest reply, KEYS with a full store: the compiler counts it in the stack size
+	// it proves for this task (squark build -v shows 64 x 96 KiB)
+	var out [maxKeys*(maxKey+2) + 32]byte
+	stats := connStats{}
+	for {
+		line, err := lr.readLine(idle)
+		if err != nil {
+			if err == ErrIdle || err == ErrLineTooLong {
+				c.Write(errLine(out[:0], err))
+			}
+			stats.reason = err
+			break
+		}
+		stats.commands++
+		reply, quit, err := execute(line, out[:0])
+		if err != nil {
+			reply = errLine(out[:0], err)
+		}
+		if _, err := c.Write(reply); err != nil {
+			stats.reason = err
+			break
+		}
+		if quit {
+			break
+		}
+	}
+	if quiet {
+		closed <- stats
+	} else {
+		println("connection closed after", stats.commands, "commands:", errText(stats.reason))
+	}
+}
+
+func errText(err error) string {
+	if err == nil {
+		return "quit"
+	}
+	return err.Error()
+}
+
+task acceptLoop(l net.Listener, idle time.Duration) pool 1 {
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			println("accept:", err.Error())
+			return
+		}
+		go serveConn(c, idle)
+	}
+}

@@ -1953,6 +1953,14 @@ static struct {
 } listen_table[SQ_MAX_LISTEN];
 static int nlisten;
 
+// sq_local_port returns the port a socket is bound to (e.g. after listening on port 0).
+int64_t sq_local_port(int64_t fd) {
+	struct sockaddr_in sa;
+	socklen_t n = sizeof sa;
+	if (getsockname((int)fd, (struct sockaddr *)&sa, &n) < 0) return -errno;
+	return ntohs(sa.sin_port);
+}
+
 int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
 	struct sockaddr_in sa;
 	if (parse_addr(host, port, &sa) < 0) return -EINVAL;

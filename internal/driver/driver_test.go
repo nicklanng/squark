@@ -91,11 +91,17 @@ func TestErrors(t *testing.T) {
 	}
 }
 
-// TestRun builds each testdata/run program and compares its stdout with the .out file.
+// TestRun builds each testdata/run program (and each example with an expected.out) and compares
+// its stdout with the .out file.
 // Programs whose name starts with "panic_" must exit with status 2.
 func TestRun(t *testing.T) {
 	files, _ := filepath.Glob("../../testdata/run/*.sq")
-	examples := []string{"../../examples/hello", "../../examples/pipeline"}
+	// examples with an expected.out run too (servers run a scripted client against themselves)
+	outs, _ := filepath.Glob("../../examples/*/expected.out")
+	var examples []string
+	for _, o := range outs {
+		examples = append(examples, filepath.Dir(o))
+	}
 	for _, f := range files {
 		examples = append(examples, f)
 	}
