@@ -118,7 +118,7 @@ last := line.Pop()
 var seen map[string]int cap 4096    // declaring the storage is the allocation
 count(seen, "x")                    // storage converts to a view (map[string]int) implicitly
 
-var jobs chan Job cap 16            // package-level: shared by all goroutines
+var jobs chan Job cap 16            // package-level: shared by all goroutines (per thread with threads N)
 ```
 
 `make` exists only inside arenas. Map and channel storage can't be copied, because they point into

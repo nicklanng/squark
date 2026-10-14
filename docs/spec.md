@@ -114,7 +114,7 @@ Declaring it is the allocation, and its zero value is ready to use:
 ```go
 var seen map[string]int cap 1024
 seen["x"]++                 // no make needed
-var jobs chan Job cap 16    // package level: shared by all goroutines
+var jobs chan Job cap 16    // package level: shared by all goroutines (on its thread, with threads N)
 var line [..256]byte
 ```
 
