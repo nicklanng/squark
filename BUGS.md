@@ -448,7 +448,7 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 - [x] **E5. `len`, index and `range` reject a non-addressable vector** (bug: spec says they work on
   storage) — fixed: `toViewRead` lets these read a temporary copy (hoisted for the statement); its elements aren't addressable, and other uses still need a variable; tests: `testdata/run/vec_access.sq`, `testdata/errors/vec_temp.sq` `len(fresh().hist)`, `fresh().hist[0]`, `range fresh().hist` fail with "must be stored
   in a variable to be used as a []int"; arrays in the same place work.
-- [ ] **E6. `len` of a package-level array isn't constant at package level** (go-diff) `var a
+- [x] **E6. `len` of a package-level array isn't constant at package level** (go-diff) — fixed: a package variable used before the variable declarations are resolved gets its declared type on demand (`declaredVarType`); test: `testdata/run/const_len_global.sq` `var a
   [5]int; const N = len(a)` and `task t() pool len(a)` fail with "used before its type is known
   (initialization order)".
 - [ ] **E7. `squark doc` shows a `shared var` as `const NAME = <initializer>`** (bug)

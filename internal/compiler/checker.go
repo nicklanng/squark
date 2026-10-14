@@ -204,7 +204,7 @@ func (c *Checker) collect(pkg *Package) {
 				case VAR:
 					for _, vs := range d.Values {
 						for _, name := range vs.Names {
-							v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, Shared: d.Shared, Thread: d.Thread, ReadOnly: d.Shared}
+							v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, Shared: d.Shared, Thread: d.Thread, ReadOnly: d.Shared, Spec: vs}
 							o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f}
 							v.Obj = o
 							name.Obj = o

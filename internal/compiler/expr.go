@@ -157,6 +157,26 @@ func (c *Checker) expr1(x Expr, hint Type) {
 // ([]T, map[K]V, chan T). Storage must be addressable: the view points into it.
 // derefVec makes a pointer to a vector usable where the vector is (index, slice, len, range,
 // Push...), as Go does for pointers to arrays: it returns *x, typed as the (addressable) vector.
+// declaredVarType gives a package variable its declared type when it is used before the variable
+// declarations are resolved (const N = len(table), task t() pool len(table)): with `var x T`, the
+// type is known without the initializer.
+func (c *Checker) declaredVarType(o *Object) {
+	vs, f := o.Var.Spec, o.decl
+	file, ok := f.(*File)
+	if vs == nil || vs.Type == nil || !ok {
+		return
+	}
+	prev := c.fileImports
+	c.setFile(file)
+	t := c.typExpr(vs.Type)
+	c.fileImports = prev
+	for _, n := range vs.Names {
+		if v := n.Obj.Var; v != nil && v.Type == nil {
+			v.Type, n.Obj.Type = t, t
+		}
+	}
+}
+
 func (c *Checker) derefVec(x Expr) Expr {
 	p, ok := x.info().T.Underlying().(*Pointer)
 	if !ok {
@@ -346,6 +366,9 @@ func (c *Checker) ident(e *Ident) {
 	switch o.Kind {
 	case ObjVar:
 		o.Var.Used = true
+		if o.Var.Type == nil {
+			c.declaredVarType(o)
+		}
 		e.T = o.Var.Type
 		if e.T == nil {
 			c.errorf(e.P, "%s used before its type is known (initialization order)", e.Name)

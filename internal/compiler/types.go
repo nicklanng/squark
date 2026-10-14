@@ -294,6 +294,7 @@ type Var struct {
 
 	ArenaSize     int64 // for arenas
 	ArenaSizeExpr Expr
+	Spec          *ValueSpec // a package variable's declaration
 }
 
 type Func struct {
