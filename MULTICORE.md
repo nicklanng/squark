@@ -62,19 +62,28 @@ Design decisions to settle first (record the answers here):
       (eventfd on Linux, EVFILT_USER on macOS).
 - [ ] Which externs are safe to call from any shard (C libraries with global state).
 
-Work items:
+Implementation steps (each lands with the full suite passing on macOS and Linux):
 
-- [ ] Runtime state into a per-shard structure (scheduler, timers, poller fd, pools, idle set,
-      output buffer), reached through one thread-local pointer.
-- [ ] Start N shard threads, each with its own pools (stack memory and the budget become × N).
-- [ ] Listening sockets per shard with `SO_REUSEPORT` (or one accept shard handing out
-      connections, if that measures better).
-- [ ] Compiler: per-shard package variables and the shared/immutable rule; errors that name the
-      fix, in the spec's error table.
-- [ ] Cross-shard channels.
-- [ ] Tests: stress tests across shards; the runtime under ThreadSanitizer; budget × shards;
-      the no-heap test with N shards.
-- [ ] Benchmark against stage 1 and Go.
+- [x] 2.1 Runtime state into `struct sq_shard`, reached through one thread-local pointer, with a
+      single shard: scheduler context, current goroutine, run queue, counters, poller fd and
+      change list, timer heap, idle set, output buffer, `fd_read_kind`, the HTTP date cache. No
+      behaviour change; check the benchmarks for the cost of thread-local access. — done: `sq_shard` + `_Thread_local sq_shard *sq_self`; notes HTTP throughput unchanged on macOS (224k/201k/153k vs 226k/202k/153k)
+- [ ] 2.2 Generated code: package variables (and package arenas, map/channel storage) into a
+      per-shard globals struct, reached through the shard; `sq_init_globals` runs per shard.
+      Static initializers that hold addresses move into the per-shard init.
+- [ ] 2.3 Goroutine pools per shard: descriptors, goroutine tables and stacks set up per shard at
+      start (mmap, so `threads auto` works); generated code names pools by index.
+- [ ] 2.4 `threads N` (or `auto`) in package `main`: start N shard threads, each with its own
+      signal stack, running `main`. The process exits when every shard's `main` has returned, or
+      at the first panic. Budget × N (with `workers`, × workers × threads).
+- [ ] 2.5 Listening: `SO_REUSEPORT` per shard on Linux; on macOS shards share one listening socket
+      (a process-wide table keyed by address), since its `SO_REUSEPORT` doesn't balance.
+- [ ] 2.6 Tests: shards serve concurrently; stress tests; the runtime under ThreadSanitizer; the
+      no-heap test with N shards; budget × N.
+- [ ] 2.7 Benchmark against `workers` and Go.
+- [ ] 2.8 Shared immutable data: a way to declare package data shared by all shards, immutable
+      after initialization, checked by the compiler.
+- [ ] 2.9 Cross-shard channels.
 
 **Done when** one process uses every core with no data races by construction, and matches or
 beats stage 1.
@@ -105,3 +114,5 @@ first thing to consider instead.
   "database is locked" — std/sqlite now sets a 5s busy timeout and `Exec` retries busy statements
   outside transactions (SQLite skips the busy handler where it could deadlock). Next: stage 2's
   design decisions.
+- 2026-10-14: stage 2 decisions recorded (main on every shard; per-shard package variables);
+  steps 2.1–2.9 written; 2.1 done.

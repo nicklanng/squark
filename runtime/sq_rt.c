@@ -104,12 +104,35 @@ __asm__(
 // goroutines
 
 
-static sq_ctx sched_ctx;
-static sq_g *cur_g;
-static sq_g *runq_head, *runq_tail;
-static int64_t next_gid = 1;
-static int64_t total_parked; // goroutines blocked on channels/slots (not fds/timers)
-static int64_t fd_waiters;   // outstanding netpoll registrations
+// Everything a scheduler owns lives in its shard. One shard per scheduler thread; code reaches the
+// current one through sq_self.
+typedef struct sq_shard {
+	sq_ctx sched_ctx;
+	sq_g *cur_g;
+	sq_g *runq_head, *runq_tail;
+	int64_t next_gid;
+	int64_t total_parked; // goroutines blocked on channels/slots (not fds/timers)
+	int64_t fd_waiters;   // outstanding netpoll registrations
+	uint8_t outbuf[8192]; // println output, flushed at exit and before writes to fd 1
+	size_t outlen;
+	int pollfd; // kqueue or epoll
+	sq_g **timer_heap;
+	int64_t ntimers;
+#if SQ_KQUEUE
+	struct kevent changes[256]; // registrations batched into the next kevent call
+	int nchanges;
+#endif
+	int32_t idle_ready[1 << 16]; // see "The idle set" below
+	int64_t idle_head, idle_len, idle_parked;
+	sq_g *idle_waiter;
+	uint8_t fd_read_kind[1024]; // see read_needs_poll
+	char date_cache[32];        // sq_httpdate
+	time_t date_cached_at;
+} sq_shard;
+
+extern sq_g *sq_timer_heap[];
+static sq_shard sq_shard0 = {.next_gid = 1, .pollfd = -1, .timer_heap = sq_timer_heap, .date_cached_at = -1};
+static _Thread_local sq_shard *sq_self = &sq_shard0;
 
 static void heap_remove(sq_g *g);
 static void err_write(const char *s);
@@ -120,39 +143,39 @@ static void release(uint8_t *p, int64_t n);
 static void runq_push(sq_g *g) {
 	g->state = G_RUNNABLE;
 	g->next = NULL;
-	if (runq_tail) runq_tail->next = g; else runq_head = g;
-	runq_tail = g;
+	if (sq_self->runq_tail) sq_self->runq_tail->next = g; else sq_self->runq_head = g;
+	sq_self->runq_tail = g;
 }
 
 static sq_g *runq_pop(void) {
-	sq_g *g = runq_head;
+	sq_g *g = sq_self->runq_head;
 	if (g) {
-		runq_head = g->next;
-		if (!runq_head) runq_tail = NULL;
+		sq_self->runq_head = g->next;
+		if (!sq_self->runq_head) sq_self->runq_tail = NULL;
 		g->next = NULL;
 	}
 	return g;
 }
 
 static void sq_park(void) {
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	g->state = G_WAITING;
-	sq_ctx_switch(&g->ctx, &sched_ctx);
+	sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
 }
 
 static void sq_ready(sq_g *g) { runq_push(g); }
 
 void sq_gosched(void) {
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	runq_push(g);
-	sq_ctx_switch(&g->ctx, &sched_ctx);
+	sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
 }
 
 static void g_entry(void) {
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	g->entry(g->args);
 	g->state = G_DEAD;
-	sq_ctx_switch(&g->ctx, &sched_ctx);
+	sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
 	__builtin_unreachable();
 }
 
@@ -173,7 +196,7 @@ static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t a
 	*(uint64_t *)top = (uint64_t)(uintptr_t)g_entry;
 	g->ctx.rsp = top;
 #endif
-	g->id = next_gid++;
+	g->id = sq_self->next_gid++;
 }
 
 static void pool_init(sq_pool *p) {
@@ -206,11 +229,11 @@ static void pool_init(sq_pool *p) {
 void sq_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize) {
 	while (!p->free) {
 		// all slots busy: wait for one (backpressure instead of unbounded growth)
-		sq_g *self = cur_g;
+		sq_g *self = sq_self->cur_g;
 		self->next = NULL;
 		if (p->waitq_tail) p->waitq_tail->next = self; else p->waitq_head = self;
 		p->waitq_tail = self;
-		total_parked++;
+		sq_self->total_parked++;
 		sq_park();
 	}
 	sq_g *g = p->free;
@@ -243,7 +266,7 @@ static void g_release(sq_g *g) {
 	}
 	if (g->armed) {
 		g->armed = false;
-		fd_waiters--;
+		sq_self->fd_waiters--;
 	}
 	g->wait_fd = -1;
 	heap_remove(g);
@@ -259,7 +282,7 @@ static void g_release(sq_g *g) {
 		sq_g *w = p->waitq_head;
 		p->waitq_head = w->next;
 		if (!p->waitq_head) p->waitq_tail = NULL;
-		total_parked--;
+		sq_self->total_parked--;
 		sq_ready(w);
 	}
 }
@@ -267,8 +290,6 @@ static void g_release(sq_g *g) {
 // ---------------------------------------------------------------------------
 // output
 
-static uint8_t outbuf[8192];
-static size_t outlen;
 
 static void write_all(int fd, const void *p, size_t n) {
 	const uint8_t *b = p;
@@ -289,18 +310,18 @@ static void write_all(int fd, const void *p, size_t n) {
 }
 
 void sq_flush(void) {
-	if (outlen) write_all(1, outbuf, outlen);
-	outlen = 0;
+	if (sq_self->outlen) write_all(1, sq_self->outbuf, sq_self->outlen);
+	sq_self->outlen = 0;
 }
 
 static void out(const void *p, size_t n) {
-	if (outlen + n > sizeof outbuf) sq_flush();
-	if (n > sizeof outbuf) {
+	if (sq_self->outlen + n > sizeof sq_self->outbuf) sq_flush();
+	if (n > sizeof sq_self->outbuf) {
 		write_all(1, p, n);
 		return;
 	}
-	memcpy(outbuf + outlen, p, n);
-	outlen += n;
+	memcpy(sq_self->outbuf + sq_self->outlen, p, n);
+	sq_self->outlen += n;
 }
 
 void sq_print_byte(uint8_t c) {
@@ -418,10 +439,10 @@ static void err_int(int64_t v) {
 
 static SQ_NORETURN void die(const char *file, int line) {
 	err_write("\n\ngoroutine ");
-	if (cur_g) {
-		err_int(cur_g->id);
+	if (sq_self->cur_g) {
+		err_int(sq_self->cur_g->id);
 		err_write(" [");
-		err_write(cur_g->pool->name);
+		err_write(sq_self->cur_g->pool->name);
 		err_write("]");
 	} else {
 		err_write("0 [scheduler]");
@@ -606,7 +627,7 @@ static sq_g *q_pop(sq_g **head, sq_g **tail) {
 
 void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line) {
 	if (!c) {
-		total_parked++;
+		sq_self->total_parked++;
 		sq_park(); // send on nil channel blocks forever
 	}
 	if (c->closed) sq_panic_cstr("send on closed channel", file, line);
@@ -614,7 +635,7 @@ void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line) {
 	if (r) {
 		memcpy(r->elem, elem, (size_t)c->elemsize);
 		r->ok = true;
-		total_parked--;
+		sq_self->total_parked--;
 		sq_ready(r);
 		return;
 	}
@@ -624,18 +645,18 @@ void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line) {
 		c->len++;
 		return;
 	}
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	g->elem = (void *)elem;
 	g->ok = false;
 	q_push(&c->sendq_head, &c->sendq_tail, g);
-	total_parked++;
+	sq_self->total_parked++;
 	sq_park();
 	if (!g->ok) sq_panic_cstr("send on closed channel", file, line);
 }
 
 bool sq_chan_recv(sq_chan *c, void *outp) {
 	if (!c) {
-		total_parked++;
+		sq_self->total_parked++;
 		sq_park();
 	}
 	if (c->len > 0) {
@@ -648,7 +669,7 @@ bool sq_chan_recv(sq_chan *c, void *outp) {
 			memcpy(c->buf + tail * c->elemsize, s->elem, (size_t)c->elemsize);
 			c->len++;
 			s->ok = true;
-			total_parked--;
+			sq_self->total_parked--;
 			sq_ready(s);
 		}
 		return true;
@@ -657,7 +678,7 @@ bool sq_chan_recv(sq_chan *c, void *outp) {
 	if (s) {
 		memcpy(outp, s->elem, (size_t)c->elemsize);
 		s->ok = true;
-		total_parked--;
+		sq_self->total_parked--;
 		sq_ready(s);
 		return true;
 	}
@@ -665,11 +686,11 @@ bool sq_chan_recv(sq_chan *c, void *outp) {
 		memset(outp, 0, (size_t)c->elemsize);
 		return false;
 	}
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	g->elem = outp;
 	g->ok = false;
 	q_push(&c->recvq_head, &c->recvq_tail, g);
-	total_parked++;
+	sq_self->total_parked++;
 	sq_park();
 	if (!g->ok) memset(outp, 0, (size_t)c->elemsize);
 	return g->ok;
@@ -682,12 +703,12 @@ void sq_chan_close(sq_chan *c, const char *file, int line) {
 	sq_g *g;
 	while ((g = q_pop(&c->recvq_head, &c->recvq_tail))) {
 		g->ok = false;
-		total_parked--;
+		sq_self->total_parked--;
 		sq_ready(g);
 	}
 	while ((g = q_pop(&c->sendq_head, &c->sendq_tail))) {
 		g->ok = false;
-		total_parked--;
+		sq_self->total_parked--;
 		sq_ready(g);
 	}
 }
@@ -868,22 +889,19 @@ int64_t sq_map_next(sq_map *m, int64_t i) {
 // ---------------------------------------------------------------------------
 // netpoll and timers
 
-static int pollfd = -1;
-extern sq_g *sq_timer_heap[];
-static int64_t ntimers;
 
 static void heap_swap(int64_t a, int64_t b) {
-	sq_g *t = sq_timer_heap[a];
-	sq_timer_heap[a] = sq_timer_heap[b];
-	sq_timer_heap[b] = t;
-	sq_timer_heap[a]->heap_index = a;
-	sq_timer_heap[b]->heap_index = b;
+	sq_g *t = sq_self->timer_heap[a];
+	sq_self->timer_heap[a] = sq_self->timer_heap[b];
+	sq_self->timer_heap[b] = t;
+	sq_self->timer_heap[a]->heap_index = a;
+	sq_self->timer_heap[b]->heap_index = b;
 }
 
 static void heap_up(int64_t i) {
 	while (i > 0) {
 		int64_t p = (i - 1) / 2;
-		if (sq_timer_heap[p]->wake_at <= sq_timer_heap[i]->wake_at) break;
+		if (sq_self->timer_heap[p]->wake_at <= sq_self->timer_heap[i]->wake_at) break;
 		heap_swap(i, p);
 		i = p;
 	}
@@ -892,8 +910,8 @@ static void heap_up(int64_t i) {
 static void heap_down(int64_t i) {
 	for (;;) {
 		int64_t l = 2 * i + 1, r = l + 1, m = i;
-		if (l < ntimers && sq_timer_heap[l]->wake_at < sq_timer_heap[m]->wake_at) m = l;
-		if (r < ntimers && sq_timer_heap[r]->wake_at < sq_timer_heap[m]->wake_at) m = r;
+		if (l < sq_self->ntimers && sq_self->timer_heap[l]->wake_at < sq_self->timer_heap[m]->wake_at) m = l;
+		if (r < sq_self->ntimers && sq_self->timer_heap[r]->wake_at < sq_self->timer_heap[m]->wake_at) m = r;
 		if (m == i) return;
 		heap_swap(i, m);
 		i = m;
@@ -903,10 +921,10 @@ static void heap_down(int64_t i) {
 static void heap_remove(sq_g *g) {
 	int64_t i = g->heap_index;
 	if (i < 0) return;
-	ntimers--;
-	if (i != ntimers) {
-		sq_timer_heap[i] = sq_timer_heap[ntimers];
-		sq_timer_heap[i]->heap_index = i;
+	sq_self->ntimers--;
+	if (i != sq_self->ntimers) {
+		sq_self->timer_heap[i] = sq_self->timer_heap[sq_self->ntimers];
+		sq_self->timer_heap[i]->heap_index = i;
 		heap_down(i);
 		heap_up(i);
 	}
@@ -914,11 +932,11 @@ static void heap_remove(sq_g *g) {
 }
 
 static sq_g *heap_pop(void) {
-	sq_g *g = sq_timer_heap[0];
-	ntimers--;
-	if (ntimers > 0) {
-		sq_timer_heap[0] = sq_timer_heap[ntimers];
-		sq_timer_heap[0]->heap_index = 0;
+	sq_g *g = sq_self->timer_heap[0];
+	sq_self->ntimers--;
+	if (sq_self->ntimers > 0) {
+		sq_self->timer_heap[0] = sq_self->timer_heap[sq_self->ntimers];
+		sq_self->timer_heap[0]->heap_index = 0;
 		heap_down(0);
 	}
 	g->heap_index = -1;
@@ -942,38 +960,34 @@ void sq_sleep(int64_t ns) {
 		sq_gosched();
 		return;
 	}
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	g->wait_fd = -1;
 	g->wake_at = sq_nanotime() + ns;
-	g->heap_index = ntimers;
-	sq_timer_heap[ntimers++] = g;
+	g->heap_index = sq_self->ntimers;
+	sq_self->timer_heap[sq_self->ntimers++] = g;
 	heap_up(g->heap_index);
 	sq_park();
 }
 
-#if SQ_KQUEUE
-static struct kevent changes[256];
-static int nchanges;
-#endif
 
 // wait_fd parks the current goroutine until fd is readable (mode 'r') or writable ('w').
 static void arm_fd(int fd, int mode) {
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	g->wait_fd = fd;
 	g->wake = WAKE_NONE;
 #if SQ_KQUEUE
-	if (nchanges == (int)(sizeof changes / sizeof changes[0])) {
-		kevent(pollfd, changes, nchanges, NULL, 0, NULL);
-		nchanges = 0;
+	if (sq_self->nchanges == (int)(sizeof sq_self->changes / sizeof sq_self->changes[0])) {
+		kevent(sq_self->pollfd, sq_self->changes, sq_self->nchanges, NULL, 0, NULL);
+		sq_self->nchanges = 0;
 	}
-	EV_SET(&changes[nchanges++], fd, mode == 'r' ? EVFILT_READ : EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, cur_g);
+	EV_SET(&sq_self->changes[sq_self->nchanges++], fd, mode == 'r' ? EVFILT_READ : EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, sq_self->cur_g);
 #else
-	struct epoll_event ev = {.events = (mode == 'r' ? EPOLLIN : EPOLLOUT) | EPOLLONESHOT, .data.ptr = cur_g};
-	if (epoll_ctl(pollfd, EPOLL_CTL_MOD, fd, &ev) < 0) epoll_ctl(pollfd, EPOLL_CTL_ADD, fd, &ev);
+	struct epoll_event ev = {.events = (mode == 'r' ? EPOLLIN : EPOLLOUT) | EPOLLONESHOT, .data.ptr = sq_self->cur_g};
+	if (epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, fd, &ev) < 0) epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, fd, &ev);
 #endif
 	if (!g->armed) {
 		g->armed = true;
-		fd_waiters++;
+		sq_self->fd_waiters++;
 	}
 }
 
@@ -988,7 +1002,7 @@ static void fd_event(sq_g *g, int fd) {
 	if (!g) return;
 	if (g->armed) {
 		g->armed = false;
-		fd_waiters--;
+		sq_self->fd_waiters--;
 	}
 	if (g->state != G_WAITING || g->wait_fd != fd) return;
 	g->wait_fd = -1;
@@ -1008,8 +1022,8 @@ static void netpoll(int64_t timeout_ns) {
 		ts.tv_nsec = timeout_ns % 1000000000;
 		tsp = &ts;
 	}
-	int n = kevent(pollfd, changes, nchanges, events, 256, tsp);
-	nchanges = 0;
+	int n = kevent(sq_self->pollfd, sq_self->changes, sq_self->nchanges, events, 256, tsp);
+	sq_self->nchanges = 0;
 	for (int i = 0; i < n; i++) {
 		if ((uintptr_t)events[i].udata & 1) { // idle set: udata is tag<<1 | 1 (goroutines are aligned)
 			idle_event((int)events[i].ident, (int)((uintptr_t)events[i].udata >> 1));
@@ -1021,7 +1035,7 @@ static void netpoll(int64_t timeout_ns) {
 #else
 	struct epoll_event events[256];
 	int ms = timeout_ns < 0 ? -1 : (int)((timeout_ns + 999999) / 1000000);
-	int n = epoll_wait(pollfd, events, 256, ms);
+	int n = epoll_wait(sq_self->pollfd, events, 256, ms);
 	for (int i = 0; i < n; i++) {
 		if (events[i].data.u64 & 1) { // idle set: tag<<33 | fd<<1 | 1
 			uint64_t d = events[i].data.u64;
@@ -1035,9 +1049,9 @@ static void netpoll(int64_t timeout_ns) {
 }
 
 static void fire_timers(void) {
-	if (!ntimers) return;
+	if (!sq_self->ntimers) return;
 	int64_t now = sq_nanotime();
-	while (ntimers > 0 && sq_timer_heap[0]->wake_at <= now) {
+	while (sq_self->ntimers > 0 && sq_self->timer_heap[0]->wake_at <= now) {
 		sq_g *g = heap_pop();
 		g->wake = WAKE_TIMER;
 		g->wait_fd = -1;
@@ -1063,11 +1077,11 @@ static void release(uint8_t *p, int64_t n) {
 // On timeout the read registration stays armed; the caller either waits again or hands the fd to
 // the idle set with sq_park_idle.
 int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	arm_fd((int)fd, 'r');
 	g->wake_at = sq_nanotime() + grace_ns;
-	g->heap_index = ntimers;
-	sq_timer_heap[ntimers++] = g;
+	g->heap_index = sq_self->ntimers;
+	sq_self->timer_heap[sq_self->ntimers++] = g;
 	heap_up(g->heap_index);
 	sq_park();
 	if (g->wake == WAKE_FD) return 0;
@@ -1077,10 +1091,10 @@ int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 	// time.Sleep, or another fd). Disarm it; waiting again or sq_park_idle re-registers the fd.
 	// (kqueue events carry the fd, which fd_event checks.)
 	struct epoll_event ev = {.events = 0};
-	epoll_ctl(pollfd, EPOLL_CTL_MOD, (int)fd, &ev);
+	epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, (int)fd, &ev);
 	if (g->armed) {
 		g->armed = false;
-		fd_waiters--;
+		sq_self->fd_waiters--;
 	}
 #endif
 	return 1;
@@ -1091,20 +1105,17 @@ int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 // typically starts a fresh goroutine for it. An idle connection therefore costs no stack at all.
 // Each parked fd carries a small tag (e.g. which server it belongs to) that comes back with it;
 // queue entries hold tag<<24 | fd.
-static int32_t idle_ready[1 << 16];
-static int64_t idle_head, idle_len, idle_parked;
-static sq_g *idle_waiter;
 
 static void idle_event(int fd, int tag) {
-	idle_parked--;
-	if (idle_len == (int64_t)(sizeof idle_ready / sizeof idle_ready[0])) {
+	sq_self->idle_parked--;
+	if (sq_self->idle_len == (int64_t)(sizeof sq_self->idle_ready / sizeof sq_self->idle_ready[0])) {
 		sq_panic_cstr("idle connection queue overflow", __FILE__, __LINE__);
 	}
-	idle_ready[(idle_head + idle_len) % (int64_t)(sizeof idle_ready / sizeof idle_ready[0])] = (int32_t)((uint32_t)tag << 24 | (uint32_t)fd);
-	idle_len++;
-	if (idle_waiter) {
-		sq_g *w = idle_waiter;
-		idle_waiter = NULL;
+	sq_self->idle_ready[(sq_self->idle_head + sq_self->idle_len) % (int64_t)(sizeof sq_self->idle_ready / sizeof sq_self->idle_ready[0])] = (int32_t)((uint32_t)tag << 24 | (uint32_t)fd);
+	sq_self->idle_len++;
+	if (sq_self->idle_waiter) {
+		sq_g *w = sq_self->idle_waiter;
+		sq_self->idle_waiter = NULL;
 		fd_event(w, -2);
 	}
 }
@@ -1112,51 +1123,51 @@ static void idle_event(int fd, int tag) {
 // sq_park_idle moves fd into the idle set with tag (0..255) and marks the calling goroutine's stack
 // for release when it exits.
 void sq_park_idle(int64_t fd, int64_t tag) {
-	sq_g *g = cur_g;
+	sq_g *g = sq_self->cur_g;
 	if (tag < 0 || tag > 255) sq_panic_cstr("idle tag out of range", __FILE__, __LINE__);
 	if (fd >= 1 << 24) sq_panic_cstr("fd too large for the idle set", __FILE__, __LINE__);
 #if SQ_KQUEUE
-	if (nchanges == (int)(sizeof changes / sizeof changes[0])) {
-		kevent(pollfd, changes, nchanges, NULL, 0, NULL);
-		nchanges = 0;
+	if (sq_self->nchanges == (int)(sizeof sq_self->changes / sizeof sq_self->changes[0])) {
+		kevent(sq_self->pollfd, sq_self->changes, sq_self->nchanges, NULL, 0, NULL);
+		sq_self->nchanges = 0;
 	}
-	EV_SET(&changes[nchanges++], (int)fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, (void *)(((uintptr_t)tag << 1) | 1));
+	EV_SET(&sq_self->changes[sq_self->nchanges++], (int)fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, (void *)(((uintptr_t)tag << 1) | 1));
 #else
 	struct epoll_event ev = {.events = EPOLLIN | EPOLLONESHOT};
 	ev.data.u64 = ((uint64_t)tag << 33) | ((uint64_t)(uint32_t)fd << 1) | 1;
-	if (epoll_ctl(pollfd, EPOLL_CTL_MOD, (int)fd, &ev) < 0) epoll_ctl(pollfd, EPOLL_CTL_ADD, (int)fd, &ev);
+	if (epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, (int)fd, &ev) < 0) epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, (int)fd, &ev);
 #endif
 	// the goroutine's own registration on fd (if still armed) was just replaced
 	if (g->armed && g->wait_fd == (int)fd) {
 		g->armed = false;
-		fd_waiters--;
+		sq_self->fd_waiters--;
 	}
 	g->wait_fd = -1;
 	g->release_stack = true;
-	idle_parked++;
+	sq_self->idle_parked++;
 }
 
 // sq_next_idle returns the next idle connection that has become readable, parking until one does,
 // as tag<<32 | fd.
 int64_t sq_next_idle(void) {
-	while (idle_len == 0) {
-		if (idle_waiter) sq_panic_cstr("only one goroutine may wait for idle connections", __FILE__, __LINE__);
-		idle_waiter = cur_g;
-		cur_g->wait_fd = -2;
-		if (!cur_g->armed) {
-			cur_g->armed = true;
-			fd_waiters++;
+	while (sq_self->idle_len == 0) {
+		if (sq_self->idle_waiter) sq_panic_cstr("only one goroutine may wait for idle connections", __FILE__, __LINE__);
+		sq_self->idle_waiter = sq_self->cur_g;
+		sq_self->cur_g->wait_fd = -2;
+		if (!sq_self->cur_g->armed) {
+			sq_self->cur_g->armed = true;
+			sq_self->fd_waiters++;
 		}
 		sq_park();
 	}
-	uint32_t e = (uint32_t)idle_ready[idle_head];
+	uint32_t e = (uint32_t)sq_self->idle_ready[sq_self->idle_head];
 	int64_t v = (int64_t)(e >> 24) << 32 | (e & 0xffffff);
-	idle_head = (idle_head + 1) % (int64_t)(sizeof idle_ready / sizeof idle_ready[0]);
-	idle_len--;
+	sq_self->idle_head = (sq_self->idle_head + 1) % (int64_t)(sizeof sq_self->idle_ready / sizeof sq_self->idle_ready[0]);
+	sq_self->idle_len--;
 	return v;
 }
 
-int64_t sq_idle_count(void) { return idle_parked; }
+int64_t sq_idle_count(void) { return sq_self->idle_parked; }
 
 // sq_float64bits is math.Float64bits.
 uint64_t sq_float64bits(double f) {
@@ -1184,21 +1195,21 @@ static int set_nonblock(int fd) {
 // it non-blocking would change the descriptor for the parent shell too. So for those, wait for
 // readability through the poller first, parking only this goroutine. Sockets are non-blocking
 // already and regular files are always readable: they are read directly.
-static uint8_t fd_read_kind[1024]; // 0 unknown, 1 read directly, 2 poll first
+// sq_self->fd_read_kind[fd]: 0 unknown, 1 read directly, 2 poll first
 
 static bool read_needs_poll(int fd) {
-	if (fd < 0 || fd >= (int)sizeof fd_read_kind) return false;
-	if (!fd_read_kind[fd]) {
+	if (fd < 0 || fd >= (int)sizeof sq_self->fd_read_kind) return false;
+	if (!sq_self->fd_read_kind[fd]) {
 		struct stat st;
 		int fl = fcntl(fd, F_GETFL);
 		bool p = fl >= 0 && !(fl & O_NONBLOCK) && fstat(fd, &st) == 0 && (S_ISFIFO(st.st_mode) || isatty(fd));
-		fd_read_kind[fd] = p ? 2 : 1;
+		sq_self->fd_read_kind[fd] = p ? 2 : 1;
 	}
-	return fd_read_kind[fd] == 2;
+	return sq_self->fd_read_kind[fd] == 2;
 }
 
 int64_t sq_read(int64_t fd, sq_bytes b) {
-	if (cur_g && read_needs_poll((int)fd)) {
+	if (sq_self->cur_g && read_needs_poll((int)fd)) {
 		struct pollfd p = {(int)fd, POLLIN, 0};
 		if (poll(&p, 1, 0) == 0) wait_fd((int)fd, 'r');
 	}
@@ -1206,7 +1217,7 @@ int64_t sq_read(int64_t fd, sq_bytes b) {
 		ssize_t r = read((int)fd, b.p, (size_t)b.len);
 		if (r >= 0) return r;
 		if (errno == EINTR) continue;
-		if (errno == EAGAIN && cur_g) {
+		if (errno == EAGAIN && sq_self->cur_g) {
 			wait_fd((int)fd, 'r');
 			continue;
 		}
@@ -1224,7 +1235,7 @@ static int64_t write_fd(int64_t fd, const uint8_t *p, int64_t n) {
 			continue;
 		}
 		if (errno == EINTR) continue;
-		if (errno == EAGAIN && cur_g) {
+		if (errno == EAGAIN && sq_self->cur_g) {
 			wait_fd((int)fd, 'w');
 			continue;
 		}
@@ -1246,7 +1257,7 @@ int64_t sq_writev2(int64_t fd, sq_bytes a, sq_bytes b) {
 		ssize_t w = writev((int)fd, iov + idx, 2 - idx);
 		if (w < 0) {
 			if (errno == EINTR) continue;
-			if (errno == EAGAIN && cur_g) {
+			if (errno == EAGAIN && sq_self->cur_g) {
 				wait_fd((int)fd, 'w');
 				continue;
 			}
@@ -1292,17 +1303,15 @@ static void utc_date(time_t t, struct tm *tm) {
 
 // sq_httpdate writes an RFC 1123 date ("Mon, 02 Jan 2006 15:04:05 GMT", 29 bytes), cached per second.
 int64_t sq_httpdate(sq_bytes dst) {
-	static char cache[32];
-	static time_t cached_at = -1;
 	time_t now = time(NULL);
-	if (now != cached_at) {
+	if (now != sq_self->date_cached_at) {
 		// UTC by arithmetic, not gmtime_r: on macOS its first call sets up time-zone state and
 		// notifications with ~50 heap allocations, and UTC needs none of that
 		struct tm tm;
 		utc_date(now, &tm);
 		static const char days[] = "SunMonTueWedThuFriSat";
 		static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
-		char *p = cache;
+		char *p = sq_self->date_cache;
 		memcpy(p, days + tm.tm_wday * 3, 3); p += 3;
 		*p++ = ','; *p++ = ' ';
 		*p++ = (char)('0' + tm.tm_mday / 10); *p++ = (char)('0' + tm.tm_mday % 10); *p++ = ' ';
@@ -1313,15 +1322,15 @@ int64_t sq_httpdate(sq_bytes dst) {
 		*p++ = (char)('0' + tm.tm_min / 10); *p++ = (char)('0' + tm.tm_min % 10); *p++ = ':';
 		*p++ = (char)('0' + tm.tm_sec / 10); *p++ = (char)('0' + tm.tm_sec % 10);
 		memcpy(p, " GMT", 4);
-		cached_at = now;
+		sq_self->date_cached_at = now;
 	}
 	int64_t n = dst.len < 29 ? dst.len : 29;
-	memcpy(dst.p, cache, (size_t)n);
+	memcpy(dst.p, sq_self->date_cache, (size_t)n);
 	return n;
 }
 
 int64_t sq_close(int64_t fd) {
-	if (fd >= 0 && fd < (int64_t)sizeof fd_read_kind) fd_read_kind[fd] = 0; // the number may be reused
+	if (fd >= 0 && fd < (int64_t)sizeof sq_self->fd_read_kind) sq_self->fd_read_kind[fd] = 0; // the number may be reused
 	return close((int)fd) < 0 ? -errno : 0;
 }
 
@@ -1386,7 +1395,7 @@ int64_t sq_accept(int64_t lfd) {
 			return fd;
 		}
 		if (errno == EINTR || errno == ECONNABORTED) continue;
-		if (errno == EAGAIN && cur_g) {
+		if (errno == EAGAIN && sq_self->cur_g) {
 			wait_fd((int)lfd, 'r');
 			continue;
 		}
@@ -1523,10 +1532,10 @@ static void schedule(void) {
 	for (;;) {
 		sq_g *g;
 		while ((g = runq_pop())) {
-			cur_g = g;
+			sq_self->cur_g = g;
 			g->state = G_RUNNING;
-			sq_ctx_switch(&sched_ctx, &g->ctx);
-			cur_g = NULL;
+			sq_ctx_switch(&sq_self->sched_ctx, &g->ctx);
+			sq_self->cur_g = NULL;
 			if (g->state == G_DEAD) {
 				if (g->pool == &sq_main_pool) {
 					sq_flush();
@@ -1538,23 +1547,23 @@ static void schedule(void) {
 				}
 				g_release(g);
 			}
-			if ((++switches & 63) == 0 && (fd_waiters > 0 || ntimers > 0 || idle_parked > 0)) {
+			if ((++switches & 63) == 0 && (sq_self->fd_waiters > 0 || sq_self->ntimers > 0 || sq_self->idle_parked > 0)) {
 				fire_timers();
-				if (fd_waiters > 0 || idle_parked > 0) netpoll(0);
+				if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0) netpoll(0);
 			}
 		}
 		// nothing runnable: block in the poller until I/O or a timer fires
-		if (fd_waiters == 0 && ntimers == 0 && idle_parked == 0) {
+		if (sq_self->fd_waiters == 0 && sq_self->ntimers == 0 && sq_self->idle_parked == 0) {
 			sq_flush();
 			err_write("fatal error: all goroutines are asleep - deadlock!\n");
 			_exit(2);
 		}
 		int64_t timeout = -1;
-		if (ntimers > 0) {
-			timeout = sq_timer_heap[0]->wake_at - sq_nanotime();
+		if (sq_self->ntimers > 0) {
+			timeout = sq_self->timer_heap[0]->wake_at - sq_nanotime();
 			if (timeout < 0) timeout = 0;
 		}
-		if (fd_waiters > 0 || idle_parked > 0) {
+		if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0) {
 			netpoll(timeout);
 		} else if (timeout > 0) {
 			struct timespec ts = {timeout / 1000000000, timeout % 1000000000};
@@ -1699,9 +1708,9 @@ int main(int argc, char **argv) {
 	sigaction(SIGSEGV, &sa, NULL);
 	sigaction(SIGBUS, &sa, NULL);
 #if SQ_KQUEUE
-	pollfd = kqueue();
+	sq_self->pollfd = kqueue();
 #else
-	pollfd = epoll_create1(0);
+	sq_self->pollfd = epoll_create1(0);
 #endif
 	stackcheck = getenv("SQ_STACKCHECK") != NULL;
 	if (stackcheck) {
