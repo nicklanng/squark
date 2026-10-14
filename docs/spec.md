@@ -308,6 +308,7 @@ must not outlive the memory it points to:
 | `map capacity exceeded` (runtime panic) | a larger `cap N` |
 | `memory budget exceeded` | lower pool sizes (`pool pkg.task N`), fewer `workers`, or raise the budget |
 | `workers auto can't be checked against the budget` | `workers N` with the number of cores you deploy on |
+| `cannot take address of error constant` | copy it into a variable first: `e := ErrX; p := &e` |
 | `defer inside a loop` | move the loop body into a function and defer there |
 
 ## 8. Idioms: translating Go

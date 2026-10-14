@@ -1,0 +1,13 @@
+package main
+
+import "io"
+
+const ErrMine = error(1, "mine")
+
+func main() {
+	p := &ErrMine // ERROR "cannot take address of error constant ErrMine"
+	q := &io.EOF  // ERROR "cannot take address of error constant io.EOF"
+	e := ErrMine
+	r := &e
+	println(p, q, r)
+}

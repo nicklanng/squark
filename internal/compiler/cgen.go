@@ -26,9 +26,9 @@ type PoolInfo struct {
 }
 
 type cdef struct {
-	name string
-	body string
-	deps []string
+	name  string
+	body  string
+	deps  []string
 	fnptr bool
 }
 
@@ -53,11 +53,15 @@ type gen struct {
 	nextLbl  int
 	file     string
 
-	goSites   strings.Builder // trampolines
-	pools     map[*Func]*PoolInfo
-	poolOrder []*PoolInfo
-	globals   strings.Builder
-	statics   strings.Builder // static storage for package-level make()
+	goSites      strings.Builder // trampolines
+	pools        map[*Func]*PoolInfo
+	poolOrder    []*PoolInfo
+	globals      strings.Builder // members of struct sq_globals: package variables, one copy per shard
+	statics      strings.Builder // members for storage hoisted from package-level initializers
+	staticNames  []string        // their names, macro'd to sq_gl-> inside the init function only
+	arenaInits   strings.Builder
+	constGlobals strings.Builder // error constants: static const, shared by all shards
+	usesGlobals  bool            // the function being generated reads or writes a package variable
 }
 
 // uniqueCName reserves a package-level C name, adding a numeric suffix if it is already taken.
@@ -127,24 +131,41 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 		protos.WriteString("static " + g.proto(f) + ";\n")
 	}
 	// globals
+	constInit := map[*Var]Expr{} // error constants: read-only, initialized once, shared by all shards
+	for _, p := range prog.Packages {
+		for _, vs := range p.GlobalInits {
+			for i, n := range vs.Names {
+				if v := n.Obj.Var; v != nil && v.ReadOnly && v.ArenaSize == 0 && i < len(vs.Values) {
+					constInit[v] = vs.Values[i]
+				}
+			}
+		}
+	}
 	for _, p := range prog.Packages {
 		for _, v := range p.Globals {
 			if v.Type == nil {
 				continue
 			}
-			v.CName = g.uniqueCName("G_" + g.pkgNames[p] + "__" + sanitize(v.Name))
+			// package variables are members of struct sq_globals (one per shard), reached through
+			// sq_gl, the function's copy of the current shard's pointer
+			member := g.uniqueCName("G_" + g.pkgNames[p] + "__" + sanitize(v.Name))
 			if v.Name == "_" {
-				v.CName = fmt.Sprintf("G_%s__blank%d", g.pkgNames[p], g.tmpN)
+				member = fmt.Sprintf("G_%s__blank%d", g.pkgNames[p], g.tmpN)
 				g.tmpN++
 			}
-			if v.ArenaSize > 0 {
-				// package arena: static storage, bump-only
-				fmt.Fprintf(&g.globals, "static uint8_t %s_buf[%d] __attribute__((aligned(16)));\n", v.CName, v.ArenaSize)
-				fmt.Fprintf(&g.globals, "static sq_arena %s_arena = {%s_buf, 0, %d, %s};\n", v.CName, v.CName, v.ArenaSize, cString(p.Name+"."+v.Name))
-				fmt.Fprintf(&g.globals, "static sq_arena *%s = &%s_arena;\n", v.CName, v.CName)
+			if x, ok := constInit[v]; ok {
+				v.CName = member
+				fmt.Fprintf(&g.constGlobals, "static const %s = %s;\n", g.decl(v.Type, member), g.coerce(x, v.Type))
 				continue
 			}
-			fmt.Fprintf(&g.globals, "static %s;\n", g.decl(v.Type, v.CName))
+			v.CName = "sq_gl->" + member
+			if v.ArenaSize > 0 {
+				// package arena: storage in the shard's globals, bump-only
+				fmt.Fprintf(&g.globals, "\tuint8_t %s_buf[%d] __attribute__((aligned(16)));\n\tsq_arena %s_arena;\n\tsq_arena *%s;\n", member, v.ArenaSize, member, member)
+				fmt.Fprintf(&g.arenaInits, "\tsq_gl->%s_arena = (sq_arena){sq_gl->%s_buf, 0, %d, %s};\n\tsq_gl->%s = &sq_gl->%s_arena;\n", member, member, v.ArenaSize, cString(p.Name+"."+v.Name), member, member)
+				continue
+			}
+			fmt.Fprintf(&g.globals, "\t%s;\n", g.decl(v.Type, member))
 		}
 	}
 	for _, f := range prog.Funcs {
@@ -168,9 +189,15 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 			fmt.Fprintf(&b, "extern sq_pool %s;\n", p.CName)
 		}
 	}
-	b.WriteString("\n// globals\n")
+	b.WriteString("\n// error constants: shared by all shards\n")
+	b.WriteString(g.constGlobals.String())
+	b.WriteString("\n// package variables: one copy per shard (scheduler thread)\nstruct sq_globals {\n")
 	b.WriteString(g.globals.String())
 	b.WriteString(g.statics.String())
+	b.WriteString("};\nstatic struct sq_globals sq_globals0;\n")
+	b.WriteString("static _Thread_local struct sq_globals *sq_globals_self = &sq_globals0;\n")
+	b.WriteString("const size_t sq_globals_size = sizeof(struct sq_globals);\n")
+	b.WriteString("void sq_globals_set(void *p) { sq_globals_self = p; }\n")
 	b.WriteString("\n// prototypes\n")
 	b.WriteString(protos.String())
 	b.WriteString(g.goSites.String())
@@ -689,6 +716,7 @@ func (g *gen) lineDirective(p Pos) {
 func (g *gen) function(f *Func) string {
 	g.fn = f
 	g.tmpN = 0
+	g.usesGlobals = false
 	g.topDecls = nil
 	var body strings.Builder
 	g.out = &body
@@ -715,6 +743,9 @@ func (g *gen) function(f *Func) string {
 		}
 	}
 	b.WriteString("static " + attr + g.proto(f) + " {\n")
+	if g.usesGlobals {
+		b.WriteString("\tstruct sq_globals *const sq_gl = sq_globals_self;\n")
+	}
 	for _, d := range g.topDecls {
 		b.WriteString("\t" + d + "\n")
 	}
@@ -754,19 +785,35 @@ func (g *gen) initFunction() string {
 			}
 			for i, x := range vs.Values {
 				v := vs.Names[i].Obj.Var
+				if !strings.HasPrefix(v.CName, "sq_gl->") && v.ArenaSize == 0 {
+					continue // an error constant, initialized statically
+				}
 				g.lineDirective(x.Pos())
 				g.hoisted = nil
 				val := g.coerce(x, v.Type)
 				for _, h := range g.hoisted {
-					// package-level storage must be static
-					g.statics.WriteString("static " + h + "\n")
+					// package-level storage lives in the shard's globals too
+					g.statics.WriteString("\t" + h + "\n")
+					f := strings.Fields(strings.TrimSuffix(h, ";"))
+					g.staticNames = append(g.staticNames, f[len(f)-1])
 				}
 				g.hoisted = nil
 				g.line("%s = %s;", v.CName, val)
 			}
 		}
 	}
-	return "\nstatic void sq_init_globals(void) {\n" + body.String() + "}\n"
+	var b strings.Builder
+	for _, n := range g.staticNames {
+		fmt.Fprintf(&b, "#define %s (sq_gl->%s)\n", n, n)
+	}
+	b.WriteString("\nstatic void sq_init_globals(void) {\n\tstruct sq_globals *const sq_gl = sq_globals_self;\n")
+	b.WriteString(g.arenaInits.String())
+	b.WriteString(body.String())
+	b.WriteString("}\n")
+	for _, n := range g.staticNames {
+		fmt.Fprintf(&b, "#undef %s\n", n)
+	}
+	return b.String()
 }
 
 func (g *gen) poolFor(f *Func) *PoolInfo {

@@ -136,6 +136,9 @@ func (g *gen) ident(e *Ident) string {
 	}
 	switch o.Kind {
 	case ObjVar:
+		if strings.HasPrefix(o.Var.CName, "sq_gl->") {
+			g.usesGlobals = true
+		}
 		return o.Var.CName
 	case ObjFunc:
 		return o.Func.CName
@@ -151,6 +154,9 @@ func (g *gen) selector(e *SelectorExpr) string {
 		o := e.Sel.Obj
 		switch o.Kind {
 		case ObjVar:
+			if strings.HasPrefix(o.Var.CName, "sq_gl->") {
+				g.usesGlobals = true
+			}
 			return o.Var.CName
 		case ObjFunc:
 			return o.Func.CName

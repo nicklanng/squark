@@ -1085,6 +1085,12 @@ func (c *Checker) unary(e *UnaryExpr, hint Type) {
 			c.invalid(e)
 			return
 		}
+		if v := readOnlyVar(e.X); v != nil && v.ArenaSize == 0 {
+			// error constants are read-only and shared by every scheduler thread
+			c.errorf(e.P, "cannot take address of error constant %s", exprString(e.X))
+			c.invalid(e)
+			return
+		}
 		e.T, e.Mode = &Pointer{Elem: e.X.info().T}, ModeValue
 		return
 	}
@@ -1404,3 +1410,19 @@ func constInt(x Expr) (int64, bool) {
 }
 
 var _ = strconv.Itoa
+
+// readOnlyVar returns the read-only package variable (an error constant or a package arena) that x
+// names, or nil.
+func readOnlyVar(x Expr) *Var {
+	switch x := unparen(x).(type) {
+	case *Ident:
+		if x.Obj != nil && x.Obj.Var != nil && x.Obj.Var.ReadOnly {
+			return x.Obj.Var
+		}
+	case *SelectorExpr:
+		if x.Kind == SelQualified && x.Sel.Obj != nil && x.Sel.Obj.Var != nil && x.Sel.Obj.Var.ReadOnly {
+			return x.Sel.Obj.Var
+		}
+	}
+	return nil
+}

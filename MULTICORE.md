@@ -68,9 +68,13 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
       single shard: scheduler context, current goroutine, run queue, counters, poller fd and
       change list, timer heap, idle set, output buffer, `fd_read_kind`, the HTTP date cache. No
       behaviour change; check the benchmarks for the cost of thread-local access. — done: `sq_shard` + `_Thread_local sq_shard *sq_self`; notes HTTP throughput unchanged on macOS (224k/201k/153k vs 226k/202k/153k)
-- [ ] 2.2 Generated code: package variables (and package arenas, map/channel storage) into a
+- [x] 2.2 Generated code: package variables (and package arenas, map/channel storage) into a
       per-shard globals struct, reached through the shard; `sq_init_globals` runs per shard.
-      Static initializers that hold addresses move into the per-shard init.
+      Static initializers that hold addresses move into the per-shard init. — done: `struct sq_globals` (package variables, package arenas,
+      storage hoisted from initializers), `sq_globals_self` (thread-local) cached in a local `sq_gl`
+      by each function that uses globals; `sq_globals_size`/`sq_globals_set` exported for 2.4.
+      Error constants became shared `static const` values (and taking their address is now an
+      error: it allowed writing to a constant). HTTP throughput on macOS within noise of before.
 - [ ] 2.3 Goroutine pools per shard: descriptors, goroutine tables and stacks set up per shard at
       start (mmap, so `threads auto` works); generated code names pools by index.
 - [ ] 2.4 `threads N` (or `auto`) in package `main`: start N shard threads, each with its own
@@ -116,3 +120,4 @@ first thing to consider instead.
   design decisions.
 - 2026-10-14: stage 2 decisions recorded (main on every shard; per-shard package variables);
   steps 2.1–2.9 written; 2.1 done.
+- 2026-10-14: 2.2 done.
