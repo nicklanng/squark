@@ -208,8 +208,21 @@ func build(a arena, n int) *Node { return new(Node) in a }   // allocate in the 
 
 ### Constants, variables, types
 
-As in Go, plus error constants: `const ErrNotFound = error(404, "not found")`. These are read-only
-values, compared with `==`.
+As in Go, plus two kinds of constant data:
+
+- Error constants: `const ErrNotFound = error(404, "not found")`, compared with `==`.
+- Constant composites: arrays and structs whose elements are constants (numbers, strings, bools,
+  errors, or arrays and structs of them):
+
+  ```go
+  const primes = [5]int{2, 3, 5, 7, 11}
+  const defaults = Config{Port: 8080, Name: "notes"}
+  ```
+
+Both are read-only data in the binary, shared by every scheduler thread (`threads N`). Reading,
+indexing, ranging and copying them work as for variables; assigning to them or their elements,
+taking their address, slicing them and calling pointer methods on them are errors. Copy into a
+variable first (`t := primes`) to get something writable.
 
 ## 5. Expressions
 
@@ -311,7 +324,7 @@ must not outlive the memory it points to:
 | `memory budget exceeded` | lower pool sizes (`pool pkg.task N`), fewer `workers`, or raise the budget |
 | `workers auto can't be checked against the budget` | `workers N` with the number of cores you deploy on |
 | `threads auto can't be checked against the budget` | `threads N` with the number of cores you deploy on |
-| `cannot take address of error constant` | copy it into a variable first: `e := ErrX; p := &e` |
+| `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (error constants, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |
 | `defer inside a loop` | move the loop body into a function and defer there |
 
 ## 8. Idioms: translating Go

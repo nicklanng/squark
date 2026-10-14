@@ -1,0 +1,13 @@
+package main
+
+type Bad struct {
+	P *int
+}
+
+var n = 3
+
+const notConst = [2]int{1, n} // ERROR "const notConst: n is not constant"
+const withSlice = [1][]int{} // ERROR "const withSlice: []int can't be constant data"
+const withPtr = Bad{} // ERROR "const withPtr: *int can't be constant data"
+
+func main() {}

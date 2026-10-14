@@ -106,8 +106,16 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
       836k / 660k / 205k and Go GOMAXPROCS=3 468k / 255k / 92k. `/notes/1` is ~13% behind workers,
       unexplained so far; a guess (not measured) is SQLite's process-wide per-file lock state,
       which processes don't share.
-- [ ] 2.8 Shared immutable data: a way to declare package data shared by all shards, immutable
-      after initialization, checked by the compiler.
+- [x] 2.8a Constant composites — **decided 2026-10-14: both 2.8a and 2.8b.** `const T = [N]E{...}`
+      / `Config{...}` built from constants is read-only data in the binary, shared by every
+      shard (same machinery as error constants). Writes, `&`, slicing and pointer-method calls on
+      them (or their elements/fields) are errors. Done: `testdata/run/const_composite.sq`,
+      `testdata/errors/const_composite.sq`, `const_data.sq`; builds with clang and gcc.
+- [ ] 2.8b `shared var x = expr`: initialized once, on shard 0 in its main goroutine (so the
+      initializer may do I/O) before the other shards start; read-only afterwards with the same
+      rules as constants. Types limited to what can't be written through (numbers, strings, bools,
+      errors, arrays and structs of them), since there's no way to freeze what a slice or pointer
+      points to.
 - [ ] 2.9 Cross-shard channels.
 
 **Done when** one process uses every core with no data races by construction, and matches or

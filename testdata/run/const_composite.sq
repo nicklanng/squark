@@ -1,0 +1,28 @@
+package main
+
+// constant composites: tables and structs built from constants, read-only and shared by every
+// scheduler thread
+
+type Point struct {
+	X, Y int
+	Name string
+}
+
+const primes = [5]int{2, 3, 5, 7, 11}
+const origin = Point{0, 0, "origin"}
+const grid = [2][2]Point{{{1, 2, "a"}, {3, 4, "b"}}, {{5, 6, "c"}, {7, 8, "d"}}}
+const ErrX = error(7, "x")
+const errs = [2]error{ErrX, error(8, "y")}
+
+func (p *Point) Move() { p.X++ }
+func (p Point) Sum() int { return p.X + p.Y }
+
+func main() {
+	sum := 0
+	for _, p := range primes {
+		sum += p
+	}
+	c := origin
+	c.Move()
+	println(sum, len(primes), primes[3], origin.Name, origin.Sum(), c.X, grid[1][0].Name, errs[1].Error())
+}

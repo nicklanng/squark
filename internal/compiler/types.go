@@ -287,7 +287,8 @@ type Var struct {
 	AddrTaken bool
 	CName    string // unique C name (locals)
 	Used     bool
-	ReadOnly bool // error constants, arenas
+	ReadOnly bool // error constants, constant composites, arenas
+	ConstData bool // const X = T{...}: must be built from constants only
 
 	ArenaSize     int64 // for arenas
 	ArenaSizeExpr Expr

@@ -139,6 +139,9 @@ func (g *gen) ident(e *Ident) string {
 		if strings.HasPrefix(o.Var.CName, "sq_gl->") {
 			g.usesGlobals = true
 		}
+		if _, ok := g.constInit[o.Var]; ok && g.inConstInit {
+			return g.constValue(o.Var)
+		}
 		return o.Var.CName
 	case ObjFunc:
 		return o.Func.CName
@@ -156,6 +159,9 @@ func (g *gen) selector(e *SelectorExpr) string {
 		case ObjVar:
 			if strings.HasPrefix(o.Var.CName, "sq_gl->") {
 				g.usesGlobals = true
+			}
+			if _, ok := g.constInit[o.Var]; ok && g.inConstInit {
+				return g.constValue(o.Var)
 			}
 			return o.Var.CName
 		case ObjFunc:

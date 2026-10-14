@@ -5,8 +5,8 @@ import "io"
 const ErrMine = error(1, "mine")
 
 func main() {
-	p := &ErrMine // ERROR "cannot take address of error constant ErrMine"
-	q := &io.EOF  // ERROR "cannot take address of error constant io.EOF"
+	p := &ErrMine // ERROR "cannot take address of ErrMine (it is a constant)"
+	q := &io.EOF  // ERROR "cannot take address of io.EOF (it is a constant)"
 	e := ErrMine
 	r := &e
 	println(p, q, r)

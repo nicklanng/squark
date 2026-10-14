@@ -61,7 +61,24 @@ type gen struct {
 	staticNames  []string        // their names, macro'd to sq_gl-> inside the init function only
 	arenaInits   strings.Builder
 	constGlobals strings.Builder // error constants: static const, shared by all shards
+	constInit    map[*Var]Expr   // constants' initializers
+	constC       map[*Var]string // their C values, inlined where one constant's initializer uses
+	// another (a const variable isn't a constant expression in C); functions read them by name
+	inConstInit bool
 	usesGlobals  bool            // the function being generated reads or writes a package variable
+}
+
+// constValue returns a constant's C value (computed once).
+func (g *gen) constValue(v *Var) string {
+	if c, ok := g.constC[v]; ok {
+		return c
+	}
+	saved := g.inConstInit
+	g.inConstInit = true
+	c := g.coerce(g.constInit[v], v.Type)
+	g.inConstInit = saved
+	g.constC[v] = c
+	return c
 }
 
 // uniqueCName reserves a package-level C name, adding a numeric suffix if it is already taken.
@@ -131,7 +148,8 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 		protos.WriteString("static " + g.proto(f) + ";\n")
 	}
 	// globals
-	constInit := map[*Var]Expr{} // error constants: read-only, initialized once, shared by all shards
+	constInit := map[*Var]Expr{} // constants: read-only, initialized once, shared by all shards
+	g.constInit, g.constC = constInit, map[*Var]string{}
 	for _, p := range prog.Packages {
 		for _, vs := range p.GlobalInits {
 			for i, n := range vs.Names {
@@ -155,7 +173,8 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 			}
 			if x, ok := constInit[v]; ok {
 				v.CName = member
-				fmt.Fprintf(&g.constGlobals, "static const %s = %s;\n", g.decl(v.Type, member), g.coerce(x, v.Type))
+				_ = x
+				fmt.Fprintf(&g.constGlobals, "static const %s = %s;\n", g.decl(v.Type, member), g.constValue(v))
 				continue
 			}
 			v.CName = "sq_gl->" + member

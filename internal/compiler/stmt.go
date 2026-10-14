@@ -152,12 +152,8 @@ func (c *Checker) checkAssignTarget(x Expr) bool {
 	if xi.Mode == ModeInvalid {
 		return false
 	}
-	if id, ok := unparen(x).(*Ident); ok && id.Obj != nil && id.Obj.Var != nil && id.Obj.Var.ReadOnly {
-		c.errorf(x.Pos(), "cannot assign to %s (it is a constant)", id.Name)
-		return false
-	}
-	if se, ok := unparen(x).(*SelectorExpr); ok && se.Kind == SelQualified && se.Sel.Obj != nil && se.Sel.Obj.Var != nil && se.Sel.Obj.Var.ReadOnly {
-		c.errorf(x.Pos(), "cannot assign to %s (it is a constant)", exprString(x))
+	if v, root := readOnlyBase(x); v != nil {
+		c.errorf(x.Pos(), "cannot assign to %s (%s)", exprString(x), constWhat(x, root))
 		return false
 	}
 	if xi.Mode == ModeVar || xi.Mode == ModeMapIndex {

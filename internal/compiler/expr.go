@@ -866,6 +866,8 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 			case ptrRecv && !viaPtr:
 				if xi.Mode != ModeVar {
 					c.errorf(e.Pos(), "cannot call pointer method %s on %s (not addressable)", name, exprString(e.X))
+				} else if v, root := readOnlyBase(e.X); v != nil {
+					c.errorf(e.Pos(), "cannot call pointer method %s on %s (%s is a constant)", name, exprString(e.X), exprString(root))
 				}
 				e.Implicit = "&"
 			case !ptrRecv && viaPtr:
@@ -997,6 +999,12 @@ func (c *Checker) sliceExpr(e *SliceExpr) {
 			c.invalid(e)
 			return
 		}
+		if v, root := readOnlyBase(e.X); v != nil {
+			// a slice would be a writable view of read-only memory
+			c.errorf(e.P, "cannot slice %s (%s is a constant; copy it into a variable first)", exprString(e.X), exprString(root))
+			c.invalid(e)
+			return
+		}
 		length = u.Len
 		e.T = &Slice{Elem: u.Elem}
 	case *Pointer:
@@ -1085,9 +1093,9 @@ func (c *Checker) unary(e *UnaryExpr, hint Type) {
 			c.invalid(e)
 			return
 		}
-		if v := readOnlyVar(e.X); v != nil && v.ArenaSize == 0 {
-			// error constants are read-only and shared by every scheduler thread
-			c.errorf(e.P, "cannot take address of error constant %s", exprString(e.X))
+		if v, root := readOnlyBase(e.X); v != nil {
+			// constants are read-only and shared by every scheduler thread
+			c.errorf(e.P, "cannot take address of %s (%s)", exprString(e.X), constWhat(e.X, root))
 			c.invalid(e)
 			return
 		}
@@ -1410,6 +1418,39 @@ func constInt(x Expr) (int64, bool) {
 }
 
 var _ = strconv.Itoa
+
+// constWhat says why x is read-only: "it is a constant", or "T is a constant" for part of T.
+func constWhat(x, root Expr) string {
+	if unparen(x) == unparen(root) {
+		return "it is a constant"
+	}
+	return exprString(root) + " is a constant"
+}
+
+// readOnlyBase returns the constant (error constant or constant composite) that x is, or is an
+// element or field of by value, and the expression naming it; nil if x is writable. Package arenas
+// are read-only names but hold writable memory, so they don't count.
+func readOnlyBase(x Expr) (*Var, Expr) {
+	for {
+		switch e := unparen(x).(type) {
+		case *IndexExpr:
+			if _, ok := e.X.info().T.Underlying().(*Array); !ok {
+				return nil, nil // through a slice, pointer or map: not this storage
+			}
+			x = e.X
+			continue
+		case *SelectorExpr:
+			if e.Kind == SelField && e.Implicit != "*" {
+				x = e.X
+				continue
+			}
+		}
+		if v := readOnlyVar(x); v != nil && v.ArenaSize == 0 {
+			return v, x
+		}
+		return nil, nil
+	}
+}
 
 // readOnlyVar returns the read-only package variable (an error constant or a package arena) that x
 // names, or nil.

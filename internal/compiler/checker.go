@@ -143,10 +143,11 @@ func (c *Checker) collect(pkg *Package) {
 					}
 				case CONST:
 					for _, vs := range d.Values {
-						if isErrorConst(vs) {
-							// error constants are static read-only values
+						if isErrorConst(vs) || isCompositeConst(vs) {
+							// error constants and constant composites (tables, structs) are static
+							// read-only values, shared by every scheduler thread
 							for _, name := range vs.Names {
-								v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, ReadOnly: true}
+								v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, ReadOnly: true, ConstData: isCompositeConst(vs)}
 								o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f}
 								v.Obj = o
 								name.Obj = o
@@ -259,6 +260,87 @@ func isErrorConst(vs *ValueSpec) bool {
 	}
 	id, ok := call.Fun.(*Ident)
 	return ok && id.Name == "error"
+}
+
+// isCompositeConst reports const X = T{...}: a constant table or struct.
+func isCompositeConst(vs *ValueSpec) bool {
+	if len(vs.Values) == 0 {
+		return false
+	}
+	for _, x := range vs.Values {
+		if _, ok := unparen(x).(*CompositeLit); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// checkConstData reports where a constant composite isn't made of constants: its type may hold
+// numbers, strings, bools, errors and arrays or structs of them, and every element must be a
+// constant expression.
+func (c *Checker) checkConstData(name string, x Expr) {
+	if t := constDataType(x.info().T, map[Type]bool{}); t != nil {
+		c.errorf(x.Pos(), "const %s: %s can't be constant data (only numbers, strings, bools, errors and arrays or structs of them)", name, t)
+		return
+	}
+	var walk func(x Expr)
+	walk = func(x Expr) {
+		switch e := unparen(x).(type) {
+		case *CompositeLit:
+			for _, el := range e.Elts {
+				walk(el)
+			}
+		case *KeyValueExpr:
+			walk(e.Value)
+		default:
+			if x.info().Const == nil && !isErrorConstExpr(x) {
+				c.errorf(x.Pos(), "const %s: %s is not constant", name, exprString(x))
+			}
+		}
+	}
+	walk(x)
+}
+
+// isErrorConstExpr reports an error constant (error(...) or a name for one) inside a constant composite.
+func isErrorConstExpr(x Expr) bool {
+	switch e := unparen(x).(type) {
+	case *CallExpr:
+		return e.Builtin == "__error" || isErrorCall(e)
+	}
+	v := readOnlyVar(x)
+	return v != nil && v.ArenaSize == 0
+}
+
+func isErrorCall(e *CallExpr) bool {
+	id, ok := e.Fun.(*Ident)
+	return ok && id.Name == "error"
+}
+
+// constDataType returns the part of t that constant data can't contain, or nil.
+func constDataType(t Type, seen map[Type]bool) Type {
+	if seen[t] {
+		return nil
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *Basic:
+		if u.Kind == Rawptr {
+			return t
+		}
+		return nil
+	case *ErrorType:
+		return nil
+	case *Array:
+		return constDataType(u.Elem, seen)
+	case *Struct:
+		for _, f := range u.Fields {
+			if bad := constDataType(f.Type, seen); bad != nil {
+				return bad
+			}
+		}
+		return nil
+	}
+	return t
 }
 
 type constDecl struct {
@@ -487,7 +569,7 @@ func (c *Checker) resolveDecls(pkg *Package) {
 				continue
 			}
 			for _, vs := range g.Values {
-				if g.Tok == CONST && !isErrorConst(vs) {
+				if g.Tok == CONST && !isErrorConst(vs) && !isCompositeConst(vs) {
 					continue
 				}
 				c.globalVarSpec(vs)
@@ -537,6 +619,9 @@ func (c *Checker) globalVarSpec(vs *ValueSpec) {
 			}
 		} else {
 			c.assignable(x, t, "variable declaration")
+		}
+		if n.Obj.Var.ConstData {
+			c.checkConstData(n.Name, x)
 		}
 		n.Obj.Var.Type = t
 		n.Obj.Type = t

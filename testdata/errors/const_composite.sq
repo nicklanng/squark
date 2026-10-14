@@ -1,0 +1,29 @@
+package main
+
+type Point struct {
+	X, Y int
+}
+
+type Bad struct {
+	P *int
+}
+
+func (p *Point) Move() { p.X++ }
+
+const primes = [3]int{2, 3, 5}
+const origin = Point{0, 0}
+const nested = [1]Point{{1, 2}}
+
+func main() {
+	primes[0] = 1 // ERROR "cannot assign to primes[0] (primes is a constant)"
+	origin.X++ // ERROR "cannot assign to origin.X (origin is a constant)"
+	nested[0].Y += 2 // ERROR "cannot assign to nested[0].Y (nested is a constant)"
+	p := &primes[1] // ERROR "cannot take address of primes[1] (primes is a constant)"
+	s := primes[:] // ERROR "cannot slice primes (primes is a constant; copy it into a variable first)"
+	origin.Move() // ERROR "cannot call pointer method Move on origin (origin is a constant)"
+	q := &origin // ERROR "cannot take address of origin (it is a constant)"
+	c := primes // a copy is an ordinary variable
+	c[0] = 9
+	cs := c[:]
+	println(p, s, q, c[0], len(cs))
+}
