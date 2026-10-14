@@ -458,7 +458,7 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 - [x] **E9. `json.Decoder` accepts invalid JSON** (bug) — fixed: numbers follow the JSON grammar (a fraction or exponent is ErrType for Int, consumed), literals must end at a delimiter, Skip accepts only values; new `Null()`; test: `testdata/run/json_strict.sq` `Skip` accepts `@@@` and `nul`; `Int`
   accepts `007`, and on `1.5`/`1e3` returns `(1, true)` with the error surfacing later as a syntax
   error; `Bool` accepts `truex`.
-- [ ] **E10. Errors cascade from invalid types** (polish) One mistake reports many: `sort.Slice(&v,
+- [x] **E10. Errors cascade from invalid types** (polish) — fixed: once an error is reported, messages mentioning the invalid type (always a consequence) are dropped, and a failed range still declares its variables; the sort.Slice(&v) case now compiles (E4); test: `testdata/errors/cascade.sq` One mistake reports many: `sort.Slice(&v,
   less)` gives 17 errors inside `sort.sq`; `undefined: strings.CutPrefix` is followed by
   "cannot use ... as type invalid type"; a failed `range` reports `undefined: h`. Errors whose
   operands already have the invalid type should be dropped.

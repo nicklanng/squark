@@ -650,6 +650,13 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 	c.openScope()
 	defer c.closeScope()
 	if !c.valueExpr(s.X, nil) {
+		if s.Define { // declare the variables anyway, so the body doesn't report them as undefined
+			for _, v := range []Expr{s.Key, s.Value} {
+				if id, ok := v.(*Ident); ok && !isBlank(id) {
+					c.declareVar(id, tInvalid)
+				}
+			}
+		}
 		c.stmt(s.Body)
 		return
 	}

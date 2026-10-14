@@ -1,0 +1,18 @@
+package main
+
+import "strings"
+
+// One mistake, one error: what follows from an expression that already failed isn't reported.
+
+func main() {
+	x, ok := strings.NoSuchFunction("ab", "a") // ERROR "undefined: strings.NoSuchFunction"
+	if ok && x == "" {
+		println(x + "!")
+	}
+	for i, b := range []byte("hello") { // ERROR "converting \"hello\" to []byte copies it"
+		println(i, b)
+	}
+	switch x {
+	case "y":
+	}
+}

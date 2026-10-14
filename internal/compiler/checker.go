@@ -122,6 +122,11 @@ func Check(prog *Program) error {
 
 func (c *Checker) errorf(pos Pos, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
+	// An expression only has the invalid type after an error was reported for it: a message
+	// mentioning that type is a consequence of an earlier one, not news.
+	if len(c.errs) > 0 && strings.Contains(msg, tInvalid.String()) {
+		return
+	}
 	if c.inst != nil {
 		msg += c.instanceNote()
 	}
