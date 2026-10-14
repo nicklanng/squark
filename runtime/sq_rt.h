@@ -184,6 +184,8 @@ extern sq_pool *const sq_pools[];
 extern const int64_t sq_npools;
 extern sq_pool sq_main_pool;
 extern const int64_t sq_max_goroutines;
+extern const int64_t sq_workers; // workers N (0: one per core)
+extern int64_t sq_worker_count;    // processes actually running
 void sq_program_main(void *args);
 
 #endif

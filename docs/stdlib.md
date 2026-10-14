@@ -98,6 +98,7 @@ func (f os.File) Close() error
 func (f os.File) ReadFull(p []byte) (int, error)
 
 extern func Exit(code int) stack 8192
+extern func Getpid() int stack 1024
 extern func Getenv(name string) string static stack 8192
 func Errno(n int) error
 func NArgs() int

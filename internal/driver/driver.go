@@ -48,20 +48,22 @@ type Result struct {
 
 // MemoryReport is the worst-case memory a program can use, computed at build time.
 type MemoryReport struct {
-	Budget int64 // 0: none declared
-	Code   int64 // __TEXT and read-only data
-	Static int64 // data + bss: package variables, arenas, channel buffers, goroutine tables
-	Pools  []PoolReport
-	CLibs  []string
+	Budget  int64 // 0: none declared
+	Workers int64 // processes (workers N); 0: one per core, unknown when compiling
+	Code    int64 // __TEXT and read-only data
+	Static  int64 // data + bss: package variables, arenas, channel buffers, goroutine tables
+	Pools   []PoolReport
+	CLibs   []string
 }
 
-// Worst returns the worst-case total.
+// Worst returns the worst-case total. Worker processes share the code but each has its own static
+// data and goroutine stacks; with workers auto this is the total for one worker.
 func (m *MemoryReport) Worst() int64 {
-	t := m.Code + m.Static
+	per := m.Static
 	for _, p := range m.Pools {
-		t += int64(p.Count) * p.Touchable
+		per += int64(p.Count) * p.Touchable
 	}
-	return t
+	return m.Code + max(m.Workers, 1)*per
 }
 
 var heapSymbols = []string{"malloc", "calloc", "realloc", "free", "posix_memalign", "aligned_alloc", "valloc", "strdup", "strndup", "asprintf", "vasprintf"}
@@ -236,6 +238,7 @@ func Build(opt Options) (*Result, error) {
 	fmt.Fprintf(&pools, "sq_pool *const sq_pools[] = {%s};\n", strings.Join(names, ", "))
 	fmt.Fprintf(&pools, "const int64_t sq_npools = %d;\n", len(out.Pools))
 	fmt.Fprintf(&pools, "const int64_t sq_max_goroutines = %d;\n", total)
+	fmt.Fprintf(&pools, "const int64_t sq_workers = %d;\n", prog.Workers)
 	fmt.Fprintf(&pools, "sq_g *sq_timer_heap[%d];\n", total)
 	if err := os.WriteFile(filepath.Join(work, "pools.c"), []byte(pools.String()), 0o644); err != nil {
 		return nil, err
@@ -281,7 +284,7 @@ func Build(opt Options) (*Result, error) {
 		return nil, fmt.Errorf("link failed:\n%s", stderr.String())
 	}
 	res.Binary = absOut
-	mem := &MemoryReport{Budget: prog.Budget, Pools: res.Pools}
+	mem := &MemoryReport{Budget: prog.Budget, Workers: prog.Workers, Pools: res.Pools}
 	mem.Code, mem.Static, err = segmentSizes(absOut)
 	if err != nil {
 		if prog.Budget > 0 {
@@ -339,6 +342,8 @@ func FormatMemory(m *MemoryReport) string {
 	var b strings.Builder
 	if m.Budget > 0 {
 		fmt.Fprintf(&b, "memory: worst case %s of %s budget\n", human(m.Worst()), human(m.Budget))
+	} else if m.Workers == 0 {
+		fmt.Fprintf(&b, "memory: worst case %s per worker, one worker per core (no budget declared)\n", human(m.Worst()))
 	} else {
 		fmt.Fprintf(&b, "memory: worst case %s (no budget declared)\n", human(m.Worst()))
 	}
@@ -352,6 +357,12 @@ func FormatMemory(m *MemoryReport) string {
 			name = "main goroutine"
 		}
 		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack (proven %d B)\n", name, human(int64(p.Count)*p.Touchable), p.Count, human(p.Touchable), p.Stack)
+	}
+	switch {
+	case m.Workers == 0:
+		fmt.Fprintf(&b, "  %-26s %12s   one process per core: everything but code is per worker, so multiply by the core count\n", "workers", "auto")
+	case m.Workers > 1:
+		fmt.Fprintf(&b, "  %-26s %12s   processes; code is shared, static data and stacks above are per worker (counted %d×)\n", "workers", fmt.Sprint(m.Workers), m.Workers)
 	}
 	if len(m.CLibs) > 0 {
 		verb := "manages its"

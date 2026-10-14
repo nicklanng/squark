@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -497,6 +498,21 @@ func TestBudget(t *testing.T) {
 	if _, _, err := segmentSizes(filepath.Join(dir, "main.sq")); err == nil {
 		t.Errorf("segmentSizes on a text file: want an error")
 	}
+
+	// with workers N everything but code counts N times: 6 MiB fits a 16 MiB budget, 4 workers don't
+	src = "package main\n\nimport \"os\"\n\nbudget 16M\nworkers WORKERS\n\nvar big [6 << 20]byte\n\nfunc main() {\n\tbig[os.NArgs()*1000] = 1\n\tprintln(big[os.NArgs()*999])\n}\n"
+	for _, tc := range []struct {
+		workers string
+		fits    bool
+	}{{"1", true}, {"4", false}} {
+		if err := os.WriteFile(filepath.Join(dir, "main.sq"), []byte(strings.Replace(src, "WORKERS", tc.workers, 1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Build(Options{Dir: dir, Output: filepath.Join(dir, "prog")})
+		if tc.fits && err != nil || !tc.fits && (err == nil || !strings.Contains(err.Error(), "memory budget exceeded")) {
+			t.Errorf("workers %s: %v", tc.workers, err)
+		}
+	}
 }
 
 // TestPackageC: a package's C files see its own headers, failures in them name the package, and
@@ -748,5 +764,167 @@ func TestNoHeapAtRuntime(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Errorf("heap allocations after startup: %q before the work, %q after", before, after)
+	}
+}
+
+// TestWorkers runs testdata/workers (workers 4): four processes serve one address, a stop signal
+// or a crashing worker stops them all, and on Linux the kernel spreads connections across them.
+func TestWorkers(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "workers")
+	res, err := Build(Options{Dir: "../../testdata/workers", Output: bin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Memory.Workers != 4 {
+		t.Errorf("memory report: workers %d, want 4", res.Memory.Workers)
+	}
+	alive := func(pid int) bool { return syscall.Kill(pid, 0) == nil }
+	start := func() (*exec.Cmd, string, *bytes.Buffer, []int) {
+		t.Helper()
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := l.Addr().String()
+		l.Close()
+		cmd := exec.Command(bin, addr)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		var kids []int
+		for i := 0; i < 200 && len(kids) < 4; i++ {
+			time.Sleep(20 * time.Millisecond)
+			out, _ := exec.Command("pgrep", "-P", strconv.Itoa(cmd.Process.Pid)).Output()
+			kids = kids[:0]
+			for _, f := range strings.Fields(string(out)) {
+				n, _ := strconv.Atoi(f)
+				kids = append(kids, n)
+			}
+		}
+		if len(kids) != 4 {
+			cmd.Process.Kill()
+			t.Fatalf("want 4 worker processes, found %v", kids)
+		}
+		for i := 0; ; i++ {
+			if c, err := net.Dial("tcp", addr); err == nil {
+				c.Close()
+				break
+			}
+			if i == 200 {
+				t.Fatalf("workers did not start serving: %s", stderr.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return cmd, addr, &stderr, kids
+	}
+	wait := func(cmd *exec.Cmd) int {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			cmd.Process.Kill()
+			t.Fatal("supervisor did not exit")
+		}
+		return cmd.ProcessState.ExitCode()
+	}
+	gone := func(kids []int) {
+		t.Helper()
+		for i := 0; i < 100; i++ {
+			left := 0
+			for _, k := range kids {
+				if alive(k) {
+					left++
+				}
+			}
+			if left == 0 {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Errorf("worker processes still running: %v", kids)
+	}
+
+	// every worker serves; the kernel spreads new connections on Linux
+	cmd, addr, _, kids := start()
+	pids := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		tr := &http.Transport{DisableKeepAlives: true}
+		resp, err := (&http.Client{Transport: tr}).Get("http://" + addr + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		pids[string(b)] = true
+	}
+	for p := range pids {
+		n, _ := strconv.Atoi(p)
+		if !slicesContains(kids, n) {
+			t.Errorf("response from pid %s, not one of the workers %v", p, kids)
+		}
+	}
+	if runtime.GOOS == "linux" && len(pids) < 2 {
+		t.Errorf("200 connections all reached one worker: %v", pids)
+	}
+	cmd.Process.Signal(syscall.SIGTERM)
+	if code := wait(cmd); code != 128+int(syscall.SIGTERM) {
+		t.Errorf("after SIGTERM: exit status %d, want %d", code, 128+int(syscall.SIGTERM))
+	}
+	gone(kids)
+
+	// a failing worker stops the program with its status
+	cmd, addr, stderr, kids := start()
+	http.Get("http://" + addr + "/crash")
+	if code := wait(cmd); code != 3 {
+		t.Errorf("after a worker crash: exit status %d, want 3", code)
+	}
+	if !strings.Contains(stderr.String(), "exited with status 3; stopping the other workers") {
+		t.Errorf("stderr: %q", stderr.String())
+	}
+	gone(kids)
+
+	// Linux: workers stop when the supervisor is killed outright
+	if runtime.GOOS == "linux" {
+		cmd, _, _, kids := start()
+		cmd.Process.Kill()
+		cmd.Wait()
+		gone(kids)
+	}
+}
+
+func slicesContains(s []int, v int) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWorkersSQLite: workers setting up one new SQLite database at the same moment all succeed
+// (SQLite reports "database is locked" there without waiting; the std package retries).
+func TestWorkersSQLite(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "prog")
+	if _, err := Build(Options{Dir: "../../testdata/workers_sqlite", Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		db := filepath.Join(dir, fmt.Sprintf("run%d.db", i))
+		if out, err := exec.Command(bin, db).CombinedOutput(); err != nil {
+			t.Fatalf("run %d: %v\n%s", i, err, out)
+		}
+		rows, err := exec.Command("sqlite3", db, "SELECT count(DISTINCT pid) FROM seen").Output()
+		if err != nil {
+			t.Skipf("sqlite3 command not available to check the rows: %v", err)
+		}
+		if strings.TrimSpace(string(rows)) != "4" {
+			t.Fatalf("run %d: %s distinct workers wrote a row, want 4", i, rows)
+		}
 	}
 }

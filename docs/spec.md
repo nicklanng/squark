@@ -28,7 +28,9 @@ current.
 9. **`string(b)` is a zero-copy view of `b`.** `[]byte(s)` is an error without an arena.
 10. **Single-threaded and cooperative.** Goroutines switch only at blocking operations (I/O, channel
     operations, `time.Sleep`, `go` on a full pool). A busy loop blocks everything; data shared
-    between goroutines needs no locks as long as you don't block mid-update.
+    between goroutines needs no locks as long as you don't block mid-update. To use more cores,
+    `workers N` runs N copies of the program as separate processes (nothing is shared, so this
+    rule holds in each).
 
 ## 1. Lexical elements
 
@@ -39,7 +41,7 @@ current.
   - `from` and `static` after results.
   - `static` before a parameter type, and `into` after one.
   - `cap` after a `map`/`chan` type.
-  - `budget`, `pool`, `link`, `cflags` and `ldflags` as top-level directives.
+  - `budget`, `pool`, `workers`, `link`, `cflags` and `ldflags` as top-level directives.
 - **Size literals:** a decimal integer immediately followed by `K`, `M` or `G` is multiplied by 2^10,
   2^20 or 2^30: `64K == 65536`.
 - **`..`** appears only in vector types: `[..N]T`.
@@ -60,6 +62,7 @@ import (
 // top-level directives come after the imports
 budget 128M                 // package main only: fail the build if worst-case memory exceeds this
 pool http.serveConn 512     // package main only: resize a task's pool (pkg.task or task)
+workers 4                   // package main only: run 4 processes (or auto: one per core); see §9
 link "sqlite3"              // link a C library (any package)
 cflags "-I/opt/include"     // C compiler flags for this package's .c files
 ldflags "-L/opt/lib"        // linker flags
@@ -303,7 +306,8 @@ must not outlive the memory it points to:
 | `cannot copy x: T contains … storage` | pass or keep a pointer (`*T`); range by index and use `&xs[i]` |
 | `append exceeds capacity` (runtime panic) | larger storage, or `append(...) in a` |
 | `map capacity exceeded` (runtime panic) | a larger `cap N` |
-| `memory budget exceeded` | lower pool sizes (`pool pkg.task N`) or raise the budget |
+| `memory budget exceeded` | lower pool sizes (`pool pkg.task N`), fewer `workers`, or raise the budget |
+| `workers auto can't be checked against the budget` | `workers N` with the number of cores you deploy on |
 | `defer inside a loop` | move the loop body into a function and defer there |
 
 ## 8. Idioms: translating Go
@@ -375,6 +379,14 @@ func handle(w *http.ResponseWriter, r *http.Request) {
 
 - One OS thread. Goroutines are cooperative and switch at blocking operations. Netpoll is kqueue on
   macOS and epoll on Linux.
+- `workers N` (1 to 1024, or `auto` for one per core) starts N processes before any squark code
+  runs; each has its own package variables, goroutines and connections. Listening sockets use
+  `SO_REUSEPORT`, so the kernel spreads connections across the workers (on Linux; macOS sends them
+  all to one). The starting process supervises: SIGINT, SIGTERM and SIGHUP are passed on to every
+  worker, and if one exits with a non-zero status the others are stopped and that status is the
+  program's. On Linux workers also stop if the supervisor is killed. The memory budget counts code
+  once and everything else once per worker; `workers auto` can't be combined with `budget`. SQLite
+  connections wait up to 5 seconds for another worker's lock.
 - Each task pool has N stacks of a size proven at compile time, each with a guard page. A C function
   that exceeds its `stack` budget hits the guard: `fatal error: stack overflow in goroutine [pool]`.
 - Panics print `panic: <message>` with the goroutine and source position, then exit with status 2.

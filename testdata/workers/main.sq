@@ -1,0 +1,26 @@
+package main
+
+// Test server for TestWorkers (internal/driver): 4 worker processes on one address. / answers with
+// the worker's process id; /crash makes that worker fail.
+
+import (
+	"http"
+	"os"
+	"strconv"
+)
+
+workers 4
+
+func handle(w *http.ResponseWriter, r *http.Request) {
+	if r.Path == "/crash" {
+		os.Exit(3)
+	}
+	var b [24]byte
+	w.Write(strconv.AppendInt(b[:0], os.Getpid()))
+}
+
+func main() {
+	if err := http.ListenAndServe(os.Arg(1), handle); err != nil {
+		panic(err)
+	}
+}

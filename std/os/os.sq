@@ -35,6 +35,9 @@ extern "sq_strerror" func strerror(errno int) string stack 8K
 
 extern "sq_exit" func Exit(code int) stack 8K
 
+// Getpid returns the process id (with workers N, each worker has its own).
+extern "sq_getpid" func Getpid() int stack 1K
+
 extern "sq_argc" func argc() int stack 8K
 
 extern "sq_argv" func argv(i int) string stack 8K

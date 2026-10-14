@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <netinet/in.h>
@@ -27,6 +28,7 @@
 #define SQ_KQUEUE 1
 #else
 #include <sys/epoll.h>
+#include <sys/prctl.h>
 #endif
 
 // ---------------------------------------------------------------------------
@@ -1346,6 +1348,9 @@ int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
 	if (fd < 0) return -errno;
 	int one = 1;
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	// workers N: every worker listens on the same address and the kernel spreads connections
+	// (only then: otherwise a second, unrelated server could silently share the port)
+	if (sq_worker_count > 1) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
 	struct sockaddr_in sa;
 	memset(&sa, 0, sizeof sa);
 	sa.sin_family = AF_INET;
@@ -1468,6 +1473,8 @@ sq_string sq_strerror(int64_t err) {
 	return (sq_string){(const uint8_t *)s, (int64_t)strlen(s)};
 }
 
+int64_t sq_getpid(void) { return (int64_t)getpid(); }
+
 void sq_exit(int64_t code) {
 	sq_flush();
 	_exit((int)code);
@@ -1585,9 +1592,103 @@ static void on_term(int sig) {
 	_exit(0);
 }
 
+// ---------------------------------------------------------------------------
+// workers N: a process per core. The parent forks the workers before any squark code runs, so
+// each initializes its own package variables, goroutine pools and connections, then supervises.
+
+#define SQ_MAX_WORKERS 1024
+int64_t sq_worker_count = 1; // processes running this program
+static pid_t worker_pids[SQ_MAX_WORKERS];
+static volatile sig_atomic_t stop_signal;
+
+static void on_stop(int sig) { stop_signal = sig; }
+
+static void err_num(int64_t v) {
+	char b[24];
+	int n = 0, k = 0;
+	char t[24];
+	if (v < 0) { b[k++] = '-'; v = -v; }
+	do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+	while (n) b[k++] = t[--n];
+	b[k] = 0;
+	err_write(b);
+}
+
+static void run_workers(void) {
+	int64_t n = sq_workers;
+	if (n == 0) { // workers auto
+		long c = sysconf(_SC_NPROCESSORS_ONLN);
+		n = c > 0 ? c : 1;
+	}
+	if (n > SQ_MAX_WORKERS) n = SQ_MAX_WORKERS;
+	sq_worker_count = n;
+	if (n <= 1) return;
+	pid_t parent = getpid();
+	for (int64_t i = 0; i < n; i++) {
+		pid_t pid = fork();
+		if (pid == 0) {
+#if !SQ_KQUEUE
+			prctl(PR_SET_PDEATHSIG, SIGTERM); // the supervisor is gone: stop too (Linux only)
+			if (getppid() != parent) _exit(1);
+#endif
+			return;
+		}
+		if (pid < 0) {
+			err_write("fatal error: cannot start worker processes\n");
+			for (int64_t j = 0; j < i; j++) kill(worker_pids[j], SIGTERM);
+			_exit(2);
+		}
+		worker_pids[i] = pid;
+	}
+	// supervisor: pass stop signals on, wait for every worker, and stop all if one fails
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = on_stop; // no SA_RESTART: waitpid returns EINTR so the signal is forwarded
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGHUP, &sa, NULL);
+	int64_t alive = n;
+	int status = 0;
+	int forwarded = 0;
+	while (alive > 0) {
+		if (stop_signal && stop_signal != forwarded) {
+			forwarded = stop_signal;
+			for (int64_t i = 0; i < n; i++)
+				if (worker_pids[i] > 0) kill(worker_pids[i], forwarded);
+		}
+		int st;
+		pid_t p = waitpid(-1, &st, 0);
+		if (p < 0) {
+			if (errno == EINTR) continue;
+			break;
+		}
+		int64_t idx = -1;
+		for (int64_t i = 0; i < n; i++)
+			if (worker_pids[i] == p) idx = i;
+		if (idx < 0) continue;
+		worker_pids[idx] = 0;
+		alive--;
+		int code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+		if (code != 0 && status == 0) {
+			status = code;
+			if (!stop_signal) {
+				err_write("squark: worker ");
+				err_num(idx);
+				err_write(" exited with status ");
+				err_num(code);
+				err_write("; stopping the other workers\n");
+				for (int64_t i = 0; i < n; i++)
+					if (worker_pids[i] > 0) kill(worker_pids[i], SIGTERM);
+			}
+		}
+	}
+	_exit(status); // the first failing worker's status, or a stop signal's 128+n, or 0
+}
+
 int main(int argc, char **argv) {
 	g_argc = argc;
 	g_argv = argv;
+	run_workers(); // returns in each worker process (or at once, for a single worker)
 	signal(SIGPIPE, SIG_IGN);
 	stack_t ss = {.ss_sp = sq_sigstack, .ss_size = sizeof sq_sigstack, .ss_flags = 0};
 	sigaltstack(&ss, NULL);

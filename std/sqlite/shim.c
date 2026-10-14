@@ -12,7 +12,10 @@ int64_t sq_sqlite_open(sq_string path, void **db) {
 	if (path.len >= (int64_t)sizeof buf) return SQLITE_CANTOPEN;
 	memcpy(buf, path.p, (size_t)path.len);
 	buf[path.len] = 0;
-	return sqlite3_open_v2(buf, (sqlite3 **)db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL);
+	int rc = sqlite3_open_v2(buf, (sqlite3 **)db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL);
+	// wait for another connection's lock (other worker processes) instead of failing at once
+	if (rc == SQLITE_OK) sqlite3_busy_timeout(*(sqlite3 **)db, 5000);
+	return rc;
 }
 
 int64_t sq_sqlite_close(void *db) { return sqlite3_close_v2(db); }
@@ -26,7 +29,15 @@ int64_t sq_sqlite_exec(void *db, sq_string sql) {
 		int rc = sqlite3_prepare_v2(db, p, (int)(end - p), &st, &tail);
 		if (rc != SQLITE_OK) return rc;
 		if (!st) break; // whitespace or comment
-		while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+		// SQLite skips the busy handler where waiting could deadlock (two connections setting up
+		// a new database at once, as workers N do). Outside a transaction the failed statement
+		// was rolled back, so retrying it is safe: up to the same 5 seconds as the busy timeout.
+		for (int tries = 0;; tries++) {
+			while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+			}
+			if ((rc & 0xff) != SQLITE_BUSY || !sqlite3_get_autocommit(db) || tries == 500) break;
+			sqlite3_reset(st);
+			sqlite3_sleep(10);
 		}
 		sqlite3_finalize(st);
 		if (rc != SQLITE_DONE) return rc;

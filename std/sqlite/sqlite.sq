@@ -75,7 +75,9 @@ func check(rc int) error {
 	return error(rc, errstr(rc))
 }
 
-// Open opens (creating if needed) a database file.
+// Open opens (creating if needed) a database file. When the file is locked by another connection
+// (another process, e.g. with workers N), statements wait up to 5 seconds before failing with
+// "database is locked"; the wait blocks the calling goroutine's whole thread.
 func Open(path string) (DB, error) {
 	var h rawptr
 	rc := open(path, &h)
@@ -84,7 +86,8 @@ func Open(path string) (DB, error) {
 
 func (db DB) Close() error { return check(closeDB(db.h)) }
 
-// Exec runs one or more SQL statements that return no rows.
+// Exec runs one or more SQL statements that return no rows. Outside a transaction, a statement
+// that finds the database locked (another worker setting it up) is retried for up to 5 seconds.
 func (db DB) Exec(sql string) error { return check(exec(db.h, sql)) }
 
 // Prepare compiles a statement for repeated use.

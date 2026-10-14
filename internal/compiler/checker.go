@@ -422,13 +422,31 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			d.Name.Obj.Type = fn.Sig
 		}
 	}
-	// budget and pool directives (package main only)
+	// budget, pool and workers directives (package main only)
+	var workersDir *Directive
 	for _, d := range pkg.Budgets {
 		if pkg != c.prog.Main {
 			c.errorf(d.P, "%s is only allowed in package main", d.Name)
 			continue
 		}
 		c.setFile(c.fileOf(d.P))
+		if d.Name == "workers" {
+			if workersDir != nil {
+				c.errorf(d.P, "duplicate workers")
+			}
+			workersDir = d
+			if id, ok := d.Value.(*Ident); ok && id.Name == "auto" {
+				c.prog.Workers = 0
+				continue
+			}
+			if n, ok := c.constSize(d.Value, "workers"); ok {
+				if n < 1 || n > 1024 {
+					c.errorf(d.P, "workers must be between 1 and 1024 (or auto: one per core)")
+				}
+				c.prog.Workers = n
+			}
+			continue
+		}
 		n, ok := c.constSize(d.Value, d.Name)
 		if !ok {
 			continue
@@ -450,6 +468,9 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			}
 			fn.Pool = int(n)
 		}
+	}
+	if workersDir != nil && c.prog.Workers == 0 && c.prog.Budget > 0 {
+		c.errorf(workersDir.P, "workers auto can't be checked against the budget: the number of cores isn't known when compiling; write workers N")
 	}
 	// global variable types
 	for _, f := range pkg.Files {

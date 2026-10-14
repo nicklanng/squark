@@ -228,7 +228,9 @@ the OS.
 `bench/results/latest.md`, along with the caveats below.
 
 - The squark server is single-threaded; Go's uses every core. The load generator runs on the same
-  machine.
+  machine. With `workers 3` on Linux (Docker, 6 cores shared with the load generator) notes serves
+  about 800k req/s on `/health` and 630k on `/notes/1`, against 450k and 295k for one process and
+  about 470k and 265k for Go with `GOMAXPROCS=3`; see `bench/workers-linux.sh`.
 - The JSON benchmark compares hand-written append code with Go's reflection-based `encoding/json`.
 - wordfreq streams the file and interns words in an arena, while Go's version reads the whole file,
   as idiomatic Go does.
@@ -253,7 +255,8 @@ docs/design.md      the language design and its rationale
 - Interfaces and generics.
 - Provenance contracts on function types. Indirect calls use whole-program inference instead.
 - `select`.
-- More than one OS thread. One scheduler per core with `SO_REUSEPORT` fits the model.
+- More than one OS thread per process. `workers N` already runs a process per core; a scheduler
+  per core in one process is next (see [MULTICORE.md](MULTICORE.md)).
 - Blocking C calls stall the scheduler thread.
 - Arena exhaustion panics. A `try`-able allocation form would make it recoverable.
 

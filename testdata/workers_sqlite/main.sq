@@ -1,0 +1,31 @@
+package main
+
+// Test program for TestWorkersSQLite (internal/driver): four workers set up the same new database at
+// once (WAL mode, schema) and each insert a row, then exit.
+
+import (
+	"os"
+	"sqlite"
+)
+
+workers 4
+
+func main() {
+	db, err := sqlite.Open(os.Arg(1))
+	if err != nil {
+		panic(err)
+	}
+	if err := db.Exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS seen(pid INTEGER)"); err != nil {
+		panic(err)
+	}
+	st, err := db.Prepare("INSERT INTO seen(pid) VALUES(?)")
+	if err != nil {
+		panic(err)
+	}
+	st.BindInt(1, os.Getpid())
+	if _, err := st.Step(); err != nil {
+		panic(err)
+	}
+	st.Finalize()
+	db.Close()
+}
