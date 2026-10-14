@@ -389,6 +389,12 @@ func (p *parser) params() []*Field {
 					e.static = true
 					e.typ = p.typ()
 				}
+				if p.tok.tok == IDENT && p.tok.lit == "static" && !e.static {
+					// a common slip: the qualifier goes before the type
+					p.errorf(p.tok.pos, "static goes before the type: write %s static %s", e.name.Name, exprString(e.typ))
+					p.next()
+					e.static = true
+				}
 				if p.tok.tok == IDENT && p.tok.lit == "into" {
 					p.next()
 					e.into = p.ident()

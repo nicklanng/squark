@@ -1,0 +1,9 @@
+package main
+
+var kept string
+
+func keep(name string static) { // ERROR "static goes before the type: write name static string"
+	kept = name
+}
+
+func main() { keep("x") }

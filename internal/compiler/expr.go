@@ -4,6 +4,7 @@ import (
 	"go/constant"
 	gotoken "go/token"
 	"strconv"
+	"strings"
 )
 
 func (c *Checker) expr(x Expr) { c.exprHint(x, nil) }
@@ -931,7 +932,7 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 				if xi.Mode != ModeVar {
 					c.errorf(e.Pos(), "cannot call pointer method %s on %s (not addressable)", name, exprString(e.X))
 				} else if v, root := readOnlyBase(e.X); v != nil {
-					c.errorf(e.Pos(), "cannot call pointer method %s on %s (%s is a constant)", name, exprString(e.X), exprString(root))
+					c.errorf(e.Pos(), "cannot call pointer method %s on %s (%s)", name, exprString(e.X), constNamed(root))
 				}
 				e.Implicit = "&"
 			case !ptrRecv && viaPtr:
@@ -1078,7 +1079,7 @@ func (c *Checker) sliceExpr(e *SliceExpr) {
 		}
 		if v, root := readOnlyBase(e.X); v != nil {
 			// a slice would be a writable view of read-only memory
-			c.errorf(e.P, "cannot slice %s (%s is a constant; copy it into a variable first)", exprString(e.X), exprString(root))
+			c.errorf(e.P, "cannot slice %s (%s; copy it into a variable first)", exprString(e.X), constNamed(root))
 			c.invalid(e)
 			return
 		}
@@ -1397,7 +1398,11 @@ func (c *Checker) comparison(e *BinaryExpr) {
 			return
 		}
 		if !isSlice && !isMap && !isFunc && !Comparable(t) {
-			c.errorf(e.P, "invalid operation: %s (%s cannot be compared)", exprString(e), t)
+			why := whyIncomparable(t)
+			if why != "" && !strings.Contains(why, " is ") {
+				why = t.String() + " is " + why
+			}
+			c.errorf(e.P, "invalid operation: %s (%s cannot be compared: %s)", exprString(e), t, why)
 			c.invalid(e)
 			return
 		}
@@ -1503,6 +1508,14 @@ func constWhat(x, root Expr) string {
 	}
 	if unparen(x) == unparen(root) {
 		return "it is a constant"
+	}
+	return exprString(root) + " is a constant"
+}
+
+// constNamed says why root is read-only, naming it: "t is a constant", "t is a shared var, ...".
+func constNamed(root Expr) string {
+	if v := readOnlyVar(root); v != nil && v.Shared {
+		return exprString(root) + " is a shared var, read-only after initialization"
 	}
 	return exprString(root) + " is a constant"
 }

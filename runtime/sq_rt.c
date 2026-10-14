@@ -584,7 +584,7 @@ void sq_panic_append(int64_t need, int64_t cap, const char *file, int line) {
 	err_int(need);
 	err_write(", capacity ");
 	err_int(cap);
-	err_write("); squark slices never grow onto the heap");
+	err_write("): squark slices never grow onto the heap; append into an arena (append(...) in a) or give the slice more capacity");
 	die(file, line);
 }
 
@@ -1386,7 +1386,7 @@ void *sq_map_get(sq_map *m, const void *key) {
 }
 
 void *sq_map_put(sq_map *m, const void *key, const char *file, int line) {
-	if (!m) sq_panic_cstr("assignment to entry in nil map", file, line);
+	if (!m) sq_panic_cstr("assignment to entry in nil map (a map needs storage: declare it map[K]V cap N, or make it in an arena)", file, line);
 	int64_t i = map_find(m, key);
 	if (i >= 0) return m->vals + i * m->valsize;
 	if (m->len >= m->maxlen) sq_panic_cstr("map capacity exceeded (squark maps have a fixed capacity set by make)", file, line);

@@ -374,7 +374,7 @@ func Build(opt Options) (*Result, error) {
 	}
 	res.Memory = mem
 	if prog.Budget > 0 && mem.Worst() > prog.Budget {
-		return res, fmt.Errorf("memory budget exceeded: worst case %s > budget %s\n%s", human(mem.Worst()), human(prog.Budget), FormatMemory(mem))
+		return res, fmt.Errorf("memory budget exceeded: worst case %s > budget %s\n%sto fit: lower task pool sizes (task f() pool N), shrink package arenas, arrays and channel capacities, use fewer threads or workers, or raise the budget", human(mem.Worst()), human(prog.Budget), FormatMemory(mem))
 	}
 	return res, nil
 }

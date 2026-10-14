@@ -590,6 +590,38 @@ func Comparable(t Type) bool {
 	return false
 }
 
+// whyIncomparable says what makes t incomparable, naming the field ("Board.hist is a vector");
+// "" if t is comparable.
+func whyIncomparable(t Type) string {
+	switch u := t.Underlying().(type) {
+	case *Basic, *Pointer, *Chan, *ErrorType:
+		return ""
+	case *Struct:
+		for _, f := range u.Fields {
+			if w := whyIncomparable(f.Type); w != "" {
+				if strings.Contains(w, " is ") {
+					return t.String() + "." + f.Name + "." + w
+				}
+				return t.String() + "." + f.Name + " is " + w
+			}
+		}
+		return ""
+	case *Array:
+		return whyIncomparable(u.Elem)
+	case *VecType:
+		return "a vector"
+	case *Slice:
+		return "a slice"
+	case *Map, *MapStore:
+		return "a map"
+	case *ChanStore:
+		return "channel storage"
+	case *Signature:
+		return "a function"
+	}
+	return "a " + t.String()
+}
+
 func defaultType(t Type) Type {
 	if b, ok := t.(*Basic); ok {
 		switch b.Kind {

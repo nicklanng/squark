@@ -1,0 +1,23 @@
+package main
+
+type Board struct {
+	cells [3]int
+	hist  [..4]int
+}
+
+type T struct{ P [3]int }
+
+func (t *T) bump() { t.P[0]++ }
+
+shared var t = T{}
+
+const c = T{}
+
+func main() {
+	var a, b Board
+	println(a == b) // ERROR "Board cannot be compared: Board.hist is a vector"
+	s := t.P[:] // ERROR "cannot slice t.P (t is a shared var, read-only after initialization; copy it into a variable first)"
+	t.bump() // ERROR "cannot call pointer method bump on t (t is a shared var, read-only after initialization)"
+	u := c.P[:] // ERROR "cannot slice c.P (c is a constant; copy it into a variable first)"
+	_, _ = s, u
+}

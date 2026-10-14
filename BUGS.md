@@ -465,7 +465,7 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 
 ### Error messages
 
-- [ ] **E11.** Name the culprit: the shared-channel element error should name the field
+- [x] **E11.** — fixed: shared-channel errors name the field (E8); "cannot be compared" names the field (`Board.hist is a vector`); slice and pointer-method errors on a shared var say so; `name string static` says where static goes; the append and nil-map panics name the fix; the budget error lists ways to fit. A map without `cap` is still caught at run time (now with the fix in the message): telling whether a map view ever gets storage would need flow analysis. Tests: `testdata/errors/name_the_cause.sq`, `static_order.sq`. Was: Name the culprit: the shared-channel element error should name the field
   (`Result.Name string`), "cannot be compared" should name the vector field that prevents it; a
   `shared var` is called "a constant" in "cannot slice t.P (t is a constant ...)"; `name string
   static` gives "expected ), found identifier" (want: write `name static string`); "append exceeds
