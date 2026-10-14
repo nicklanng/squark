@@ -318,7 +318,7 @@ of them (an index or ID instead of a string).
 | `make([]T, n[, c]) in a` | run-time sizes are OK. `make(map[K]V, n) in a` also works. `make` without an arena is an error, as is `make(chan ...)` |
 | `append(s, xs...)` | panics if the result exceeds `cap(s)`. `append(s, x) in a` grows into the arena instead |
 | `s + t` (strings) | only if both are constants, or `in a` |
-| `string(b)` | zero-copy view of `b`'s bytes. `string(b) in a` copies |
+| `string(b)` | zero-copy view of `b`'s bytes. `string(b) in a` copies into the arena, and so does `string(s) in a` for a string `s` (to keep a string beyond the memory it views) |
 | `[]byte(s)` | only `[]byte(s) in a` (copies). Otherwise `copy(buf[:], s)` |
 | `string(r)` (rune) | only for constants; use `utf8.AppendRune` |
 | `try f(...)` | if `f`'s last result (an `error`) is non-nil, return it from the enclosing function (whose last result must be `error`), with zero values for the other results. Otherwise yields the remaining results |

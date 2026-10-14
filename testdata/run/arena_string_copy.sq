@@ -1,0 +1,27 @@
+package main
+
+// string(s) in a copies s into the arena, whether s is a []byte or already a string: changing
+// the original bytes afterwards doesn't change the copy.
+
+arena keep 256
+
+var kept string
+
+func remember(s string) {
+	kept = string(s) in keep // a copy in static memory, so s may be on the caller's stack
+}
+
+func main() {
+	var buf [5]byte
+	copy(buf[:], "hello")
+	s := string(buf[:])
+	arena a 64 {
+		c := string(s) in a
+		b := string(buf[:]) in a
+		buf[0] = 'J'
+		println(s, c, b, a.Used())
+	}
+	remember(s)
+	buf[0] = 'Y'
+	println(kept, keep.Used())
+}

@@ -441,8 +441,8 @@ language as a user would. Repros below are minimal; the examples carry workaroun
   confirmed: the reader stayed parked) — fixed: one epoll registration per fd for both directions, data = fd, events dispatched to the table's reader and writer and the other direction re-armed; test: `testdata/run/fd_waiters.sq` `arm_fd` uses one epoll registration per fd, carrying one goroutine;
   a writer waiting on a socket replaces the reader parked on it, which is never woken. kqueue keys
   by (fd, filter) and is fine.
-- [ ] **E3. `string(s) in a` doesn't copy when `s` is already a string** (bug: spec says it
-  copies) The result still views the original bytes. Workaround: `string([]byte(s) in a)`.
+- [x] **E3. `string(s) in a` doesn't copy when `s` is already a string** (bug: spec says it
+  copies) — fixed: the checker attaches the arena to string→string conversions too (lifetime and codegen already handled it); test: `testdata/run/arena_string_copy.sq` The result still views the original bytes. Workaround: `string([]byte(s) in a)`.
 - [ ] **E4. A pointer to a vector doesn't dereference** (bug: arrays do) With `v *[..4]int`,
   `v.Push(x)`, `len(v)` and `v[i]` are errors; `(*v).Push(x)` works.
 - [ ] **E5. `len`, index and `range` reject a non-addressable vector** (bug: spec says they work on

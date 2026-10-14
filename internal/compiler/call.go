@@ -271,6 +271,11 @@ func (c *Checker) conversion(e *CallExpr, t Type) {
 			xi = x.info()
 		}
 	}
+	if isString(t) && isString(xi.T) && c.allocArena != nil {
+		// `string(s) in a` copies s into the arena (a plain string(s) is s itself)
+		e.InArena = c.allocArena
+		return
+	}
 	if convertible(xi.T, t) {
 		return
 	}
