@@ -1,0 +1,57 @@
+package main
+
+// math rounding, infinities and NaN; integers in other bases and padded; CutPrefix/CutSuffix and
+// AppendRepeat; os.ReadFile and ReadFull's EOF errors.
+
+import (
+	"io"
+	"math"
+	"os"
+	"strconv"
+	"strings"
+)
+
+func main() {
+	println(math.Round(2.5), math.Round(-2.5), math.Trunc(-2.7), math.Mod(7, -3), math.Log2(8), math.Log10(1000))
+	println(math.IsInf(math.Inf(1), 1), math.IsInf(math.Inf(-1), 1), math.IsInf(math.Inf(-1), 0), math.IsNaN(math.NaN()), math.IsNaN(1))
+	println(math.MaxInt == math.MaxInt64, math.MaxFloat64 > 1e308, math.SmallestNonzeroFloat64 > 0)
+
+	var b [80]byte
+	out := strconv.AppendIntBase(b[:0], 255, 16)
+	out = append(out, ' ')
+	out = strconv.AppendIntBase(out, -10, 2)
+	out = append(out, ' ')
+	out = strconv.AppendUintBase(out, 1<<63, 36)
+	out = append(out, ' ')
+	out = strconv.AppendIntPad(out, 7, 3, '0')
+	out = append(out, '|')
+	out = strconv.AppendIntPad(out, -7, 4, '0')
+	out = append(out, '|')
+	out = strconv.AppendIntPad(out, 42, 5, ' ')
+	out = append(out, '|')
+	out = strconv.AppendIntPad(out, 123456, 2, ' ')
+	println(string(out))
+
+	rest, ok := strings.CutPrefix("GET /x", "GET ")
+	name, ok2 := strings.CutSuffix("main.sq", ".go")
+	println(rest, ok, name, ok2, string(strings.AppendRepeat(b[:0], "ab", 3)), len(strings.AppendRepeat(b[:0], "x", 0)))
+
+	path := "/tmp/squark_stdlib_more_test.txt"
+	f, _ := os.Create(path)
+	f.WriteString("hello, file")
+	f.Close()
+	var small [4]byte
+	var big [64]byte
+	data, err := os.ReadFile(path, big[:])
+	println(string(data), err == nil)
+	data, err = os.ReadFile(path, small[:])
+	println(string(data), err == io.ErrTooLarge)
+	g, _ := os.Open(path)
+	n, err := g.ReadFull(big[:20])
+	println(n, err == io.ErrUnexpectedEOF)
+	n, err = g.ReadFull(big[:4])
+	println(n, err == io.EOF)
+	g.Close()
+	_, err = os.ReadFile("no/such/file", big[:])
+	println(err != nil)
+}

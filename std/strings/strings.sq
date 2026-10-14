@@ -79,6 +79,30 @@ func Cut(s, sep string) (string, string, bool) from s {
 	return s, "", false
 }
 
+// CutPrefix returns s without prefix and true, or s and false if s doesn't start with prefix.
+func CutPrefix(s, prefix string) (string, bool) from s {
+	if HasPrefix(s, prefix) {
+		return s[len(prefix):], true
+	}
+	return s, false
+}
+
+// CutSuffix returns s without suffix and true, or s and false if s doesn't end with suffix.
+func CutSuffix(s, suffix string) (string, bool) from s {
+	if HasSuffix(s, suffix) {
+		return s[:len(s)-len(suffix)], true
+	}
+	return s, false
+}
+
+// AppendRepeat appends n copies of s (Go's Repeat, into the caller's memory).
+func AppendRepeat(dst []byte, s string, n int) []byte from dst {
+	for i := 0; i < n; i++ {
+		dst = append(dst, s...)
+	}
+	return dst
+}
+
 func lower(c byte) byte {
 	if c >= 'A' && c <= 'Z' {
 		return c + 'a' - 'A'

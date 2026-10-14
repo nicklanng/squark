@@ -446,15 +446,10 @@ var input [maxInput]byte
 func main() {
 	n := copy(input[:], sample)
 	if os.NArgs() > 1 {
-		f, err := os.Open(os.Arg(1))
-		if err == nil {
-			n, err = f.ReadFull(input[:])
-			f.Close()
-			if err == io.EOF {
-				err = nil // a short read: the whole file fit
-			} else if err == nil {
-				err = ErrTooLarge // filled the buffer (or exactly 64K)
-			}
+		data, err := os.ReadFile(os.Arg(1), input[:])
+		n = len(data)
+		if err == io.ErrTooLarge {
+			err = ErrTooLarge
 		}
 		if err != nil {
 			println("jsonq:", os.Arg(1), ":", err.Error())

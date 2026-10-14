@@ -10,6 +10,8 @@ package io
 const EOF = error(-1, "EOF")
 const ErrShortWrite = error(-2, "short write")
 const ErrShortBuffer = error(-3, "short buffer")
+const ErrUnexpectedEOF = error(-4, "unexpected EOF")
+const ErrTooLarge = error(-5, "input larger than the buffer")
 
 package math
 
@@ -17,6 +19,10 @@ const Pi = 3.141592653589793
 const E = 2.718281828459045
 const MaxInt64 = 9223372036854775807
 const MinInt64 = -9223372036854775808
+const MaxInt = 9223372036854775807
+const MinInt = -9223372036854775808
+const MaxFloat64 = 1.7976931348623157e+308
+const SmallestNonzeroFloat64 = 5e-324
 
 extern func Sqrt(x float64) float64 stack 1024
 extern func Abs(x float64) float64 stack 1024
@@ -29,6 +35,19 @@ extern func Sin(x float64) float64 stack 1024
 extern func Cos(x float64) float64 stack 1024
 extern func Float64bits(f float64) uint64 stack 1024
 extern func Float64frombits(b uint64) float64 stack 1024
+extern func Round(x float64) float64 stack 1024
+extern func Trunc(x float64) float64 stack 1024
+extern func Mod(x float64, y float64) float64 stack 1024
+extern func Log2(x float64) float64 stack 1024
+extern func Log10(x float64) float64 stack 1024
+extern func Tan(x float64) float64 stack 1024
+extern func Atan(x float64) float64 stack 1024
+extern func Atan2(y float64, x float64) float64 stack 1024
+extern func Hypot(x float64, y float64) float64 stack 1024
+func Inf(sign int) float64
+func NaN() float64
+func IsNaN(f float64) bool
+func IsInf(f float64, sign int) bool
 
 package strconv
 
@@ -38,6 +57,9 @@ const ErrBase = error(22, "invalid base")
 
 func AppendInt(dst []byte, v int) []byte from dst
 func AppendUint(dst []byte, v uint64) []byte from dst
+func AppendIntBase(dst []byte, v int, base int) []byte from dst
+func AppendUintBase(dst []byte, v uint64, base int) []byte from dst
+func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst
 func FormatInt(buf []byte, v int) string from buf
 func AppendFloat(dst []byte, v float64, prec int) []byte from dst
 func Atoi(s string) (int, error)
@@ -56,6 +78,9 @@ func TrimSpace(s string) string from s
 func TrimPrefix(s string, prefix string) string from s
 func TrimSuffix(s string, suffix string) string from s
 func Cut(s string, sep string) (string, string, bool) from s
+func CutPrefix(s string, prefix string) (string, bool) from s
+func CutSuffix(s string, suffix string) (string, bool) from s
+func AppendRepeat(dst []byte, s string, n int) []byte from dst
 func EqualFold(a string, b string) bool
 func AppendLower(dst []byte, s string) []byte from dst
 func Split(s string into out, sep string, out []string) []string from out
@@ -125,6 +150,7 @@ func Open(path string) (os.File, error)
 func Create(path string) (os.File, error)
 func OpenFile(path string, flag int, perm int) (os.File, error)
 func FromFd(fd int) os.File
+func ReadFile(path string, buf []byte) ([]byte, error) from buf
 
 package time
 

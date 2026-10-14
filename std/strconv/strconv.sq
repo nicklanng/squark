@@ -32,6 +32,51 @@ func AppendUint(dst []byte, v uint64) []byte {
 }
 
 // FormatInt writes v into buf and returns it as a string view of buf.
+// AppendIntBase appends v in base 2 to 36 (lower-case letters for digits over 9), as Go's
+// strconv.AppendInt(dst, v, base) does. Base 16 gives hex.
+func AppendIntBase(dst []byte, v int, base int) []byte from dst {
+	if v < 0 {
+		dst = append(dst, '-')
+		return AppendUintBase(dst, uint64(0)-uint64(v), base)
+	}
+	return AppendUintBase(dst, uint64(v), base)
+}
+
+// AppendUintBase appends v in base 2 to 36.
+func AppendUintBase(dst []byte, v uint64, base int) []byte from dst {
+	if base < 2 || base > 36 {
+		panic(ErrBase)
+	}
+	var tmp [64]byte
+	i := len(tmp)
+	b := uint64(base)
+	for {
+		i--
+		tmp[i] = "0123456789abcdefghijklmnopqrstuvwxyz"[v%b]
+		v /= b
+		if v == 0 {
+			break
+		}
+	}
+	return append(dst, tmp[i:]...)
+}
+
+// AppendIntPad appends v in decimal, padded on the left with pad to at least width bytes
+// (AppendIntPad(dst, 7, 3, '0') appends "007"; a zero-padded negative number keeps its sign first).
+func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst {
+	var tmp [24]byte
+	digits := AppendInt(tmp[:0], v)
+	if pad == '0' && v < 0 {
+		dst = append(dst, '-')
+		digits = digits[1:]
+		width--
+	}
+	for n := len(digits); n < width; n++ {
+		dst = append(dst, pad)
+	}
+	return append(dst, digits...)
+}
+
 func FormatInt(buf []byte, v int) string {
 	return string(AppendInt(buf[:0], v))
 }

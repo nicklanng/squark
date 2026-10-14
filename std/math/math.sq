@@ -6,6 +6,11 @@ const (
 	E     = 2.71828182845904523536028747135266249775724709369995957496696763
 	MaxInt64 = 1<<63 - 1
 	MinInt64 = -1 << 63
+	MaxInt   = MaxInt64
+	MinInt   = MinInt64
+
+	MaxFloat64             = 1.79769313486231570814527423731704356798070e+308
+	SmallestNonzeroFloat64 = 4.9406564584124654417656879286822137236505980e-324
 )
 
 extern "sqrt" func Sqrt(x float64) float64 stack 1K
@@ -31,3 +36,44 @@ extern "sq_float64bits" func Float64bits(f float64) uint64 stack 1K
 
 // Float64frombits returns the float64 with IEEE 754 bits b.
 extern "sq_float64frombits" func Float64frombits(b uint64) float64 stack 1K
+
+// Round returns x rounded to the nearest integer, halves away from zero.
+extern "round" func Round(x float64) float64 stack 1K
+
+// Trunc returns the integer part of x.
+extern "trunc" func Trunc(x float64) float64 stack 1K
+
+// Mod returns the remainder of x/y, with the sign of x.
+extern "fmod" func Mod(x, y float64) float64 stack 1K
+
+extern "log2" func Log2(x float64) float64 stack 1K
+
+extern "log10" func Log10(x float64) float64 stack 1K
+
+extern "tan" func Tan(x float64) float64 stack 1K
+
+extern "atan" func Atan(x float64) float64 stack 1K
+
+extern "atan2" func Atan2(y, x float64) float64 stack 1K
+
+extern "hypot" func Hypot(x, y float64) float64 stack 1K
+
+// Inf returns positive infinity if sign >= 0, negative infinity otherwise.
+func Inf(sign int) float64 {
+	if sign >= 0 {
+		return Float64frombits(0x7FF0000000000000)
+	}
+	return Float64frombits(0xFFF0000000000000)
+}
+
+// NaN returns an IEEE 754 not-a-number value.
+func NaN() float64 { return Float64frombits(0x7FF8000000000001) }
+
+// IsNaN reports whether f is not a number.
+func IsNaN(f float64) bool { return f != f }
+
+// IsInf reports whether f is an infinity: either one if sign is 0, +Inf if sign > 0, -Inf if
+// sign < 0.
+func IsInf(f float64, sign int) bool {
+	return sign >= 0 && f > MaxFloat64 || sign <= 0 && f < -MaxFloat64
+}
