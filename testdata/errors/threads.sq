@@ -1,0 +1,6 @@
+package main
+
+budget 64M
+threads auto // ERROR "threads auto can't be checked against the budget"
+
+func main() {}

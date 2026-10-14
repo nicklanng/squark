@@ -1,0 +1,34 @@
+package main
+
+// Test server for TestThreads (internal/driver): 4 scheduler threads in one process serve one
+// address. / answers "shard:count", where count is that shard's own request counter (package
+// variables are per shard); /crash panics on whichever shard serves it.
+
+import (
+	"http"
+	"os"
+	"runtime"
+	"strconv"
+)
+
+threads 4
+
+var served int
+
+func handle(w *http.ResponseWriter, r *http.Request) {
+	if r.Path == "/crash" {
+		panic("crash requested")
+	}
+	served++
+	var b [48]byte
+	out := strconv.AppendInt(b[:0], runtime.Shard())
+	out = append(out, ':')
+	out = strconv.AppendInt(out, served)
+	w.Write(out)
+}
+
+func main() {
+	if err := http.ListenAndServe(os.Arg(1), handle); err != nil {
+		panic(err)
+	}
+}

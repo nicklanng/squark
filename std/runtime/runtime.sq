@@ -1,0 +1,9 @@
+// Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
+// runs its own copy of main, with its own package variables and goroutines.
+package runtime
+
+// Shard returns the index of the calling goroutine's scheduler thread, from 0 to Shards()-1.
+extern "sq_shard_id" func Shard() int stack 1K
+
+// Shards returns the number of scheduler threads in this process (threads N; 1 by default).
+extern "sq_shard_total" func Shards() int stack 1K

@@ -62,11 +62,19 @@ func keepAlive(addr string, buf []byte) int {
 	return total
 }
 
+// echo accepts in a loop: with threads N the kernel may route several shards' connections to
+// one shard's listener
 task echo(l net.Listener) pool 1 {
-	c, err := l.Accept()
-	if err != nil {
-		return
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		go echoConn(c)
 	}
+}
+
+task echoConn(c net.Conn) pool 8 {
 	var b [64]byte
 	for {
 		n, err := c.Read(b[:])

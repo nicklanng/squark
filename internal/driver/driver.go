@@ -50,6 +50,7 @@ type Result struct {
 type MemoryReport struct {
 	Budget  int64 // 0: none declared
 	Workers int64 // processes (workers N); 0: one per core, unknown when compiling
+	Threads int64 // scheduler threads per process (threads N); 0: one per core
 	Code    int64 // __TEXT and read-only data
 	Static  int64 // data + bss: package variables, arenas, channel buffers, goroutine tables
 	Pools   []PoolReport
@@ -63,7 +64,7 @@ func (m *MemoryReport) Worst() int64 {
 	for _, p := range m.Pools {
 		per += int64(p.Count) * p.Touchable
 	}
-	return m.Code + max(m.Workers, 1)*per
+	return m.Code + max(m.Workers, 1)*max(m.Threads, 1)*per
 }
 
 var heapSymbols = []string{"malloc", "calloc", "realloc", "free", "posix_memalign", "aligned_alloc", "valloc", "strdup", "strndup", "asprintf", "vasprintf"}
@@ -126,7 +127,7 @@ func Build(opt Options) (*Result, error) {
 		return nil, err
 	}
 
-	cflags := []string{opt.OptFlag, "-std=gnu11", "-fwrapv", "-fno-strict-aliasing", "-w", "-fstack-usage", "-I", work}
+	cflags := []string{opt.OptFlag, "-std=gnu11", "-pthread", "-fwrapv", "-fno-strict-aliasing", "-w", "-fstack-usage", "-I", work}
 	var extraCflags, ldflags []string
 	for _, p := range prog.Packages {
 		extraCflags = append(extraCflags, p.CFlags...)
@@ -198,8 +199,12 @@ func Build(opt Options) (*Result, error) {
 		return nil, err
 	}
 	var rtMax int64
+	// functions that run only on a scheduler thread's own stack (or the signal stack), never on a
+	// goroutine's: their frames don't count against goroutine stacks
+	schedulerOnly := map[string]bool{"main": true, "schedule": true, "on_fault": true, "netpoll": true,
+		"shard_run": true, "shard_thread": true, "shard_new": true, "run_workers": true, "fire_timers": true}
 	for name, sz := range rtFrames {
-		if name == "main" || name == "schedule" || name == "on_fault" {
+		if schedulerOnly[name] {
 			continue
 		}
 		if sz > rtMax {
@@ -231,7 +236,7 @@ func Build(opt Options) (*Result, error) {
 		// stacks are reserved with one mmap per pool at startup (a multi-GiB BSS would collide
 		// with the dyld shared region on macOS); their size is still fixed at compile time
 		fmt.Fprintf(&pools, "static sq_g sq_gs%d[%d];\n", i, p.Count)
-		fmt.Fprintf(&pools, "sq_pool %s = {%q, %d, %d, %d, NULL, sq_gs%d};\n\n", p.CName, p.Name, p.Count, need, slot, i)
+		fmt.Fprintf(&pools, "sq_pool %s = {.name = %q, .count = %d, .stack_size = %d, .slot_size = %d, .gs = sq_gs%d, .index = %d};\n\n", p.CName, p.Name, p.Count, need, slot, i, i)
 		names = append(names, "&"+p.CName)
 		res.Pools = append(res.Pools, PoolReport{Name: p.Name, Count: p.Count, Stack: need, Slot: slot, Touchable: usable})
 	}
@@ -239,6 +244,7 @@ func Build(opt Options) (*Result, error) {
 	fmt.Fprintf(&pools, "const int64_t sq_npools = %d;\n", len(out.Pools))
 	fmt.Fprintf(&pools, "const int64_t sq_max_goroutines = %d;\n", total)
 	fmt.Fprintf(&pools, "const int64_t sq_workers = %d;\n", prog.Workers)
+	fmt.Fprintf(&pools, "const int64_t sq_threads = %d;\n", prog.Threads)
 	fmt.Fprintf(&pools, "sq_g *sq_timer_heap[%d];\n", total)
 	if err := os.WriteFile(filepath.Join(work, "pools.c"), []byte(pools.String()), 0o644); err != nil {
 		return nil, err
@@ -275,7 +281,7 @@ func Build(opt Options) (*Result, error) {
 	if st, err := os.Stat(absOut); err == nil && st.IsDir() {
 		return nil, fmt.Errorf("build output %q already exists and is a directory (use -o)", output)
 	}
-	args := append(append([]string{opt.OptFlag, "-o", absOut}, objs...), ldflags...)
+	args := append(append([]string{opt.OptFlag, "-pthread", "-o", absOut}, objs...), ldflags...)
 	cmd := ccCommand(args...)
 	cmd.Dir = work
 	var stderr bytes.Buffer
@@ -284,7 +290,7 @@ func Build(opt Options) (*Result, error) {
 		return nil, fmt.Errorf("link failed:\n%s", stderr.String())
 	}
 	res.Binary = absOut
-	mem := &MemoryReport{Budget: prog.Budget, Workers: prog.Workers, Pools: res.Pools}
+	mem := &MemoryReport{Budget: prog.Budget, Workers: prog.Workers, Threads: prog.Threads, Pools: res.Pools}
 	mem.Code, mem.Static, err = segmentSizes(absOut)
 	if err != nil {
 		if prog.Budget > 0 {
@@ -342,8 +348,8 @@ func FormatMemory(m *MemoryReport) string {
 	var b strings.Builder
 	if m.Budget > 0 {
 		fmt.Fprintf(&b, "memory: worst case %s of %s budget\n", human(m.Worst()), human(m.Budget))
-	} else if m.Workers == 0 {
-		fmt.Fprintf(&b, "memory: worst case %s per worker, one worker per core (no budget declared)\n", human(m.Worst()))
+	} else if m.Workers == 0 || m.Threads == 0 {
+		fmt.Fprintf(&b, "memory: worst case %s per core (no budget declared)\n", human(m.Worst()))
 	} else {
 		fmt.Fprintf(&b, "memory: worst case %s (no budget declared)\n", human(m.Worst()))
 	}
@@ -363,6 +369,12 @@ func FormatMemory(m *MemoryReport) string {
 		fmt.Fprintf(&b, "  %-26s %12s   one process per core: everything but code is per worker, so multiply by the core count\n", "workers", "auto")
 	case m.Workers > 1:
 		fmt.Fprintf(&b, "  %-26s %12s   processes; code is shared, static data and stacks above are per worker (counted %d×)\n", "workers", fmt.Sprint(m.Workers), m.Workers)
+	}
+	switch {
+	case m.Threads == 0:
+		fmt.Fprintf(&b, "  %-26s %12s   one scheduler thread per core: static data and stacks are per thread, so multiply by the core count\n", "threads", "auto")
+	case m.Threads > 1:
+		fmt.Fprintf(&b, "  %-26s %12s   scheduler threads; static data and stacks above are per thread (counted %d×)\n", "threads", fmt.Sprint(m.Threads), m.Threads)
 	}
 	if len(m.CLibs) > 0 {
 		verb := "manages its"

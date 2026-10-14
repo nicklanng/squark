@@ -423,27 +423,31 @@ func (c *Checker) resolveDecls(pkg *Package) {
 		}
 	}
 	// budget, pool and workers directives (package main only)
-	var workersDir *Directive
+	var workersDir, threadsDir *Directive
 	for _, d := range pkg.Budgets {
 		if pkg != c.prog.Main {
 			c.errorf(d.P, "%s is only allowed in package main", d.Name)
 			continue
 		}
 		c.setFile(c.fileOf(d.P))
-		if d.Name == "workers" {
-			if workersDir != nil {
-				c.errorf(d.P, "duplicate workers")
+		if d.Name == "workers" || d.Name == "threads" {
+			dir, count := &workersDir, &c.prog.Workers
+			if d.Name == "threads" {
+				dir, count = &threadsDir, &c.prog.Threads
 			}
-			workersDir = d
+			if *dir != nil {
+				c.errorf(d.P, "duplicate %s", d.Name)
+			}
+			*dir = d
 			if id, ok := d.Value.(*Ident); ok && id.Name == "auto" {
-				c.prog.Workers = 0
+				*count = 0
 				continue
 			}
-			if n, ok := c.constSize(d.Value, "workers"); ok {
+			if n, ok := c.constSize(d.Value, d.Name); ok {
 				if n < 1 || n > 1024 {
-					c.errorf(d.P, "workers must be between 1 and 1024 (or auto: one per core)")
+					c.errorf(d.P, "%s must be between 1 and 1024 (or auto: one per core)", d.Name)
 				}
-				c.prog.Workers = n
+				*count = n
 			}
 			continue
 		}
@@ -469,8 +473,10 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			fn.Pool = int(n)
 		}
 	}
-	if workersDir != nil && c.prog.Workers == 0 && c.prog.Budget > 0 {
-		c.errorf(workersDir.P, "workers auto can't be checked against the budget: the number of cores isn't known when compiling; write workers N")
+	for _, d := range []*Directive{workersDir, threadsDir} {
+		if d != nil && c.prog.Budget > 0 && (d == workersDir && c.prog.Workers == 0 || d == threadsDir && c.prog.Threads == 0) {
+			c.errorf(d.P, "%s auto can't be checked against the budget: the number of cores isn't known when compiling; write %s N", d.Name, d.Name)
+		}
 	}
 	// global variable types
 	for _, f := range pkg.Files {

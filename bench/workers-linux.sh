@@ -1,6 +1,7 @@
 #!/bin/sh
-# Compares the notes server as one process, as `workers 3`, and Go with GOMAXPROCS=3, on Linux in
-# Docker (macOS doesn't spread SO_REUSEPORT connections across processes). The load generator
+# Compares the notes server as one process, as `workers 3` (processes), as `threads 3` (scheduler
+# threads in one process), and Go with GOMAXPROCS=3, on Linux in Docker (macOS doesn't spread
+# SO_REUSEPORT connections across processes). The load generator
 # shares the machine, as in run.sh. Needs Docker; the repo is mounted read-only.
 #
 #   bench/workers-linux.sh
@@ -16,6 +17,8 @@ go build -o /tmp/load ./bench/load
 bin/squark build -o /tmp/notes1 examples/notes >/dev/null
 cp -r examples/notes /tmp/notesw && sed -i '"'"'/^budget /d'"'"' /tmp/notesw/main.sq && printf '"'"'package main\n\nworkers 3\n'"'"' > /tmp/notesw/workers.sq
 bin/squark build -o /tmp/notes3 /tmp/notesw >/dev/null
+cp -r examples/notes /tmp/notest && sed -i '"'"'/^budget /d'"'"' /tmp/notest/main.sq && printf '"'"'package main\n\nthreads 3\n'"'"' > /tmp/notest/threads.sq
+bin/squark build -o /tmp/notest3 /tmp/notest >/dev/null
 cpu() { # total utime+stime (seconds) of a process and its children
 	t=0
 	for p in $1 $(pgrep -P $1); do
@@ -49,5 +52,6 @@ run() { # name, command...
 }
 run "squark (1 process)" /tmp/notes1 -port 8080 -db /tmp/b.db
 run "squark (workers 3)" /tmp/notes3 -port 8080 -db /tmp/b.db
+run "squark (threads 3)" /tmp/notest3 -port 8080 -db /tmp/b.db
 run "go (GOMAXPROCS=3)" env GOMAXPROCS=3 /tmp/gonotes -port 8080 -db /tmp/b.db
 '

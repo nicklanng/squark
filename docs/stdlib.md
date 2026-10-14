@@ -259,6 +259,11 @@ func AppendInt(dst []byte, v int) []byte from dst
 func AppendBool(dst []byte, v bool) []byte from dst
 func NewDecoder(data []byte) json.Decoder from data
 
+package runtime
+
+extern func Shard() int stack 1024
+extern func Shards() int stack 1024
+
 package sqlite
 
 const OK = 0

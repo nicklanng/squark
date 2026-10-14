@@ -72,6 +72,7 @@ type Program struct {
 	InitFunc *Func // synthetic function holding package-level initializer calls
 	Budget   int64 // budget N in package main (0: none)
 	Workers  int64 // workers N in package main: processes to run (default 1; 0: one per core)
+	Threads  int64 // threads N in package main: scheduler threads per process (default 1; 0: one per core)
 
 	GoSites    []*GoStmt
 	MakeSites  []*CallExpr
@@ -98,7 +99,7 @@ func (l *Loader) Load() (*Program, error) {
 	if mainPkg.Name != "main" {
 		return nil, fmt.Errorf("%s: package %s is not a main package", l.MainDir, mainPkg.Name)
 	}
-	prog := &Program{Packages: l.order, Main: mainPkg, Workers: 1}
+	prog := &Program{Packages: l.order, Main: mainPkg, Workers: 1, Threads: 1}
 	return prog, nil
 }
 
@@ -192,7 +193,7 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 					case "ldflags":
 						pkg.LDFlags = append(pkg.LDFlags, fields...)
 					}
-				case "budget", "pool", "workers":
+				case "budget", "pool", "workers", "threads":
 					pkg.Budgets = append(pkg.Budgets, d)
 				}
 			}

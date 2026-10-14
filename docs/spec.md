@@ -29,8 +29,9 @@ current.
 10. **Single-threaded and cooperative.** Goroutines switch only at blocking operations (I/O, channel
     operations, `time.Sleep`, `go` on a full pool). A busy loop blocks everything; data shared
     between goroutines needs no locks as long as you don't block mid-update. To use more cores,
-    `workers N` runs N copies of the program as separate processes (nothing is shared, so this
-    rule holds in each).
+    `threads N` runs N scheduler threads in one process and `workers N` runs N processes; either
+    way each runs its own copy of `main` with its own package variables, so this rule holds in
+    each.
 
 ## 1. Lexical elements
 
@@ -41,7 +42,7 @@ current.
   - `from` and `static` after results.
   - `static` before a parameter type, and `into` after one.
   - `cap` after a `map`/`chan` type.
-  - `budget`, `pool`, `workers`, `link`, `cflags` and `ldflags` as top-level directives.
+  - `budget`, `pool`, `workers`, `threads`, `link`, `cflags` and `ldflags` as top-level directives.
 - **Size literals:** a decimal integer immediately followed by `K`, `M` or `G` is multiplied by 2^10,
   2^20 or 2^30: `64K == 65536`.
 - **`..`** appears only in vector types: `[..N]T`.
@@ -63,6 +64,7 @@ import (
 budget 128M                 // package main only: fail the build if worst-case memory exceeds this
 pool http.serveConn 512     // package main only: resize a task's pool (pkg.task or task)
 workers 4                   // package main only: run 4 processes (or auto: one per core); see §9
+threads 4                   // package main only: run 4 scheduler threads (or auto); see §9
 link "sqlite3"              // link a C library (any package)
 cflags "-I/opt/include"     // C compiler flags for this package's .c files
 ldflags "-L/opt/lib"        // linker flags
@@ -308,6 +310,7 @@ must not outlive the memory it points to:
 | `map capacity exceeded` (runtime panic) | a larger `cap N` |
 | `memory budget exceeded` | lower pool sizes (`pool pkg.task N`), fewer `workers`, or raise the budget |
 | `workers auto can't be checked against the budget` | `workers N` with the number of cores you deploy on |
+| `threads auto can't be checked against the budget` | `threads N` with the number of cores you deploy on |
 | `cannot take address of error constant` | copy it into a variable first: `e := ErrX; p := &e` |
 | `defer inside a loop` | move the loop body into a function and defer there |
 
@@ -378,8 +381,18 @@ func handle(w *http.ResponseWriter, r *http.Request) {
 
 ## 9. Runtime behaviour
 
-- One OS thread. Goroutines are cooperative and switch at blocking operations. Netpoll is kqueue on
-  macOS and epoll on Linux.
+- One OS thread by default. Goroutines are cooperative and switch at blocking operations. Netpoll is
+  kqueue on macOS and epoll on Linux.
+- `threads N` (1 to 1024, or `auto` for one per core) runs N scheduler threads (shards) in one
+  process. Each shard runs `main` with its own package variables, goroutine pools, timers and
+  poller; goroutines never move between shards, so rule 10 holds within each and nothing needs
+  locks. Error constants are shared (they're read-only). Listening on an address from every shard
+  works: on Linux each shard gets its own socket (`SO_REUSEPORT`) and the kernel spreads
+  connections; on macOS the shards share one socket. `runtime.Shard()` and `runtime.Shards()`
+  report where a goroutine runs. The process exits when every shard's `main` has returned (a
+  shard whose `main` returns stops its goroutines), at the first panic, or at `os.Exit`. The
+  memory budget counts static data and stacks once per shard (and `threads auto` can't be
+  combined with `budget`). `threads` and `workers` combine: workers × threads shards in all.
 - `workers N` (1 to 1024, or `auto` for one per core) starts N processes before any squark code
   runs; each has its own package variables, goroutines and connections. Listening sockets use
   `SO_REUSEPORT`, so the kernel spreads connections across the workers (on Linux; macOS sends them

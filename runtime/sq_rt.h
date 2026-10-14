@@ -139,6 +139,7 @@ typedef struct sq_pool {
 	sq_g *waitq_head, *waitq_tail; // goroutines waiting for a free slot
 	int64_t live, peak, started;
 	int64_t observed; // deepest stack use seen (only with SQ_STACKCHECK=1)
+	int64_t index;    // position in sq_pools; each shard has its own copy of every pool
 } sq_pool;
 
 void sq_go(sq_pool *pool, void (*entry)(void *), const void *args, size_t argsize);
@@ -186,6 +187,10 @@ extern sq_pool sq_main_pool;
 extern const int64_t sq_max_goroutines;
 extern const int64_t sq_workers; // workers N (0: one per core)
 extern int64_t sq_worker_count;    // processes actually running
+extern int64_t sq_shard_count;     // scheduler threads in this process
+extern const int64_t sq_threads;   // threads N (0: one per core)
+extern const size_t sq_globals_size; // generated: one shard's package variables
+void sq_globals_set(void *p);        // generated: point this thread at a shard's package variables
 void sq_program_main(void *args);
 
 #endif

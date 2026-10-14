@@ -75,16 +75,33 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
       by each function that uses globals; `sq_globals_size`/`sq_globals_set` exported for 2.4.
       Error constants became shared `static const` values (and taking their address is now an
       error: it allowed writing to a constant). HTTP throughput on macOS within noise of before.
-- [ ] 2.3 Goroutine pools per shard: descriptors, goroutine tables and stacks set up per shard at
-      start (mmap, so `threads auto` works); generated code names pools by index.
-- [ ] 2.4 `threads N` (or `auto`) in package `main`: start N shard threads, each with its own
+- [x] 2.3 Goroutine pools per shard: descriptors, goroutine tables and stacks set up per shard at
+      start (mmap, so `threads auto` works); generated code names pools by index. — done: generated pools are templates with an `index`; each shard
+      has its own copies (shard 0 uses the templates), and `sq_go` maps the template to the current
+      shard's pool.
+- [x] 2.4 `threads N` (or `auto`) in package `main`: start N shard threads, each with its own
       signal stack, running `main`. The process exits when every shard's `main` has returned, or
-      at the first panic. Budget × N (with `workers`, × workers × threads).
-- [ ] 2.5 Listening: `SO_REUSEPORT` per shard on Linux; on macOS shards share one listening socket
-      (a process-wide table keyed by address), since its `SO_REUSEPORT` doesn't balance.
-- [ ] 2.6 Tests: shards serve concurrently; stress tests; the runtime under ThreadSanitizer; the
-      no-heap test with N shards; budget × N.
-- [ ] 2.7 Benchmark against `workers` and Go.
+      at the first panic. Budget × N (with `workers`, × workers × threads). — done: `shard_new` lays out a shard in one mmap (pools, goroutine
+      tables, timer heap, package variables, signal stack); the main thread runs shard 0. A shard
+      whose `main` returns keeps serving its goroutines until every shard's `main` has returned
+      (stopping it at once stranded connections queued on its socket). `runtime.Shard()` and
+      `runtime.Shards()` added. The stack proof now lists the scheduler-only runtime functions
+      explicitly (inlining had moved netpoll's 8 KiB frame into the goroutine budget).
+- [x] 2.5 Listening: `SO_REUSEPORT` per shard on Linux; on macOS shards share one listening socket
+      (a process-wide table keyed by address), since its `SO_REUSEPORT` doesn't balance. — done, both OSes, through a process-wide table: a shard listens
+      on an address once (a second Listen is "address in use", as with one thread; otherwise on
+      Linux the extra socket joined the SO_REUSEPORT group and received connections nobody
+      accepted); Linux gives each shard its own socket, macOS shares one; port 0 is never shared.
+- [x] 2.6 Tests: shards serve concurrently; stress tests; the no-heap test with N shards; budget
+      × N — done: `TestThreads` (spread, per-shard counters exact under 64 concurrent clients,
+      listen rules, SIGTERM, panic), `TestNoHeapAtRuntime` with threads 1 and 4, error tests.
+- [ ] 2.6b The runtime under ThreadSanitizer. Needs fiber annotations
+      (`__tsan_switch_to_fiber`) around goroutine context switches, or TSan misreads them.
+- [x] 2.7 Benchmark against `workers` and Go. — done (`bench/workers-linux.sh`, Linux, 6 cores shared with the
+      load generator): threads 3 ≈ 815k / 577k / 207k req/s for health / note / mix vs workers 3
+      836k / 660k / 205k and Go GOMAXPROCS=3 468k / 255k / 92k. `/notes/1` is ~13% behind workers,
+      unexplained so far; a guess (not measured) is SQLite's process-wide per-file lock state,
+      which processes don't share.
 - [ ] 2.8 Shared immutable data: a way to declare package data shared by all shards, immutable
       after initialization, checked by the compiler.
 - [ ] 2.9 Cross-shard channels.
@@ -121,3 +138,5 @@ first thing to consider instead.
 - 2026-10-14: stage 2 decisions recorded (main on every shard; per-shard package variables);
   steps 2.1–2.9 written; 2.1 done.
 - 2026-10-14: 2.2 done.
+- 2026-10-14: 2.3–2.7 done (2.6b TSan open). Next: 2.8 shared immutable data, 2.9 cross-shard
+  channels.

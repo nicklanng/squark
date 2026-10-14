@@ -118,7 +118,7 @@ func (p *parser) file(path string) *File {
 	for p.tok.tok != EOF {
 		if p.tok.tok == IDENT {
 			switch p.tok.lit {
-			case "budget", "link", "cflags", "ldflags", "pool", "workers":
+			case "budget", "link", "cflags", "ldflags", "pool", "workers", "threads":
 				d := &Directive{Name: p.tok.lit, P: p.tok.pos}
 				p.next()
 				if d.Name == "pool" {

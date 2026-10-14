@@ -16,6 +16,8 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <netinet/in.h>
@@ -106,6 +108,8 @@ __asm__(
 
 // Everything a scheduler owns lives in its shard. One shard per scheduler thread; code reaches the
 // current one through sq_self.
+#define SQ_MAX_SHARDS 1024 // threads N
+
 typedef struct sq_shard {
 	sq_ctx sched_ctx;
 	sq_g *cur_g;
@@ -116,6 +120,7 @@ typedef struct sq_shard {
 	uint8_t outbuf[8192]; // println output, flushed at exit and before writes to fd 1
 	size_t outlen;
 	int pollfd; // kqueue or epoll
+	sq_pool *const *pools; // this shard's copy of every pool, by sq_pool.index
 	sq_g **timer_heap;
 	int64_t ntimers;
 #if SQ_KQUEUE
@@ -128,11 +133,22 @@ typedef struct sq_shard {
 	uint8_t fd_read_kind[1024]; // see read_needs_poll
 	char date_cache[32];        // sq_httpdate
 	time_t date_cached_at;
+	int64_t id;        // 0 .. sq_shard_count-1
+	bool main_done;    // this shard's main has returned; it keeps serving its other goroutines
+	struct {
+		int fd;
+		int entry; // in listen_table
+	} listeners[32];   // this shard's listening sockets
+	int nlisteners;
+	void *globals;     // this shard's package variables (shard 0: the generated static copy)
+	uint8_t *sigstack; // this thread's signal stack (for stack-overflow reports)
+	size_t sigstack_size;
 } sq_shard;
 
 extern sq_g *sq_timer_heap[];
-static sq_shard sq_shard0 = {.next_gid = 1, .pollfd = -1, .timer_heap = sq_timer_heap, .date_cached_at = -1};
+static sq_shard sq_shard0 = {.next_gid = 1, .pollfd = -1, .pools = sq_pools, .timer_heap = sq_timer_heap, .date_cached_at = -1};
 static _Thread_local sq_shard *sq_self = &sq_shard0;
+static atomic_int_fast64_t live_shards;
 
 static void heap_remove(sq_g *g);
 static void err_write(const char *s);
@@ -227,6 +243,7 @@ static void pool_init(sq_pool *p) {
 }
 
 void sq_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize) {
+	p = sq_self->pools[p->index]; // generated code names the template; use this shard's copy
 	while (!p->free) {
 		// all slots busy: wait for one (backpressure instead of unbounded growth)
 		sq_g *self = sq_self->cur_g;
@@ -546,7 +563,7 @@ static void on_fault(int sig, siginfo_t *si, void *uctx) {
 	uintptr_t addr = (uintptr_t)si->si_addr;
 	long pagesz = sysconf(_SC_PAGESIZE);
 	for (int64_t i = 0; i < sq_npools; i++) {
-		sq_pool *p = sq_pools[i];
+		sq_pool *p = sq_self->pools[i];
 		uintptr_t lo = (uintptr_t)p->stacks, hi = lo + (uintptr_t)(p->count * p->slot_size);
 		if (addr >= lo && addr < hi) {
 			uintptr_t off = (addr - lo) % (uintptr_t)p->slot_size;
@@ -1329,8 +1346,11 @@ int64_t sq_httpdate(sq_bytes dst) {
 	return n;
 }
 
+static void listener_closed(int fd);
+
 int64_t sq_close(int64_t fd) {
 	if (fd >= 0 && fd < (int64_t)sizeof sq_self->fd_read_kind) sq_self->fd_read_kind[fd] = 0; // the number may be reused
+	if (sq_self->nlisteners > 0) listener_closed((int)fd);
 	return close((int)fd) < 0 ? -errno : 0;
 }
 
@@ -1352,34 +1372,108 @@ int64_t sq_open(sq_string path, int64_t flags, int64_t mode) {
 	return fd < 0 ? -errno : fd;
 }
 
-int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
+// parse_addr fills sa from a host (empty: any) and port.
+static int parse_addr(sq_string host, int64_t port, struct sockaddr_in *sa) {
+	memset(sa, 0, sizeof *sa);
+	sa->sin_family = AF_INET;
+	sa->sin_port = htons((uint16_t)port);
+	if (host.len == 0) {
+		sa->sin_addr.s_addr = htonl(INADDR_ANY);
+		return 0;
+	}
+	char hb[64];
+	if (host.len >= (int64_t)sizeof hb) return -EINVAL;
+	memcpy(hb, host.p, (size_t)host.len);
+	hb[host.len] = 0;
+	return inet_pton(AF_INET, hb, &sa->sin_addr) == 1 ? 0 : -EINVAL;
+}
+
+static int64_t listen_new(const struct sockaddr_in *sa, int64_t backlog, bool reuseport) {
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) return -errno;
 	int one = 1;
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-	// workers N: every worker listens on the same address and the kernel spreads connections
-	// (only then: otherwise a second, unrelated server could silently share the port)
-	if (sq_worker_count > 1) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
-	struct sockaddr_in sa;
-	memset(&sa, 0, sizeof sa);
-	sa.sin_family = AF_INET;
-	sa.sin_port = htons((uint16_t)port);
-	char hb[64];
-	if (host.len == 0) {
-		sa.sin_addr.s_addr = htonl(INADDR_ANY);
-	} else {
-		if (host.len >= (int64_t)sizeof hb) { close(fd); return -EINVAL; }
-		memcpy(hb, host.p, (size_t)host.len);
-		hb[host.len] = 0;
-		if (inet_pton(AF_INET, hb, &sa.sin_addr) != 1) { close(fd); return -EINVAL; }
-	}
-	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(fd, (int)backlog) < 0) {
+	if (reuseport) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+	if (bind(fd, (const struct sockaddr *)sa, sizeof *sa) < 0 || listen(fd, (int)backlog) < 0) {
 		int e = errno;
 		close(fd);
 		return -e;
 	}
 	set_nonblock(fd);
 	return fd;
+}
+
+// Listening when several shards (threads N) or processes (workers N) serve one address. Each
+// shard listens on an address once; a second Listen of the same address from the same shard fails
+// with "address in use", as it would in a single-threaded program (otherwise, on Linux, the extra
+// socket would join the SO_REUSEPORT group and the kernel would route connections to it that
+// nobody accepts). Shards of one process share the address: on Linux each has its own socket in
+// the group and the kernel spreads connections; macOS doesn't spread them, so there the shards
+// share one socket and whichever is free accepts. Port 0 (any free port) is never shared: each
+// Listen gets its own port, as in Go.
+#define SQ_MAX_LISTEN 64
+static pthread_mutex_t listen_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+	uint32_t addr;
+	uint16_t port;      // network order
+	int shared_fd;      // macOS: the process's socket for this address (the table's own copy)
+	uint64_t shards[SQ_MAX_SHARDS / 64]; // which shards listen on it
+} listen_table[SQ_MAX_LISTEN];
+static int nlisten;
+
+int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
+	struct sockaddr_in sa;
+	if (parse_addr(host, port, &sa) < 0) return -EINVAL;
+	bool shared = sq_worker_count > 1 || sq_shard_count > 1;
+	if (!shared || port == 0) return listen_new(&sa, backlog, false);
+	pthread_mutex_lock(&listen_mu);
+	int e = -1;
+	for (int i = 0; i < nlisten; i++)
+		if (listen_table[i].addr == sa.sin_addr.s_addr && listen_table[i].port == sa.sin_port) e = i;
+	int64_t me = sq_self->id;
+	if (e >= 0 && (listen_table[e].shards[me / 64] >> (me % 64) & 1)) {
+		pthread_mutex_unlock(&listen_mu);
+		return -EADDRINUSE;
+	}
+	int64_t fd;
+#if SQ_KQUEUE
+	if (e >= 0 && sq_shard_count > 1) {
+		fd = dup(listen_table[e].shared_fd);
+		if (fd < 0) fd = -errno;
+	} else
+#endif
+	fd = listen_new(&sa, backlog, true);
+	if (fd >= 0 && e < 0 && nlisten < SQ_MAX_LISTEN) {
+		e = nlisten++;
+		memset(&listen_table[e], 0, sizeof listen_table[e]);
+		listen_table[e].addr = sa.sin_addr.s_addr;
+		listen_table[e].port = sa.sin_port;
+		listen_table[e].shared_fd = dup((int)fd);
+	}
+	if (fd >= 0 && e >= 0) {
+		listen_table[e].shards[me / 64] |= (uint64_t)1 << (me % 64);
+		if (sq_self->nlisteners < (int)(sizeof sq_self->listeners / sizeof sq_self->listeners[0])) {
+			sq_self->listeners[sq_self->nlisteners].fd = (int)fd;
+			sq_self->listeners[sq_self->nlisteners].entry = e;
+			sq_self->nlisteners++;
+		}
+	}
+	pthread_mutex_unlock(&listen_mu);
+	return fd;
+}
+
+// listener_closed forgets that this shard listens through fd, so it may listen there again.
+static void listener_closed(int fd) {
+	for (int i = 0; i < sq_self->nlisteners; i++) {
+		if (sq_self->listeners[i].fd != fd) continue;
+		int e = sq_self->listeners[i].entry;
+		int64_t me = sq_self->id;
+		pthread_mutex_lock(&listen_mu);
+		listen_table[e].shards[me / 64] &= ~((uint64_t)1 << (me % 64));
+		pthread_mutex_unlock(&listen_mu);
+		sq_self->listeners[i] = sq_self->listeners[--sq_self->nlisteners];
+		return;
+	}
 }
 
 int64_t sq_accept(int64_t lfd) {
@@ -1507,13 +1601,16 @@ int64_t sq_cputime(void) {
 	       ((int64_t)ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) * 1000;
 }
 
+int64_t sq_shard_id(void) { return sq_self->id; }
+int64_t sq_shard_total(void) { return sq_shard_count; }
+
 int64_t sq_pool_count(void) { return sq_npools; }
 sq_string sq_pool_name(int64_t i) {
-	const char *n = sq_pools[i]->name;
+	const char *n = sq_self->pools[i]->name;
 	return (sq_string){(const uint8_t *)n, (int64_t)strlen(n)};
 }
 int64_t sq_pool_stat(int64_t i, int64_t which) {
-	sq_pool *p = sq_pools[i];
+	sq_pool *p = sq_self->pools[i]; // this shard's
 	switch (which) {
 	case 0: return p->count;
 	case 1: return p->stack_size;
@@ -1537,13 +1634,16 @@ static void schedule(void) {
 			sq_ctx_switch(&sq_self->sched_ctx, &g->ctx);
 			sq_self->cur_g = NULL;
 			if (g->state == G_DEAD) {
-				if (g->pool == &sq_main_pool) {
+				if (g->pool->index == sq_main_pool.index) {
 					sq_flush();
-					if (stackcheck) {
-						g_release(g);
-						stack_report();
-					}
-					_exit(0); // returning from main ends the program, like Go
+					g_release(g);
+					if (stackcheck) stack_report();
+					// returning from main ends the program, like Go; with threads N, once every
+					// shard's main has returned. Until then this shard keeps running its other
+					// goroutines: other shards' connections may be queued on its listening socket.
+					if (atomic_fetch_sub(&live_shards, 1) == 1) _exit(0);
+					sq_self->main_done = true;
+					continue;
 				}
 				g_release(g);
 			}
@@ -1554,6 +1654,7 @@ static void schedule(void) {
 		}
 		// nothing runnable: block in the poller until I/O or a timer fires
 		if (sq_self->fd_waiters == 0 && sq_self->ntimers == 0 && sq_self->idle_parked == 0) {
+			if (sq_self->main_done) pthread_exit(NULL); // nothing left on this shard
 			sq_flush();
 			err_write("fatal error: all goroutines are asleep - deadlock!\n");
 			_exit(2);
@@ -1576,7 +1677,7 @@ static void schedule(void) {
 static void stack_report(void) {
 	err_write("stack check: pool, proven bytes, deepest observed bytes\n");
 	for (int64_t i = 0; i < sq_npools; i++) {
-		sq_pool *p = sq_pools[i];
+		sq_pool *p = sq_self->pools[i];
 		for (int64_t k = 0; k < p->count; k++) {
 			sq_g *g = &p->gs[k];
 			if (g->state != G_FREE) {
@@ -1694,31 +1795,120 @@ static void run_workers(void) {
 	_exit(status); // the first failing worker's status, or a stop signal's 128+n, or 0
 }
 
+// ---------------------------------------------------------------------------
+// threads N: a scheduler thread per core, each a shard with its own run queue, poller, timers,
+// goroutine pools and package variables. Goroutines never move between shards.
+
+#define SQ_SIGSTACK_SIZE 32768
+int64_t sq_shard_count = 1;
+// live_shards (declared with sq_shard): shards whose main hasn't returned
+
+static size_t align16(size_t n) { return (n + 15) & ~(size_t)15; }
+
+// shard_new lays out a shard and everything it owns in one mapping: the shard, its copies of the
+// pools with their goroutine tables, its timer heap, its package variables and its signal stack.
+// Stacks are reserved when the shard starts (pool_init).
+static sq_shard *shard_new(void) {
+	size_t sz = align16(sizeof(sq_shard)) + align16((size_t)sq_npools * sizeof(sq_pool *)) +
+	            align16((size_t)sq_npools * sizeof(sq_pool));
+	for (int64_t i = 0; i < sq_npools; i++) sz += align16((size_t)sq_pools[i]->count * sizeof(sq_g));
+	sz += align16((size_t)sq_max_goroutines * sizeof(sq_g *)) + align16(sq_globals_size) + SQ_SIGSTACK_SIZE;
+	uint8_t *m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (m == MAP_FAILED) {
+		err_write("fatal error: cannot reserve memory for a scheduler thread\n");
+		_exit(2);
+	}
+	sq_shard *s = (sq_shard *)m;
+	m += align16(sizeof(sq_shard));
+	sq_pool **pools = (sq_pool **)m;
+	m += align16((size_t)sq_npools * sizeof(sq_pool *));
+	sq_pool *copies = (sq_pool *)m;
+	m += align16((size_t)sq_npools * sizeof(sq_pool));
+	for (int64_t i = 0; i < sq_npools; i++) {
+		const sq_pool *t = sq_pools[i];
+		sq_pool *c = &copies[i];
+		c->name = t->name;
+		c->count = t->count;
+		c->stack_size = t->stack_size;
+		c->slot_size = t->slot_size;
+		c->index = i;
+		c->gs = (sq_g *)m;
+		m += align16((size_t)t->count * sizeof(sq_g));
+		pools[i] = c;
+	}
+	s->pools = pools;
+	s->timer_heap = (sq_g **)m;
+	m += align16((size_t)sq_max_goroutines * sizeof(sq_g *));
+	s->globals = m; // zeroed by mmap: Go's zero values
+	m += align16(sq_globals_size);
+	s->sigstack = m;
+	s->sigstack_size = SQ_SIGSTACK_SIZE;
+	s->next_gid = 1;
+	s->pollfd = -1;
+	s->date_cached_at = -1;
+	return s;
+}
+
+// shard_run runs the current thread's shard: signal stack, poller, pools, then main.
+static void shard_run(void) {
+	stack_t ss = {.ss_sp = sq_self->sigstack, .ss_size = sq_self->sigstack_size, .ss_flags = 0};
+	sigaltstack(&ss, NULL);
+#if SQ_KQUEUE
+	sq_self->pollfd = kqueue();
+#else
+	sq_self->pollfd = epoll_create1(0);
+#endif
+	for (int64_t i = 0; i < sq_npools; i++) pool_init(sq_self->pools[i]);
+	sq_go(&sq_main_pool, sq_program_main, NULL, 0);
+	schedule();
+}
+
+static void *shard_thread(void *arg) {
+	sq_self = arg;
+	sq_globals_set(sq_self->globals);
+	shard_run();
+	return NULL;
+}
+
 int main(int argc, char **argv) {
 	g_argc = argc;
 	g_argv = argv;
 	run_workers(); // returns in each worker process (or at once, for a single worker)
 	signal(SIGPIPE, SIG_IGN);
-	stack_t ss = {.ss_sp = sq_sigstack, .ss_size = sizeof sq_sigstack, .ss_flags = 0};
-	sigaltstack(&ss, NULL);
 	struct sigaction sa;
 	memset(&sa, 0, sizeof sa);
 	sa.sa_sigaction = on_fault;
 	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 	sigaction(SIGSEGV, &sa, NULL);
 	sigaction(SIGBUS, &sa, NULL);
-#if SQ_KQUEUE
-	sq_self->pollfd = kqueue();
-#else
-	sq_self->pollfd = epoll_create1(0);
-#endif
 	stackcheck = getenv("SQ_STACKCHECK") != NULL;
 	if (stackcheck) {
 		signal(SIGTERM, on_term);
 		signal(SIGINT, on_term);
 	}
-	for (int64_t i = 0; i < sq_npools; i++) pool_init(sq_pools[i]);
-	sq_go(&sq_main_pool, sq_program_main, NULL, 0);
-	schedule();
+	int64_t n = sq_threads;
+	if (n == 0) { // threads auto
+		long c = sysconf(_SC_NPROCESSORS_ONLN);
+		n = c > 0 ? c : 1;
+	}
+	if (n > SQ_MAX_SHARDS) n = SQ_MAX_SHARDS;
+	sq_shard_count = n;
+	atomic_store(&live_shards, n);
+	sq_self->sigstack = sq_sigstack; // shard 0 runs on this thread, with the static copies
+	sq_self->sigstack_size = sizeof sq_sigstack;
+	for (int64_t i = 1; i < n; i++) {
+		pthread_t t;
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+		sq_shard *s = shard_new();
+		s->id = i;
+		if (pthread_create(&t, &attr, shard_thread, s) != 0) {
+			err_write("fatal error: cannot start scheduler threads\n");
+			_exit(2);
+		}
+		pthread_attr_destroy(&attr);
+	}
+	shard_run();
 	return 0;
 }

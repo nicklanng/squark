@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -713,22 +715,39 @@ func main() {
 // that nothing allocates after startup: not the runtime, not the std packages, and not the libc
 // functions they call (glibc's strerror and macOS's first gmtime_r both used to).
 func TestNoHeapAtRuntime(t *testing.T) {
-	var src, env string
+	var counter, env string
 	switch runtime.GOOS {
 	case "darwin":
-		src, env = "count_darwin.c", "DYLD_INSERT_LIBRARIES"
+		counter, env = "count_darwin.c", "DYLD_INSERT_LIBRARIES"
 	case "linux":
-		src, env = "count_linux.c", "LD_PRELOAD"
+		counter, env = "count_linux.c", "LD_PRELOAD"
 	default:
 		t.Skip("no allocation counter for " + runtime.GOOS)
 	}
 	dir := t.TempDir()
 	lib := filepath.Join(dir, "count.so")
-	if out, err := exec.Command("clang", "-O2", "-shared", "-fPIC", "-o", lib, filepath.Join("../../testdata/heapcount", src)).CombinedOutput(); err != nil {
+	if out, err := exec.Command("clang", "-O2", "-shared", "-fPIC", "-o", lib, filepath.Join("../../testdata/heapcount", counter)).CombinedOutput(); err != nil {
 		t.Fatalf("building the counter: %v\n%s", err, out)
 	}
-	bin := filepath.Join(dir, "prog")
-	if _, err := Build(Options{Dir: "../../testdata/heapcount/prog", Output: bin}); err != nil {
+	src, err := os.ReadFile("../../testdata/heapcount/prog/main.sq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// once as one scheduler thread, once as four: each shard then runs the whole program
+	for _, threads := range []int{1, 4} {
+		t.Run(fmt.Sprintf("threads=%d", threads), func(t *testing.T) {
+			noHeapRun(t, dir, lib, env, src, threads)
+		})
+	}
+}
+
+func noHeapRun(t *testing.T, dir, lib, env string, src []byte, threads int) {
+	pdir := filepath.Join(dir, fmt.Sprintf("prog%d", threads))
+	os.MkdirAll(pdir, 0o755)
+	os.WriteFile(filepath.Join(pdir, "main.sq"), src, 0o644)
+	os.WriteFile(filepath.Join(pdir, "threads.sq"), []byte(fmt.Sprintf("package main\n\nthreads %d\n", threads)), 0o644)
+	bin := filepath.Join(pdir, "prog")
+	if _, err := Build(Options{Dir: pdir, Output: bin}); err != nil {
 		t.Fatal(err)
 	}
 	free := func() string {
@@ -739,8 +758,8 @@ func TestNoHeapAtRuntime(t *testing.T) {
 		defer l.Close()
 		return l.Addr().String()
 	}
-	counts := filepath.Join(dir, "counts")
-	cmd := exec.Command(bin, free(), free(), filepath.Join(dir, "file.txt"), free())
+	counts := filepath.Join(pdir, "counts")
+	cmd := exec.Command(bin, free(), free(), filepath.Join(pdir, "file.txt"), free())
 	cmd.Stdin = strings.NewReader("from stdin\n") // os/exec feeds this through a pipe
 	cmd.Env = append(os.Environ(), env+"="+lib, "HEAPCOUNT_FILE="+counts)
 	var out bytes.Buffer
@@ -759,7 +778,7 @@ func TestNoHeapAtRuntime(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
 	after, _ := os.ReadFile(counts)
-	if len(before) == 0 || out.String() != "true\n" {
+	if len(before) == 0 || out.String() != strings.Repeat("true\n", threads) {
 		t.Fatalf("counter or program failed: counts %q, output %q", before, out.String())
 	}
 	if string(before) != string(after) {
@@ -926,5 +945,142 @@ func TestWorkersSQLite(t *testing.T) {
 		if strings.TrimSpace(string(rows)) != "4" {
 			t.Fatalf("run %d: %s distinct workers wrote a row, want 4", i, rows)
 		}
+	}
+}
+
+// TestThreads runs testdata/threads (threads 4): four scheduler threads in one process serve one
+// address, each shard counts its own requests in a package variable (so counts per shard must run
+// 1, 2, 3, ... with no repeats or gaps, under concurrent load), and stop signals and panics end the
+// whole process.
+func TestThreads(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "threads")
+	res, err := Build(Options{Dir: "../../testdata/threads", Output: bin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Memory.Threads != 4 {
+		t.Errorf("memory report: threads %d, want 4", res.Memory.Threads)
+	}
+	start := func() (*exec.Cmd, string, *bytes.Buffer) {
+		t.Helper()
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := l.Addr().String()
+		l.Close()
+		cmd := exec.Command(bin, addr)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; ; i++ {
+			if c, err := net.Dial("tcp", addr); err == nil {
+				c.Close()
+				break
+			}
+			if i == 200 {
+				cmd.Process.Kill()
+				t.Fatalf("server did not start: %s", stderr.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return cmd, addr, &stderr
+	}
+	wait := func(cmd *exec.Cmd) int {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			cmd.Process.Kill()
+			t.Fatal("process did not exit")
+		}
+		if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return 128 + int(ws.Signal()) // killed by the signal, as a shell reports it
+		}
+		return cmd.ProcessState.ExitCode()
+	}
+
+	cmd, addr, stderr := start()
+	var mu sync.Mutex
+	counts := map[string][]int{} // shard -> the counts it reported
+	record := func(body string) {
+		shard, n, ok := strings.Cut(body, ":")
+		k, err := strconv.Atoi(n)
+		if !ok || err != nil {
+			t.Errorf("bad response %q", body)
+			return
+		}
+		mu.Lock()
+		counts[shard] = append(counts[shard], k)
+		mu.Unlock()
+	}
+	get := func(cl *http.Client) {
+		resp, err := cl.Get("http://" + addr + "/")
+		if err != nil {
+			t.Errorf("%v\nstderr: %s", err, stderr.String())
+			return
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		record(string(b))
+	}
+	for i := 0; i < 200; i++ { // fresh connections: spread across shards
+		get(&http.Client{Transport: &http.Transport{DisableKeepAlives: true}})
+	}
+	var wg sync.WaitGroup
+	for w := 0; w < 64; w++ { // concurrent keep-alive load
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cl := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 1}}
+			for i := 0; i < 100; i++ {
+				get(cl)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(counts) < 2 {
+		t.Errorf("connections reached %d shard(s), want several: %v", len(counts), len(counts))
+	}
+	total := 0
+	for shard, ks := range counts {
+		sort.Ints(ks)
+		for i, k := range ks {
+			if k != i+1 {
+				t.Fatalf("shard %s: counts %v... are not 1..%d: per-shard state was shared or raced", shard, ks[:min(len(ks), 10)], len(ks))
+			}
+		}
+		total += len(ks)
+	}
+	if total != 200+64*100 {
+		t.Errorf("%d responses, want %d", total, 200+64*100)
+	}
+	cmd.Process.Signal(syscall.SIGTERM)
+	if code := wait(cmd); code != 128+int(syscall.SIGTERM) {
+		t.Errorf("after SIGTERM: exit status %d", code)
+	}
+
+	// each shard listens on an address once; a second Listen from the same shard is "in use"
+	lbin := filepath.Join(dir, "listen")
+	if _, err := Build(Options{Dir: "../../testdata/threads_listen", Output: lbin}); err != nil {
+		t.Fatal(err)
+	}
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	laddr := l.Addr().String()
+	l.Close()
+	if out, err := exec.Command(lbin, laddr).CombinedOutput(); err != nil || string(out) != "ok in-use relisten-ok\nok in-use relisten-ok\n" {
+		t.Errorf("listen semantics with threads 2: %v\n%s", err, out)
+	}
+
+	// a panic on any shard ends the process
+	cmd, addr, stderr = start()
+	http.Get("http://" + addr + "/crash")
+	if code := wait(cmd); code != 2 || !strings.Contains(stderr.String(), "panic: crash requested") {
+		t.Errorf("after a panic: exit status %d, stderr %q", code, stderr.String())
 	}
 }

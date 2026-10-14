@@ -1,0 +1,5 @@
+package main
+
+threads 2000 // ERROR "threads must be between 1 and 1024"
+
+func main() {}
