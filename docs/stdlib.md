@@ -200,6 +200,7 @@ func (c net.Conn) WriteString(s string) (int, error)
 func (c net.Conn) Write2(a []byte, b []byte) (int, error)
 func (c net.Conn) WaitReadable(grace time.Duration) bool
 func (c net.Conn) ParkIdle(tag int)
+func (c net.Conn) CloseWrite() error
 func (c net.Conn) Close() error
 
 func Listen(addr string) (net.Listener, error)
@@ -281,6 +282,8 @@ func (d *json.Decoder) Int() (int, bool)
 func (d *json.Decoder) Bool() (bool, bool)
 func (d *json.Decoder) Null() bool
 func (d *json.Decoder) Skip() bool
+func (d *json.Decoder) Offset() int
+func (d *json.Decoder) Line() int
 func (d *json.Decoder) End() bool
 
 func AppendString(dst []byte, s string) []byte from dst

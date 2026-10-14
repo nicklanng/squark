@@ -1,0 +1,68 @@
+package main
+
+// net.Conn.CloseWrite (the peer reads EOF and the connection still reads), json.Decoder
+// Offset/Line, and a zero bytes.Buffer refusing writes.
+
+import (
+	"bytes"
+	"json"
+	"net"
+	"strconv"
+)
+
+arena str 64
+
+task peer(l net.Listener) pool 1 {
+	c, _ := l.Accept()
+	var buf [64]byte
+	total := 0
+	for {
+		n, err := c.Read(buf[total:])
+		total += n
+		if err != nil || n == 0 {
+			break // EOF: the other side closed its sending half
+		}
+	}
+	c.WriteString("got:" + string(buf[:total]) in str)
+	c.Close()
+}
+
+func main() {
+	l, _ := net.Listen("127.0.0.1:0")
+	go peer(l)
+	var b [32]byte
+	c, _ := net.Dial(string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), l.Port())))
+	c.WriteString("hello")
+	c.CloseWrite()
+	var reply [64]byte
+	n := 0
+	for {
+		m, err := c.Read(reply[n:])
+		n += m
+		if err != nil || m == 0 {
+			break
+		}
+	}
+	println(string(reply[:n]))
+
+	var doc [64]byte
+	n = copy(doc[:], "{\n  \"a\": 1,\n  \"b\": oops\n}")
+	d := json.NewDecoder(doc[:n])
+	var key [8]byte
+	d.BeginObject()
+	for {
+		k, ok := d.Field(key[:])
+		if !ok {
+			break
+		}
+		if k == "a" {
+			d.Int()
+		} else {
+			d.Skip()
+		}
+	}
+	println(d.Err != nil, d.Line(), d.Offset())
+
+	var zero bytes.Buffer
+	zero.WriteString("lost?") // panics: no storage
+}

@@ -2046,6 +2046,9 @@ static struct {
 } listen_table[SQ_MAX_LISTEN];
 static int nlisten;
 
+// sq_close_write shuts down the sending side of a connection (the peer reads EOF).
+int64_t sq_close_write(int64_t fd) { return shutdown((int)fd, SHUT_WR) < 0 ? -errno : 0; }
+
 // sq_local_port returns the port a socket is bound to (e.g. after listening on port 0).
 int64_t sq_local_port(int64_t fd) {
 	struct sockaddr_in sa;

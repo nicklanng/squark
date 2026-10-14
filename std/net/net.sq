@@ -22,6 +22,8 @@ extern "sq_listen_tcp" func listenTCP(host string, port int, backlog int) int st
 
 extern "sq_local_port" func localPort(fd int) int stack 8K
 
+extern "sq_close_write" func closeWrite(fd int) int stack 8K
+
 extern "sq_accept" func accept(fd int) int stack 8K
 
 extern "sq_dial_tcp" func dialTCP(host string, port int) int stack 8K
@@ -176,6 +178,16 @@ func NextIdle() (Conn, int) {
 
 // IdleCount reports how many connections are parked in the idle set.
 func IdleCount() int { return idleCount() }
+
+// CloseWrite shuts down the sending side: the peer reads EOF once it has read everything sent,
+// while c can still read. Close a connection this way after a final reply, so the reply isn't
+// lost to a reset when unread input remains.
+func (c Conn) CloseWrite() error {
+	if r := closeWrite(c.fd); r < 0 {
+		return os.Errno(-r)
+	}
+	return nil
+}
 
 func (c Conn) Close() error {
 	if r := sysClose(c.fd); r < 0 {

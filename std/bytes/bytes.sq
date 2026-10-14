@@ -39,7 +39,16 @@ func (b *Buffer) Truncate(n int) {
 	b.buf = b.buf[:n]
 }
 
+// noStorage panics on a write to a Buffer that has no memory to write into: a zero Buffer can't
+// grow (there is no heap), and silently dropping everything would hide the mistake.
+func (b *Buffer) noStorage(n int) {
+	if n > 0 && cap(b.buf) == 0 {
+		panic("bytes.Buffer has no storage: make it with bytes.NewBuffer(storage[:0])")
+	}
+}
+
 func (b *Buffer) Write(p []byte) (int, error) {
+	b.noStorage(len(p))
 	n := len(p)
 	if n > cap(b.buf)-len(b.buf) {
 		n = cap(b.buf) - len(b.buf)
@@ -53,6 +62,7 @@ func (b *Buffer) Write(p []byte) (int, error) {
 }
 
 func (b *Buffer) WriteString(s string) (int, error) {
+	b.noStorage(len(s))
 	n := len(s)
 	if n > cap(b.buf)-len(b.buf) {
 		n = cap(b.buf) - len(b.buf)
@@ -66,6 +76,7 @@ func (b *Buffer) WriteString(s string) (int, error) {
 }
 
 func (b *Buffer) WriteByte(c byte) error {
+	b.noStorage(1)
 	if len(b.buf) == cap(b.buf) {
 		b.overflow = true
 		return io.ErrShortBuffer

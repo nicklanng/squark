@@ -480,7 +480,7 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 - [x] **E14.** (done except shortest-float formatting and `ParseFloat`, which need a correctly rounding algorithm: libc's may allocate; `Itoa` can't return memory without a heap, `FormatInt(buf, v)` is it; Fields overflow left as documented) — added `math.Round/Trunc/Mod/Log2/Log10/Tan/Atan/Atan2/Hypot/Inf/NaN/IsNaN/IsInf/MaxInt/MinInt/MaxFloat64/SmallestNonzeroFloat64`, `strconv.AppendIntBase/AppendUintBase/AppendIntPad`, `strings.CutPrefix/CutSuffix/AppendRepeat`, `os.ReadFile`, `io.ErrUnexpectedEOF/ErrTooLarge` (ReadFull returns ErrUnexpectedEOF on a short read, as Go); test: `testdata/run/stdlib_more.sq`. Was: `strconv.Itoa`, integer formatting in other bases (hex) and padding, shortest float
   formatting, `ParseFloat`; `math.Round`, `Trunc`, `Mod`, `Inf`, `NaN`, `IsNaN`, `MaxFloat64`;
   `strings.Repeat`, `CutPrefix`, `CutSuffix`; `os.ReadFile`; `strings.Fields` overflow detection.
-- [ ] **E15.** `net.Conn.CloseWrite` (half close); a zero `bytes.Buffer` silently drops writes;
+- [x] **E15.** — added `net.Conn.CloseWrite`, `json.Decoder.Offset/Line` (and `Null`, E9); a write to a zero `bytes.Buffer` panics naming the fix; recovery after a decode error left out (the stream position is mid-value); test: `testdata/run/panic_stdlib_e15.sq`. Was: `net.Conn.CloseWrite` (half close); a zero `bytes.Buffer` silently drops writes;
   `json.Decoder` has no position, no `Null()`, no recovery after an error.
 
 ### Docs

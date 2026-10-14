@@ -504,6 +504,20 @@ func (d *Decoder) Skip() bool {
 	}
 }
 
+// Offset returns how many bytes of the input have been consumed.
+func (d *Decoder) Offset() int { return d.pos }
+
+// Line returns the 1-based line the decoder has reached (where an error was found, after one).
+func (d *Decoder) Line() int {
+	n := 1
+	for i := 0; i < d.pos && i < len(d.data); i++ {
+		if d.data[i] == '\n' {
+			n++
+		}
+	}
+	return n
+}
+
 // End reports whether only whitespace remains.
 func (d *Decoder) End() bool {
 	d.ws()
