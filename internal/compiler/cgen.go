@@ -43,19 +43,19 @@ type gen struct {
 	cnames   map[string]bool // package-level C names in use (see uniqueCName)
 
 	// function state
-	fn       *Func
-	out      *strings.Builder
-	ind      int
-	tmpN     int
-	hoisted  []string
-	topDecls []string
-	labelIDs map[Stmt]int
-	selRecv  map[*UnaryExpr][2]string // a select case's receive: the value and ok the select delivered
-	preemptFns  map[*Func]bool // reachable from a preemptible task: loops check for preemption
-	fnPreempt   bool           // the function being generated is one of them
-	usesPreempt bool           // it has a loop (needs sq_pf)
-	nextLbl  int
-	file     string
+	fn          *Func
+	out         *strings.Builder
+	ind         int
+	tmpN        int
+	hoisted     []string
+	topDecls    []string
+	labelIDs    map[Stmt]int
+	selRecv     map[*UnaryExpr][2]string // a select case's receive: the value and ok the select delivered
+	preemptFns  map[*Func]bool           // reachable from a preemptible task: loops check for preemption
+	fnPreempt   bool                     // the function being generated is one of them
+	usesPreempt bool                     // it has a loop (needs sq_pf)
+	nextLbl     int
+	file        string
 
 	goSites       strings.Builder // trampolines
 	pools         map[*Func]*PoolInfo
@@ -383,6 +383,9 @@ func (g *gen) ctype(t Type) string {
 		key := g.typeKey(u)
 		return g.structDef(key, fmt.Sprintf("sq_st%d", len(g.defs)), u)
 	case *Slice:
+		if g.ctype(u.Elem) == "uint8_t" {
+			return "sq_bytes" // the runtime's own type, so its functions' declarations agree
+		}
 		key := g.typeKey(u)
 		if d, ok := g.defByKey[key]; ok {
 			return d.name
