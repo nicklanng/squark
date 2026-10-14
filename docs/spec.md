@@ -493,7 +493,11 @@ func handle(w *http.ResponseWriter, r *http.Request) {
 ## 9. Runtime behaviour
 
 - One OS thread by default. Goroutines are cooperative and switch at blocking operations (and in
-  preemptible tasks' loops). Netpoll is kqueue on macOS and epoll on Linux.
+  preemptible tasks' loops). Netpoll is kqueue on macOS and epoll on Linux. One goroutine may
+  read a connection while another writes it. Closing a connection, file or listener wakes the
+  goroutines of the same thread blocked on it, whose `Read`, `Write` or `Accept` returns an error
+  (`bad file descriptor`); a goroutine of another thread blocked on it isn't woken, so close a
+  descriptor on the thread that uses it.
 - A watchdog thread asks a goroutine that has run for a time slice to yield (only preemptible
   tasks do), and prints a warning naming the task when a goroutine has held its thread for 100ms
   while other goroutines waited on it. Both count the CPU time the thread actually got, so an

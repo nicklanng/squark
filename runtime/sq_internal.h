@@ -44,6 +44,6 @@ struct sq_g {
 	struct sq_waiter *sel_timer; // in a select with a timeout: the timer's waiter
 };
 
-enum { WAKE_NONE, WAKE_FD, WAKE_TIMER };
+enum { WAKE_NONE, WAKE_FD, WAKE_TIMER, WAKE_CLOSED };
 
 #endif

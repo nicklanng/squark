@@ -153,7 +153,8 @@ typedef struct sq_shard {
 	int32_t idle_ready[1 << 16]; // see "The idle set" below
 	int64_t idle_head, idle_len, idle_parked;
 	sq_g *idle_waiter;
-	uint8_t fd_read_kind[1024]; // see read_needs_poll
+	struct fd_slot *fds;  // per fd: who waits to read and write it (mmap'd, sized by RLIMIT_NOFILE)
+	int64_t nfds;
 	char date_cache[32];        // sq_httpdate
 	time_t date_cached_at;
 	int64_t id;        // 0 .. sq_shard_count-1
@@ -1512,11 +1513,49 @@ void sq_sleep(int64_t ns) {
 }
 
 
-// wait_fd parks the current goroutine until fd is readable (mode 'r') or writable ('w').
+// The fd table records, per descriptor, the goroutine waiting to read it and the one waiting to
+// write it, so that sq_close can wake them, and (epoll) one registration can serve both. It is
+// mmap'd per shard, sized by the open-file limit; only the pages of descriptors in use are touched.
+typedef struct fd_slot {
+	sq_g *rd, *wr;
+	uint8_t read_kind; // see read_needs_poll
+} fd_slot;
+
+static void fd_table_init(void) {
+	struct rlimit rl;
+	int64_t n = 1024;
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+		if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > (rlim_t)(1 << 20)) n = 1 << 20;
+		else if ((int64_t)rl.rlim_cur > n) n = (int64_t)rl.rlim_cur;
+	}
+	void *m = mmap(NULL, (size_t)n * sizeof(fd_slot), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	sq_self->fds = m == MAP_FAILED ? NULL : m;
+	sq_self->nfds = m == MAP_FAILED ? 0 : n;
+}
+
+static fd_slot *slot(int fd) { return fd >= 0 && fd < sq_self->nfds ? &sq_self->fds[fd] : NULL; }
+
+#if !SQ_KQUEUE
+// epoll_arm registers fd for whichever directions have waiters (one registration per fd). Its
+// data is fd<<2 | 2: neither a goroutine (aligned) nor an idle-set entry (bit 0).
+static void epoll_arm(int fd, fd_slot *s) {
+	struct epoll_event ev = {.events = (s->rd ? EPOLLIN : 0) | (s->wr ? EPOLLOUT : 0) | EPOLLONESHOT};
+	ev.data.u64 = ((uint64_t)(uint32_t)fd << 2) | 2;
+	if (epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, fd, &ev) < 0) epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, fd, &ev);
+}
+#endif
+
+// arm_fd registers the current goroutine to be woken when fd is readable (mode 'r') or writable
+// ('w').
 static void arm_fd(int fd, int mode) {
 	sq_g *g = sq_self->cur_g;
 	g->wait_fd = fd;
 	g->wake = WAKE_NONE;
+	fd_slot *s = slot(fd);
+	if (s) {
+		if (mode == 'r') s->rd = g;
+		else s->wr = g;
+	}
 #if SQ_KQUEUE
 	if (sq_self->nchanges == (int)(sizeof sq_self->changes / sizeof sq_self->changes[0])) {
 		kevent(sq_self->pollfd, sq_self->changes, sq_self->nchanges, NULL, 0, NULL);
@@ -1524,8 +1563,12 @@ static void arm_fd(int fd, int mode) {
 	}
 	EV_SET(&sq_self->changes[sq_self->nchanges++], fd, mode == 'r' ? EVFILT_READ : EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, sq_self->cur_g);
 #else
-	struct epoll_event ev = {.events = (mode == 'r' ? EPOLLIN : EPOLLOUT) | EPOLLONESHOT, .data.ptr = sq_self->cur_g};
-	if (epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, fd, &ev) < 0) epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, fd, &ev);
+	if (s) {
+		epoll_arm(fd, s);
+	} else { // beyond the table: one waiter per fd
+		struct epoll_event ev = {.events = (mode == 'r' ? EPOLLIN : EPOLLOUT) | EPOLLONESHOT, .data.ptr = sq_self->cur_g};
+		if (epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, fd, &ev) < 0) epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, fd, &ev);
+	}
 #endif
 	if (!g->armed) {
 		g->armed = true;
@@ -1533,15 +1576,24 @@ static void arm_fd(int fd, int mode) {
 	}
 }
 
-static void wait_fd(int fd, int mode) {
+// wait_fd parks the current goroutine until fd is readable or writable. It returns false if fd
+// was closed meanwhile (by another goroutine): the caller must not use the descriptor number again,
+// which may already name another file.
+static bool wait_fd(int fd, int mode) {
 	arm_fd(fd, mode);
 	sq_park();
+	return sq_self->cur_g->wake != WAKE_CLOSED;
 }
 
 // fd_event delivers a readiness event; stale events (for a goroutine no longer waiting on that
 // fd) are dropped.
 static void fd_event(sq_g *g, int fd) {
 	if (!g) return;
+	fd_slot *s = slot(fd);
+	if (s) {
+		if (s->rd == g) s->rd = NULL;
+		if (s->wr == g) s->wr = NULL;
+	}
 	if (g->armed) {
 		g->armed = false;
 		sq_self->fd_waiters--;
@@ -1554,6 +1606,40 @@ static void fd_event(sq_g *g, int fd) {
 }
 
 static void idle_event(int fd, int tag);
+
+#if !SQ_KQUEUE
+// fd_ready delivers an epoll event for a table fd to its reader and/or writer, and re-arms the
+// registration for a waiter whose direction didn't fire (EPOLLONESHOT disarmed it).
+static void fd_ready(int fd, uint32_t events) {
+	fd_slot *s = slot(fd);
+	if (!s) return;
+	if (s->rd && (events & (EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP))) fd_event(s->rd, fd);
+	if (s->wr && (events & (EPOLLOUT | EPOLLERR | EPOLLHUP))) fd_event(s->wr, fd);
+	if (s->rd || s->wr) epoll_arm(fd, s);
+}
+#endif
+
+// fd_closed wakes the goroutines waiting on fd, which another goroutine of this shard just closed;
+// their wait_fd returns false.
+static void fd_closed(int fd) {
+	fd_slot *s = slot(fd);
+	if (!s) return;
+	s->read_kind = 0; // the number may be reused
+	sq_g *ws[2] = {s->rd, s->wr};
+	s->rd = s->wr = NULL;
+	for (int i = 0; i < 2; i++) {
+		sq_g *g = ws[i];
+		if (!g || g->state != G_WAITING || g->wait_fd != fd) continue;
+		if (g->armed) {
+			g->armed = false;
+			sq_self->fd_waiters--;
+		}
+		g->wait_fd = -1;
+		g->wake = WAKE_CLOSED;
+		heap_remove(g);
+		sq_ready(g);
+	}
+}
 
 static void netpoll(int64_t timeout_ns) {
 #if SQ_KQUEUE
@@ -1582,6 +1668,10 @@ static void netpoll(int64_t timeout_ns) {
 		if (events[i].data.u64 & 1) { // idle set: tag<<33 | fd<<1 | 1
 			uint64_t d = events[i].data.u64;
 			idle_event((int)((d >> 1) & 0xffffffff), (int)(d >> 33));
+			continue;
+		}
+		if (events[i].data.u64 & 2) { // a table fd: its reader and/or writer
+			fd_ready((int)(events[i].data.u64 >> 2), events[i].events);
 			continue;
 		}
 		sq_g *g = events[i].data.ptr;
@@ -1631,7 +1721,7 @@ int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 	sq_self->timer_heap[sq_self->ntimers++] = g;
 	heap_up(g->heap_index);
 	sq_park();
-	if (g->wake == WAKE_FD) return 0;
+	if (g->wake == WAKE_FD || g->wake == WAKE_CLOSED) return 0; // closed: the read reports it
 #if !SQ_KQUEUE
 	// The read registration would otherwise stay armed for g after it moves on. epoll events carry
 	// only g, not the fd, so fd_event can't tell such a stale event from a wait g starts later (a
@@ -1685,6 +1775,8 @@ void sq_park_idle(int64_t fd, int64_t tag) {
 	if (epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, (int)fd, &ev) < 0) epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, (int)fd, &ev);
 #endif
 	// the goroutine's own registration on fd (if still armed) was just replaced
+	fd_slot *s = slot((int)fd);
+	if (s && s->rd == g) s->rd = NULL;
 	if (g->armed && g->wait_fd == (int)fd) {
 		g->armed = false;
 		sq_self->fd_waiters--;
@@ -1745,27 +1837,28 @@ static int set_nonblock(int fd) {
 // sq_self->fd_read_kind[fd]: 0 unknown, 1 read directly, 2 poll first
 
 static bool read_needs_poll(int fd) {
-	if (fd < 0 || fd >= (int)sizeof sq_self->fd_read_kind) return false;
-	if (!sq_self->fd_read_kind[fd]) {
+	fd_slot *s = slot(fd);
+	if (!s) return false;
+	if (!s->read_kind) {
 		struct stat st;
 		int fl = fcntl(fd, F_GETFL);
 		bool p = fl >= 0 && !(fl & O_NONBLOCK) && fstat(fd, &st) == 0 && (S_ISFIFO(st.st_mode) || isatty(fd));
-		sq_self->fd_read_kind[fd] = p ? 2 : 1;
+		s->read_kind = p ? 2 : 1;
 	}
-	return sq_self->fd_read_kind[fd] == 2;
+	return s->read_kind == 2;
 }
 
 int64_t sq_read(int64_t fd, sq_bytes b) {
 	if (sq_self->cur_g && read_needs_poll((int)fd)) {
 		struct pollfd p = {(int)fd, POLLIN, 0};
-		if (poll(&p, 1, 0) == 0) wait_fd((int)fd, 'r');
+		if (poll(&p, 1, 0) == 0 && !wait_fd((int)fd, 'r')) return -EBADF;
 	}
 	for (;;) {
 		ssize_t r = read((int)fd, b.p, (size_t)b.len);
 		if (r >= 0) return r;
 		if (errno == EINTR) continue;
 		if (errno == EAGAIN && sq_self->cur_g) {
-			wait_fd((int)fd, 'r');
+			if (!wait_fd((int)fd, 'r')) return -EBADF;
 			continue;
 		}
 		return -errno;
@@ -1783,7 +1876,7 @@ static int64_t write_fd(int64_t fd, const uint8_t *p, int64_t n) {
 		}
 		if (errno == EINTR) continue;
 		if (errno == EAGAIN && sq_self->cur_g) {
-			wait_fd((int)fd, 'w');
+			if (!wait_fd((int)fd, 'w')) return done > 0 ? done : -EBADF;
 			continue;
 		}
 		return done > 0 ? done : -errno;
@@ -1805,7 +1898,7 @@ int64_t sq_writev2(int64_t fd, sq_bytes a, sq_bytes b) {
 		if (w < 0) {
 			if (errno == EINTR) continue;
 			if (errno == EAGAIN && sq_self->cur_g) {
-				wait_fd((int)fd, 'w');
+				if (!wait_fd((int)fd, 'w')) return done > 0 ? done : -EBADF;
 				continue;
 			}
 			return done > 0 ? done : -errno;
@@ -1881,7 +1974,7 @@ static void start_shards(void);
 static void *shard_thread(void *arg);
 
 int64_t sq_close(int64_t fd) {
-	if (fd >= 0 && fd < (int64_t)sizeof sq_self->fd_read_kind) sq_self->fd_read_kind[fd] = 0; // the number may be reused
+	fd_closed((int)fd); // wakes this shard's goroutines waiting on it
 	if (sq_self->nlisteners > 0) listener_closed((int)fd);
 	return close((int)fd) < 0 ? -errno : 0;
 }
@@ -2030,7 +2123,7 @@ int64_t sq_accept(int64_t lfd) {
 		}
 		if (errno == EINTR || errno == ECONNABORTED) continue;
 		if (errno == EAGAIN && sq_self->cur_g) {
-			wait_fd((int)lfd, 'r');
+			if (!wait_fd((int)lfd, 'r')) return -EBADF; // the listener was closed
 			continue;
 		}
 		return -errno;
@@ -2061,7 +2154,7 @@ int64_t sq_dial_tcp(sq_string host, int64_t port) {
 			close(fd);
 			return -e;
 		}
-		wait_fd(fd, 'w');
+		(void)wait_fd(fd, 'w'); // fd is new and private: nothing else can close it
 		int err = 0;
 		socklen_t len = sizeof err;
 		getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
@@ -2536,6 +2629,7 @@ static void shard_run(void) {
 	epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, sq_self->wake_fd, &wake);
 #endif
 	pthread_mutex_init(&sq_self->remote_mu, NULL);
+	fd_table_init();
 	sq_preempt_flag = &sq_self->preempt;
 #if defined(__APPLE__)
 	sq_self->mach_thread = pthread_mach_thread_np(pthread_self());

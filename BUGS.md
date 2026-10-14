@@ -433,12 +433,12 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 
 ### Runtime and compiler bugs
 
-- [ ] **E1. Closing a conn doesn't wake a goroutine blocked in `Read` on it** (bug)
+- [x] **E1. Closing a conn doesn't wake a goroutine blocked in `Read` on it** (bug) — fixed: a per-shard fd table (mmap'd, sized by RLIMIT_NOFILE) records each fd's reader and writer; `sq_close` wakes them and `wait_fd` returns false, so Read/Write/Accept return EBADF without reusing the number (closing a listener now ends a blocked Accept); test: `testdata/run/fd_waiters.sq`
   A goroutine parked in `c.Read` stays parked forever after another goroutine calls `c.Close()`,
   and the deadlock check never fires (it still counts as an fd waiter). Go returns an error from
   the Read. Fix: `sq_close` wakes goroutines waiting on that fd (with an error).
-- [ ] **E2. epoll: reading and writing one fd from two goroutines loses a wakeup** (bug, Linux,
-  suspected from the code) `arm_fd` uses one epoll registration per fd, carrying one goroutine;
+- [x] **E2. epoll: reading and writing one fd from two goroutines loses a wakeup** (bug, Linux,
+  confirmed: the reader stayed parked) — fixed: one epoll registration per fd for both directions, data = fd, events dispatched to the table's reader and writer and the other direction re-armed; test: `testdata/run/fd_waiters.sq` `arm_fd` uses one epoll registration per fd, carrying one goroutine;
   a writer waiting on a socket replaces the reader parked on it, which is never woken. kqueue keys
   by (fd, filter) and is fine.
 - [ ] **E3. `string(s) in a` doesn't copy when `s` is already a string** (bug: spec says it

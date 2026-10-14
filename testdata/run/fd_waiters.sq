@@ -1,0 +1,103 @@
+package main
+
+// Goroutines waiting on descriptors: Close wakes a blocked Read (and closing a listener a blocked
+// Accept) with an error instead of leaving them parked forever; and one goroutine can read a
+// socket while another is blocked writing to it (epoll used to keep only the last waiter).
+
+import (
+	"net"
+	"strconv"
+	"time"
+)
+
+var done chan string cap 4
+var c net.Conn
+var big [4 << 20]byte
+
+task reader() pool 1 {
+	var buf [64]byte
+	n, err := c.Read(buf[:])
+	if err != nil {
+		done <- "read: error"
+		return
+	}
+	done <- "read: " + string(buf[:n]) in str
+}
+
+task writer() pool 1 {
+	_, err := c.Write(big[:]) // far more than the socket buffers: blocks until the peer drains it
+	if err != nil {
+		done <- "write: error"
+		return
+	}
+	done <- "write: done"
+}
+
+task acceptor(l net.Listener) pool 1 {
+	if _, err := l.Accept(); err != nil {
+		done <- "accept: error"
+		return
+	}
+	done <- "accept: conn"
+}
+
+arena str 256
+
+func wait() string {
+	select {
+	case s := <-done:
+		return s
+	case <-time.After(2 * time.Second):
+		return "stuck"
+	}
+}
+
+func addr(port int) string {
+	var b [32]byte
+	return string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), port)) in str
+}
+
+func main() {
+	l, err := net.Listen("127.0.0.1:0")
+	if err != nil {
+		panic(err)
+	}
+	a := addr(l.Port())
+
+	// Close wakes a blocked Read
+	c, _ = net.Dial(a)
+	peer, _ := l.Accept()
+	go reader()
+	time.Sleep(10 * time.Millisecond)
+	c.Close()
+	println(wait())
+	peer.Close()
+
+	// a reader and a writer blocked on one socket
+	c, _ = net.Dial(a)
+	peer, _ = l.Accept()
+	go reader()
+	time.Sleep(10 * time.Millisecond)
+	go writer()
+	time.Sleep(10 * time.Millisecond) // the writer is blocked now, the reader still waiting
+	peer.WriteString("hi")
+	println(wait())
+	var buf [64 << 10]byte
+	total := 0
+	for total < len(big) {
+		n, err := peer.Read(buf[:])
+		if err != nil {
+			break
+		}
+		total += n
+	}
+	println(wait(), total == len(big))
+	c.Close()
+	peer.Close()
+
+	// closing a listener wakes a blocked Accept
+	go acceptor(l)
+	time.Sleep(10 * time.Millisecond)
+	l.Close()
+	println(wait())
+}
