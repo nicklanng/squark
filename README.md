@@ -275,8 +275,8 @@ docs/design.md      the language design and its rationale
 - Interfaces and generics.
 - Provenance contracts on function types. Indirect calls use whole-program inference instead.
 - `select`.
-- Blocking C calls stall their scheduler thread (SQLite queries, mainly); moving them to helper
-  threads is next (see [MULTICORE.md](MULTICORE.md)).
+- SQLite statements run on the scheduler thread unless they must wait for a lock: a slow query
+  (a large scan, a cold disk) still holds up its thread's other goroutines while it runs.
 - Arena exhaustion panics. A `try`-able allocation form would make it recoverable.
 
 ## License

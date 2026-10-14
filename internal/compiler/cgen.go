@@ -119,6 +119,10 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 		if f.Extern != "" {
 			f.CName = f.Extern
 			g.cnames[f.CName] = true
+			if f.Blocking {
+				// callers call a wrapper that runs the C function on a helper thread
+				f.CName = g.uniqueCName("sq_blk_" + sanitize(f.Extern))
+			}
 		}
 	}
 	for _, f := range prog.Funcs {
@@ -141,6 +145,10 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 			continue
 		}
 		if f.Extern != "" {
+			if f.Blocking {
+				protos.WriteString(g.blockingWrapper(f))
+				continue
+			}
 			protos.WriteString("extern " + g.proto(f) + ";\n")
 			continue
 		}
@@ -541,6 +549,45 @@ func (g *gen) proto(f *Func) string {
 	return fmt.Sprintf("%s %s(%s)", g.resultC(f.Sig), f.CName, strings.Join(ps, ", "))
 }
 
+// blockingWrapper declares a blocking extern and defines the wrapper its callers use: the
+// arguments and result live in a struct on the goroutine's stack, and a helper thread runs the
+// thunk (the real call) while the goroutine waits in sq_blocking.
+func (g *gen) blockingWrapper(f *Func) string {
+	w := f.CName
+	f.CName = f.Extern
+	ext := "extern " + g.proto(f) + ";\n"
+	f.CName = w
+	res := g.resultC(f.Sig)
+	var fields, params, inits, args []string
+	for i, p := range f.Sig.Params {
+		n := fmt.Sprintf("p%d", i)
+		fields = append(fields, "\t"+g.decl(p.Type, n)+";\n")
+		params = append(params, g.decl(p.Type, n))
+		inits = append(inits, "."+n+" = "+n)
+		args = append(args, "a->"+n)
+	}
+	if res != "void" {
+		fields = append(fields, "\t"+res+" r;\n")
+	}
+	if len(params) == 0 {
+		params = []string{"void"}
+	}
+	var b strings.Builder
+	b.WriteString(ext)
+	fmt.Fprintf(&b, "typedef struct {\n%s\tchar unused;\n} %s_args;\n", strings.Join(fields, ""), w)
+	call := fmt.Sprintf("%s(%s)", f.Extern, strings.Join(args, ", "))
+	if res != "void" {
+		call = "a->r = " + call
+	}
+	fmt.Fprintf(&b, "void %s_thunk(void *v) {\n\t%s_args *a = v;\n\t%s;\n}\n", w, w, call)
+	fmt.Fprintf(&b, "static %s %s(%s) {\n\t%s_args a = {%s};\n\tsq_blocking(%s_thunk, &a);\n", res, w, strings.Join(params, ", "), w, strings.Join(inits, ", "), w)
+	if res != "void" {
+		b.WriteString("\treturn a.r;\n")
+	}
+	b.WriteString("}\n")
+	return b.String()
+}
+
 func (v *Var) CNameOr(def string) string {
 	if v.CName == "" {
 		v.CName = def
@@ -877,6 +924,25 @@ func (g *gen) poolFor(f *Func) *PoolInfo {
 }
 
 // StackPlan computes the proven stack size of every pool from per-C-function frame sizes.
+// HelperStack is the stack a helper thread needs to run any of the program's blocking externs
+// (0: the program has none).
+func HelperStack(prog *Program, frames map[string]int64, externDefault int64) int64 {
+	var need int64
+	for _, f := range prog.Funcs {
+		if !f.Blocking || f.CName == "" {
+			continue
+		}
+		s := f.StackHint
+		if s == 0 {
+			s = externDefault
+		}
+		if s += frames[f.CName+"_thunk"]; s > need {
+			need = s
+		}
+	}
+	return need
+}
+
 func StackPlan(prog *Program, pools []*PoolInfo, frames map[string]int64, runtimeBudget, externDefault int64) (map[*PoolInfo]int64, []string) {
 	memo := map[*Func]int64{}
 	var notes []string
@@ -884,6 +950,12 @@ func StackPlan(prog *Program, pools []*PoolInfo, frames map[string]int64, runtim
 	stack = func(f *Func) int64 {
 		if v, ok := memo[f]; ok {
 			return v
+		}
+		if f.Blocking {
+			// on the goroutine's stack: the wrapper and sq_blocking; the C function itself runs
+			// on a helper thread (HelperStack)
+			memo[f] = frames[f.CName] + runtimeBudget
+			return memo[f]
 		}
 		if f.Extern != "" {
 			if strings.HasPrefix(f.Extern, "sq_") && f.StackHint == 0 {

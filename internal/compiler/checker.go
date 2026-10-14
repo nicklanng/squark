@@ -506,6 +506,12 @@ func (c *Checker) resolveDecls(pkg *Package) {
 				}
 			}
 		}
+		if d.Blocking {
+			if fn.Extern == "" {
+				c.errorf(d.BlockingPos, "only extern functions can be blocking (blocking runs a C call on a helper thread)")
+			}
+			fn.Blocking = true
+		}
 		if fn.IsTask && len(fn.Sig.Results) > 0 {
 			c.errorf(d.P, "task %s cannot return values (a task's results would have nowhere to go)", fn.Name)
 		}

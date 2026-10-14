@@ -40,6 +40,7 @@ struct sq_g {
 	bool release_stack; // return the whole stack to the OS when this goroutine exits
 	void *tsan_fiber;   // ThreadSanitizer builds only: this goroutine's fiber
 	void *shard;        // the shard (scheduler thread) that runs this goroutine
+	void (*blk_fn)(void *); // a blocking extern call a helper thread runs for it (argument in elem)
 };
 
 enum { WAKE_NONE, WAKE_FD, WAKE_TIMER };

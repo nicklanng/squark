@@ -149,10 +149,26 @@ none under TSan; throughput close to stage 1 (see 2.7).
 
 A blocking C call (a SQLite query, file I/O on a slow disk) stops every goroutine on its thread.
 
-- [ ] Mark externs that may block (e.g. `extern ... blocking`), and run those calls on a small
-      pool of helper threads while the calling goroutine parks.
-- [ ] Mark the SQLite shim's calls; measure the notes mix scenario before and after.
-- [ ] Tests: a slow blocking call doesn't delay other goroutines; the no-heap test still passes.
+- [x] Mark externs that may block (e.g. `extern ... blocking`), and run those calls on a small
+      pool of helper threads while the calling goroutine parks. — `extern ... stack N blocking`:
+      the call site calls a generated wrapper that packs arguments on the goroutine's stack and
+      calls `sq_blocking`; 2 helper threads per scheduler thread (stack proven from the largest
+      blocking extern, counted in the memory report) run it and wake the goroutine through its
+      shard's remote queue (2.9). `sq_gmutex`: a goroutine lock for C state shared across a wait.
+- [x] Mark the SQLite shim's calls; measure the notes mix scenario before and after. — **first
+      attempt (every Step on a helper) was a disaster**: threads 3 note 577k → 76k req/s, mix
+      207k → 8.6k: each statement held its connection across two thread handoffs, serializing the
+      thread. **Now Step runs inline with a busy handler that declines to wait; only a Step that
+      found the database locked runs again on a helper** (safe: SQLite gave up at a lock it would
+      have waited for). Open/Exec/Prepare/Finalize/Close always run on a helper. Each connection
+      has a goroutine lock held from a statement's first Bind/Step to its Reset. Linux, 6 cores
+      shared with the load generator: threads 3 mix 207k → 249k req/s and p99 4.47 → 1.99 ms;
+      workers 3 mix 205k → 284k, p99 4.15 → 1.91 ms; one process 165k → 173k; health and note
+      unchanged (Go: 95k mix).
+- [x] Tests: a slow blocking call doesn't delay other goroutines; the no-heap test still passes.
+      — `TestBlocking` (testdata/blocking: two 300ms calls overlap and a ticker keeps ticking; 1
+      and 4 threads, TSan), `TestSQLiteThreads` (4 threads × 8 goroutines insert and read back on
+      one database; fails with the connection lock removed; TSan), no-heap test (uses SQLite).
 
 ## Out of scope: Go-style M:N
 
@@ -180,3 +196,4 @@ first thing to consider instead.
 - 2026-10-14: 2.9 done; stage 2 complete. Next: stage 3 (blocking C calls off the scheduler).
 - 2026-10-14: `SQUARK_THREADS` override added (opt in with `threads auto`, then auto by default).
 - 2026-10-14: per-thread variable note and `thread var`.
+- 2026-10-14: stage 3 done: blocking externs, helper threads, SQLite waits off the scheduler.

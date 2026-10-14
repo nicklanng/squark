@@ -25,18 +25,28 @@ type DB struct {
 }
 
 type Stmt struct {
-	h rawptr
+	h  rawptr
+	db rawptr
 }
 
-// SQLite calls get a generous stack budget: the query planner and VDBE are not tiny.
+// SQLite calls get a generous stack budget: the query planner and VDBE are not tiny. Statements
+// run inline; one that must wait for another connection's lock waits on a helper thread (a
+// blocking extern), so the thread's other goroutines keep running. Each connection has a lock
+// that keeps one goroutine in it at a time (see shim.c).
 
-extern "sq_sqlite_open" func open(path string, db *rawptr) int stack 128K
+extern "sq_sqlite_open" func open(path string, db *rawptr) int stack 128K blocking
 
-extern "sq_sqlite_close" func closeDB(db rawptr) int stack 64K
+extern "sq_sqlite_close" func closeDB(db rawptr) int stack 64K blocking
 
-extern "sq_sqlite_exec" func exec(db rawptr, sql string) int stack 128K
+extern "sq_sqlite_exec" func exec(db rawptr, sql string) int stack 128K blocking
 
-extern "sq_sqlite_prepare" func prepare(db rawptr, sql string, st *rawptr) int stack 128K
+extern "sq_sqlite_prepare" func prepare(db rawptr, sql string, st *rawptr) int stack 128K blocking
+
+extern "sq_sqlite_db_use" func dbUse(db rawptr) stack 16K
+
+extern "sq_sqlite_db_done" func dbDone(db rawptr) stack 16K
+
+extern "sq_sqlite_stmt_use" func stmtUse(st rawptr) stack 16K
 
 extern "sq_sqlite_bind_int" func bindInt(st rawptr, i int, v int) int stack 16K
 
@@ -46,11 +56,11 @@ extern "sq_sqlite_bind_null" func bindNull(st rawptr, i int) int stack 16K
 
 extern "sq_sqlite_step" func step(st rawptr) int stack 128K
 
+extern "sq_sqlite_step_wait" func stepWait(st rawptr) int stack 128K blocking
+
 extern "sq_sqlite_reset" func reset(st rawptr) int stack 64K
 
-extern "sq_sqlite_clear" func clearBindings(st rawptr) int stack 16K
-
-extern "sq_sqlite_finalize" func finalize(st rawptr) int stack 64K
+extern "sq_sqlite_finalize" func finalize(st rawptr) int stack 64K blocking
 
 extern "sq_sqlite_column_int" func columnInt(st rawptr, i int) int stack 16K
 
@@ -76,25 +86,41 @@ func check(rc int) error {
 }
 
 // Open opens (creating if needed) a database file. When the file is locked by another connection
-// (another process, e.g. with workers N), statements wait up to 5 seconds before failing with
-// "database is locked"; the wait blocks the calling goroutine's whole thread.
+// (another thread or process, e.g. with threads N or workers N), statements wait up to 5 seconds
+// before failing with "database is locked"; only the calling goroutine waits.
+//
+// A connection serves one goroutine at a time: a statement holds it from its first Bind or Step
+// until Reset (so start with `defer st.Reset()`), and other goroutines that use the connection
+// meanwhile wait for it. Exec, Prepare, Changes and LastInsertRowID hold it for the call (or join
+// the statement the goroutine is running: call Changes and LastInsertRowID before Reset).
 func Open(path string) (DB, error) {
 	var h rawptr
 	rc := open(path, &h)
 	return DB{h: h}, check(rc)
 }
 
-func (db DB) Close() error { return check(closeDB(db.h)) }
+// Close closes the connection; nothing may use it afterwards (or be waiting for it).
+func (db DB) Close() error {
+	dbUse(db.h)
+	return check(closeDB(db.h))
+}
 
 // Exec runs one or more SQL statements that return no rows. Outside a transaction, a statement
 // that finds the database locked (another worker setting it up) is retried for up to 5 seconds.
-func (db DB) Exec(sql string) error { return check(exec(db.h, sql)) }
+func (db DB) Exec(sql string) error {
+	dbUse(db.h)
+	rc := exec(db.h, sql)
+	dbDone(db.h)
+	return check(rc)
+}
 
 // Prepare compiles a statement for repeated use.
 func (db DB) Prepare(sql string) (Stmt, error) {
 	var h rawptr
+	dbUse(db.h)
 	rc := prepare(db.h, sql, &h)
-	return Stmt{h: h}, check(rc)
+	dbDone(db.h)
+	return Stmt{h: h, db: db.h}, check(rc)
 }
 
 func (db DB) Changes() int         { return changes(db.h) }
@@ -107,21 +133,27 @@ func (s Stmt) BindNull(i int) error           { return check(bindNull(s.h, i)) }
 
 // Step advances to the next row; it returns true while a row is available.
 func (s Stmt) Step() (bool, error) {
+	stmtUse(s.h)
 	rc := step(s.h)
+	if rc == -1 {
+		rc = stepWait(s.h) // the database is locked: wait on a helper thread
+	}
 	if rc == ROW {
 		return true, nil
 	}
 	return false, check(rc)
 }
 
-// Reset makes the statement ready to run again and clears its bindings.
-func (s Stmt) Reset() error {
-	err := check(reset(s.h))
-	clearBindings(s.h)
-	return err
-}
+// Reset makes the statement ready to run again, clears its bindings and gives back the
+// connection.
+func (s Stmt) Reset() error { return check(reset(s.h)) }
 
-func (s Stmt) Finalize() error { return check(finalize(s.h)) }
+func (s Stmt) Finalize() error {
+	dbUse(s.db)
+	rc := finalize(s.h)
+	dbDone(s.db)
+	return check(rc)
+}
 
 func (s Stmt) ColumnCount() int     { return columnCount(s.h) }
 func (s Stmt) ColumnType(i int) int { return columnType(s.h, i) }

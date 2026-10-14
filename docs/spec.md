@@ -164,6 +164,7 @@ task name(params) pool N stack 64K { ... }     // also assert a stack upper boun
 
 extern func sqrt(x float64) float64 stack 1K               // C function of the same name
 extern "sq_read" func read(fd int, b []byte) int stack 8K  // C symbol differs from the name
+extern "slow_query" func query(q string) int stack 128K blocking // runs on a helper thread
 ```
 
 - `pool N`: at most N instances run at once. `go` on a full pool waits for a slot.
@@ -173,6 +174,15 @@ extern "sq_read" func read(fd int, b []byte) int stack 8K  // C symbol differs f
   on; `string` → `struct { const uint8_t *p; int64_t len; }`; `[]byte` → `struct { uint8_t *p;
   int64_t len, cap; }`; `*T`/`rawptr` → pointers.
 - Extern results are trusted to point to static memory unless provenance is declared.
+- `blocking` on an extern runs each call on a helper thread while the calling goroutine waits, so
+  a C call that blocks (a slow query, a lock wait, a read from a slow disk) doesn't stop the other
+  goroutines of its scheduler thread. Each call costs two thread handoffs (microseconds), so mark
+  only calls that really wait; a C library can also try inline and fall back to a blocking extern
+  when it would wait, as `sqlite` does. Arguments may point into the goroutine's stack (it stays
+  put while the goroutine waits). The C function's `stack N` budget applies to the helper threads
+  (two per scheduler thread, counted in the memory report), not to goroutine stacks. While a
+  goroutine waits, others on its thread run, so C state they share needs a lock: the runtime's
+  `sq_gmutex` (in `sq_rt.h`) parks waiting goroutines instead of blocking the thread.
 
 ### Provenance (optional)
 
@@ -362,6 +372,7 @@ must not outlive the memory it points to:
 | `threads auto can't be checked against the budget` | `threads N` with the number of cores you deploy on |
 | `shared var X: T can't be shared` | share numbers, strings, bools, errors or arrays/structs of them; keep everything else per thread |
 | `a shared channel's elements can't hold references` | send an index, ID or fixed-size array instead of a string or slice |
+| `only extern functions can be blocking` | drop `blocking`; squark code waits by parking already (channels, I/O, sleeps) |
 | `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (error constants, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |
 | `defer inside a loop` | move the loop body into a function and defer there |
 
@@ -451,8 +462,9 @@ func handle(w *http.ResponseWriter, r *http.Request) {
   Shards share only constants, `shared var` data and shared channels. A shard whose goroutines
   all wait on shared channels sleeps until another shard wakes them, so a deadlock across shards
   hangs instead of reporting `all goroutines are asleep`. Externs are called from whichever shard
-  runs the goroutine, so C libraries must be thread-safe (libc and SQLite are; each shard opens
-  its own SQLite connection, since package variables are per shard: `thread var db sqlite.DB`).
+  runs the goroutine (or a helper thread, for `blocking` externs), so C libraries must be
+  thread-safe (libc and SQLite are; each shard opens its own SQLite connection, since package
+  variables are per shard: `thread var db sqlite.DB`).
 - `workers N` (1 to 1024, or `auto` for one per core) starts N processes before any squark code
   runs; each has its own package variables, goroutines and connections. Listening sockets use
   `SO_REUSEPORT`, so the kernel spreads connections across the workers (on Linux; macOS sends them

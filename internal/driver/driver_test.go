@@ -1255,3 +1255,88 @@ func TestPerThreadNote(t *testing.T) {
 		t.Errorf("no threads: note %q, err %v", note, err)
 	}
 }
+
+// TestBlocking runs testdata/blocking: blocking externs run on helper threads, so a slow C call
+// neither stops the other goroutines of its thread nor waits for another slow call. It runs on
+// one thread, on four, and on four under ThreadSanitizer.
+func TestBlocking(t *testing.T) {
+	src := "../../testdata/blocking"
+	dir := t.TempDir()
+	for _, n := range []string{"main.sq", "slow.c"} {
+		b, err := os.ReadFile(filepath.Join(src, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(dir, n), b, 0o644)
+	}
+	run := func(name, sanitize string, copies int) {
+		t.Helper()
+		bin := filepath.Join(dir, name)
+		if _, err := Build(Options{Dir: dir, Output: bin, Sanitize: sanitize}); err != nil {
+			if sanitize != "" {
+				t.Logf("no ThreadSanitizer build here: %v", err)
+				return
+			}
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bin)
+		cmd.Env = append(os.Environ(), "TSAN_OPTIONS=halt_on_error=0 report_signal_unsafe=0")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		out := stdout.String()
+		if err != nil || strings.Count(out, "ok\n") != copies || strings.Count(out, "600\n") != copies ||
+			strings.Count(out, "7 7\n") != copies || strings.Contains(stderr.String(), "ThreadSanitizer") {
+			t.Fatalf("%s: %v\n%s\n%s", name, err, out, stderr.String())
+		}
+		// slow calls overlap and don't stop the ticker (the program says so otherwise)
+		if strings.Contains(out, "did not overlap") || strings.Contains(out, "were blocked") {
+			t.Errorf("%s:\n%s", name, out)
+		}
+	}
+	run("one", "", 1)
+	os.WriteFile(filepath.Join(dir, "threads.sq"), []byte("package main\n\nthreads 4\n"), 0o644)
+	run("four", "", 4)
+	if !testing.Short() {
+		run("race", "thread", 4)
+	}
+}
+
+// TestSQLiteThreads runs testdata/sqlite_threads: 4 threads × 8 goroutines insert into one database
+// and read each row back. Locked writers wait on helper threads while the connection lock keeps
+// other goroutines out of their statement; every read must match and every row must be there.
+func TestSQLiteThreads(t *testing.T) {
+	dir := t.TempDir()
+	run := func(name, sanitize string, runs int) {
+		t.Helper()
+		bin := filepath.Join(dir, name)
+		if _, err := Build(Options{Dir: "../../testdata/sqlite_threads", Output: bin, Sanitize: sanitize}); err != nil {
+			if sanitize != "" {
+				t.Logf("no ThreadSanitizer build here: %v", err)
+				return
+			}
+			t.Fatal(err)
+		}
+		for i := 0; i < runs; i++ {
+			db := filepath.Join(dir, fmt.Sprintf("%s%d.db", name, i))
+			cmd := exec.Command(bin, db)
+			cmd.Env = append(os.Environ(), "TSAN_OPTIONS=halt_on_error=0 report_signal_unsafe=0")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil || stdout.String() != "wrong reads: 0\n" || strings.Contains(stderr.String(), "ThreadSanitizer") {
+				t.Fatalf("%s run %d: %v\n%s\n%s", name, i, err, stdout.String(), stderr.String())
+			}
+			rows, err := exec.Command("sqlite3", db, "SELECT count(*), count(DISTINCT v) FROM t").Output()
+			if err != nil {
+				continue // no sqlite3 command to count with
+			}
+			if strings.TrimSpace(string(rows)) != "3200|3200" {
+				t.Fatalf("%s run %d: rows %s, want 3200|3200", name, i, rows)
+			}
+		}
+	}
+	run("prog", "", 5)
+	if !testing.Short() {
+		run("race", "thread", 1)
+	}
+}

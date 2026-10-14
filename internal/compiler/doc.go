@@ -106,6 +106,9 @@ func DocLine(fn *Func) string {
 	if fn.StackHint > 0 {
 		fmt.Fprintf(&b, " stack %d", fn.StackHint)
 	}
+	if fn.Blocking {
+		b.WriteString(" blocking")
+	}
 	return b.String()
 }
 

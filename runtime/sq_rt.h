@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 typedef struct { const uint8_t *p; int64_t len; } sq_string;
 typedef struct { int64_t code; sq_string msg; } sq_error;
@@ -161,6 +162,24 @@ void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line);
 bool sq_chan_recv(sq_chan *c, void *out);
 void sq_chan_close(sq_chan *c, const char *file, int line);
 int64_t sq_chan_len_locked(sq_chan *c);
+
+// Blocking externs (extern ... blocking): the call runs on a helper thread while the goroutine
+// waits, so the other goroutines of its scheduler thread keep running.
+extern const int64_t sq_helpers_per_thread; // 0: the program makes no blocking calls
+extern const int64_t sq_helper_stack;       // their stack size, proven like goroutine stacks
+void sq_blocking(void (*fn)(void *), void *arg);
+
+// sq_gmutex: a lock held by a goroutine; others that want it wait (park) instead of blocking their
+// thread. Usable from any scheduler thread. Zero-initialized storage needs sq_gmutex_init.
+typedef struct sq_gmutex {
+	pthread_mutex_t mu;
+	struct sq_g *_Atomic owner; // changed under mu; read without it by sq_gmutex_held
+	struct sq_g *wait_head, *wait_tail;
+} sq_gmutex;
+void sq_gmutex_init(sq_gmutex *m);
+void sq_gmutex_lock(sq_gmutex *m);
+void sq_gmutex_unlock(sq_gmutex *m);
+bool sq_gmutex_held(sq_gmutex *m); // by the running goroutine
 static inline int64_t sq_chan_len(sq_chan *c) { return c ? (c->shared ? sq_chan_len_locked(c) : c->len) : 0; }
 sq_chan *sq_chan_init_shared(sq_chan *c, void *buf, int64_t elemsize, int64_t cap);
 static inline int64_t sq_chan_cap(sq_chan *c) { return c ? c->cap : 0; }

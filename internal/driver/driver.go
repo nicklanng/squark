@@ -59,12 +59,28 @@ type MemoryReport struct {
 	Static  int64 // data + bss: package variables, arenas, channel buffers, goroutine tables
 	Pools   []PoolReport
 	CLibs   []string
+	// helper threads for blocking externs, per scheduler thread, and each one's stack
+	Helpers     int64
+	HelperStack int64
+}
+
+// helpersPerThread is how many helper threads run blocking externs, per scheduler thread.
+const helpersPerThread = 2
+
+// helperStackReserved is the stack the runtime gives a helper thread for a proven need (see
+// start_helpers in sq_rt.c).
+func helperStackReserved(need int64) int64 {
+	if need == 0 {
+		return 0
+	}
+	page := int64(os.Getpagesize())
+	return (need + 16384 + page - 1) / page * page
 }
 
 // Worst returns the worst-case total. Worker processes share the code but each has its own static
 // data and goroutine stacks; with workers auto this is the total for one worker.
 func (m *MemoryReport) Worst() int64 {
-	per := m.Static
+	per := m.Static + m.Helpers*m.HelperStack
 	for _, p := range m.Pools {
 		per += int64(p.Count) * p.Touchable
 	}
@@ -210,7 +226,8 @@ func Build(opt Options) (*Result, error) {
 	// functions that run only on a scheduler thread's own stack (or the signal stack), never on a
 	// goroutine's: their frames don't count against goroutine stacks
 	schedulerOnly := map[string]bool{"main": true, "schedule": true, "on_fault": true, "netpoll": true,
-		"shard_run": true, "shard_thread": true, "shard_new": true, "start_shards": true, "run_workers": true, "fire_timers": true}
+		"shard_run": true, "shard_thread": true, "shard_new": true, "start_shards": true, "run_workers": true, "fire_timers": true,
+		"helper_thread": true, "start_helpers": true}
 	for name, sz := range rtFrames {
 		if schedulerOnly[name] {
 			continue
@@ -223,6 +240,14 @@ func Build(opt Options) (*Result, error) {
 	runtimeBudget := 3*rtMax + 2048
 	const externDefault = 64 << 10
 	sizes, _ := compiler.StackPlan(prog, out.Pools, frames, runtimeBudget, externDefault)
+	// blocking externs run on helper threads: helpersPerThread per scheduler thread, each with
+	// a stack proven for the largest of them (plus libc's share of the thread)
+	helperStack := compiler.HelperStack(prog, frames, externDefault)
+	var helpers int64
+	if helperStack > 0 {
+		helperStack += 2 * rtMax
+		helpers = helpersPerThread
+	}
 	page := int64(os.Getpagesize())
 	const margin = 1024
 	res := &Result{CBytes: len(out.MainC)}
@@ -261,6 +286,7 @@ func Build(opt Options) (*Result, error) {
 	}
 	fmt.Fprintf(&pools, "const bool sq_threads_env = %t;\nconst int64_t sq_threads_max = %d;\n", prog.ThreadsSet, threadsMax)
 	fmt.Fprintf(&pools, "sq_g *sq_timer_heap[%d];\n", total)
+	fmt.Fprintf(&pools, "const int64_t sq_helpers_per_thread = %d;\nconst int64_t sq_helper_stack = %d;\n", helpers, helperStack)
 	if err := os.WriteFile(filepath.Join(work, "pools.c"), []byte(pools.String()), 0o644); err != nil {
 		return nil, err
 	}
@@ -309,7 +335,8 @@ func Build(opt Options) (*Result, error) {
 	}
 	res.Binary = absOut
 	res.Notes = notes
-	mem := &MemoryReport{Budget: prog.Budget, Workers: prog.Workers, Threads: prog.Threads, Pools: res.Pools}
+	mem := &MemoryReport{Budget: prog.Budget, Workers: prog.Workers, Threads: prog.Threads, Pools: res.Pools,
+		Helpers: helpers, HelperStack: helperStackReserved(helperStack)}
 	mem.Code, mem.Static, err = segmentSizes(absOut)
 	if err != nil {
 		if prog.Budget > 0 {
@@ -382,6 +409,9 @@ func FormatMemory(m *MemoryReport) string {
 			name = "main goroutine"
 		}
 		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack (proven %d B)\n", name, human(int64(p.Count)*p.Touchable), p.Count, human(p.Touchable), p.Stack)
+	}
+	if m.Helpers > 0 {
+		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack: threads that run blocking C calls\n", "blocking-call helpers", human(m.Helpers*m.HelperStack), m.Helpers, human(m.HelperStack))
 	}
 	switch {
 	case m.Workers == 0:

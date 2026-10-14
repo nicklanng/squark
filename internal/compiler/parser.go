@@ -173,12 +173,17 @@ func (p *parser) sizeExpr() Expr {
 	return x
 }
 
-// clauses parses trailing `pool N` / `stack N` clauses after a signature.
+// clauses parses trailing `pool N` / `stack N` / `blocking` clauses after a signature.
 func (p *parser) clauses(d *FuncDecl) {
-	for p.tok.tok == IDENT && (p.tok.lit == "pool" || p.tok.lit == "stack") {
+	for p.tok.tok == IDENT && (p.tok.lit == "pool" || p.tok.lit == "stack" || p.tok.lit == "blocking") {
 		name := p.tok.lit
 		pos := p.tok.pos
 		p.next()
+		if name == "blocking" {
+			d.Blocking = true
+			d.BlockingPos = pos
+			continue
+		}
 		x := p.sizeExpr()
 		switch name {
 		case "pool":
@@ -320,12 +325,15 @@ func (p *parser) atClause() bool {
 		return p.peek().tok == IDENT
 	case "static":
 		return true
+	case "blocking":
+		t := p.peek()
+		return t.tok == SEMICOLON || t.tok == EOF || t.tok == IDENT && isClauseWord(t.lit)
 	}
 	return false
 }
 
 func isClauseWord(s string) bool {
-	return s == "pool" || s == "stack" || s == "from" || s == "static"
+	return s == "pool" || s == "stack" || s == "from" || s == "static" || s == "blocking"
 }
 
 func (p *parser) startsType() bool {

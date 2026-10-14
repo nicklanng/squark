@@ -1,26 +1,125 @@
 // C glue between squark and libsqlite3. squark strings are (pointer, length) pairs, so the shim
 // passes lengths explicitly and NUL-terminates paths in a stack buffer.
+//
+// Waiting must not stop a scheduler thread: when a statement finds the database locked by another
+// connection, it waits on a helper thread (a blocking extern) while the goroutine parks. Step runs
+// inline first with a busy handler that declines to wait; only if it declined does Step run again
+// on a helper, where the handler sleeps (like sqlite3_busy_timeout, up to 5 seconds). Fast
+// statements stay inline. Open, Exec, Prepare, Finalize and Close always run on a helper.
+//
+// A goroutine parked in a blocking call lets another reach the same connection, so each connection
+// has a lock (a goroutine lock: waiters park). A statement takes it at its first Bind or Step and
+// gives it back at Reset, so Bind, Step, Column, Changes and LastInsertRowID see one goroutine's
+// work; the lock calls run on the scheduler thread, before the blocking call they protect.
 #include <sqlite3.h>
 #include <stdint.h>
 #include <string.h>
+#include "sq_rt.h"
 
-typedef struct { const uint8_t *p; int64_t len; } sq_string;
-typedef struct { uint8_t *p; int64_t len, cap; } sq_bytes;
+typedef struct conn {
+	sqlite3 *db;
+	sq_gmutex mu;
+	int64_t active; // the holder's active statements plus calls in progress
+	int may_wait;   // in a blocking call (on a helper thread): the busy handler sleeps
+	int declined;   // the busy handler declined to wait during an inline call
+} conn;
 
-int64_t sq_sqlite_open(sq_string path, void **db) {
+// busy is the connection's busy handler: on a helper thread it sleeps like sqlite3_busy_timeout
+// (5 seconds in all); inline it declines, and Step retries on a helper.
+static int busy(void *arg, int count) {
+	conn *c = arg;
+	if (!c->may_wait) {
+		c->declined = 1;
+		return 0;
+	}
+	static const int delays[] = {1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100};
+	static const int totals[] = {0, 1, 3, 8, 18, 33, 53, 78, 103, 128, 178, 228};
+	int delay, prior;
+	if (count < 12) {
+		delay = delays[count];
+		prior = totals[count];
+	} else {
+		delay = 100;
+		prior = totals[11] + 100 * (count - 11);
+	}
+	if (prior + delay > 5000) {
+		delay = 5000 - prior;
+		if (delay <= 0) return 0;
+	}
+	sqlite3_sleep(delay);
+	return 1;
+}
+
+typedef struct stmt {
+	sqlite3_stmt *st;
+	conn *c;
+	int active; // between the first Bind or Step and Reset (holds c's lock)
+} stmt;
+
+static void acquire(conn *c) {
+	if (!sq_gmutex_held(&c->mu)) sq_gmutex_lock(&c->mu); // the last holder left active at 0
+	c->active++;
+}
+
+static void release(conn *c) {
+	if (--c->active == 0) sq_gmutex_unlock(&c->mu);
+}
+
+// owned reports whether the running goroutine is using st (so its columns are its own).
+static int owned(stmt *s) { return s->active && sq_gmutex_held(&s->c->mu); }
+
+// lock calls, made on the scheduler thread around blocking ones
+void sq_sqlite_db_use(conn *c) { acquire(c); }
+void sq_sqlite_db_done(conn *c) { release(c); }
+void sq_sqlite_stmt_use(stmt *s) {
+	if (!sq_gmutex_held(&s->c->mu)) {
+		sq_gmutex_lock(&s->c->mu);
+	}
+	if (!s->active) {
+		s->active = 1;
+		s->c->active++;
+	}
+}
+
+// sq_sqlite_open opens a connection (blocking: on a helper thread). The wrapper is allocated by
+// SQLite, which manages its own memory.
+int64_t sq_sqlite_open(sq_string path, conn **out) {
 	char buf[1024];
+	*out = NULL;
 	if (path.len >= (int64_t)sizeof buf) return SQLITE_CANTOPEN;
 	memcpy(buf, path.p, (size_t)path.len);
 	buf[path.len] = 0;
-	int rc = sqlite3_open_v2(buf, (sqlite3 **)db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL);
-	// wait for another connection's lock (other worker processes) instead of failing at once
-	if (rc == SQLITE_OK) sqlite3_busy_timeout(*(sqlite3 **)db, 5000);
+	conn *c = sqlite3_malloc(sizeof *c);
+	if (!c) return SQLITE_NOMEM;
+	memset(c, 0, sizeof *c);
+	sq_gmutex_init(&c->mu);
+	// SQLITE_OPEN_NOMUTEX: the connection lock above keeps one thread in it at a time
+	int rc = sqlite3_open_v2(buf, &c->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL);
+	// wait for another connection's lock (other threads or worker processes) instead of failing
+	// at once; the wait happens on a helper thread
+	if (rc == SQLITE_OK) sqlite3_busy_handler(c->db, busy, c);
+	*out = c;
 	return rc;
 }
 
-int64_t sq_sqlite_close(void *db) { return sqlite3_close_v2(db); }
+// sq_sqlite_close closes the connection (blocking; its caller holds the lock).
+int64_t sq_sqlite_close(conn *c) {
+	if (!c) return SQLITE_MISUSE;
+	int rc = sqlite3_close_v2(c->db);
+	sq_gmutex_unlock(&c->mu);
+	sqlite3_free(c);
+	return rc;
+}
 
-int64_t sq_sqlite_exec(void *db, sq_string sql) {
+static int64_t exec(sqlite3 *db, sq_string sql);
+int64_t sq_sqlite_exec(conn *c, sq_string sql) {
+	c->may_wait = 1;
+	int64_t rc = exec(c->db, sql);
+	c->may_wait = 0;
+	return rc;
+}
+
+static int64_t exec(sqlite3 *db, sq_string sql) {
 	// sqlite3_exec needs NUL-terminated SQL; step through statements instead.
 	const char *p = (const char *)sql.p, *end = p + sql.len;
 	while (p < end) {
@@ -46,34 +145,112 @@ int64_t sq_sqlite_exec(void *db, sq_string sql) {
 	return SQLITE_OK;
 }
 
-int64_t sq_sqlite_prepare(void *db, sq_string sql, void **stmt) {
-	return sqlite3_prepare_v3(db, (const char *)sql.p, (int)sql.len, SQLITE_PREPARE_PERSISTENT, (sqlite3_stmt **)stmt, NULL);
+// sq_sqlite_prepare compiles a statement (blocking; its caller holds the lock).
+int64_t sq_sqlite_prepare(conn *c, sq_string sql, stmt **out) {
+	*out = NULL;
+	stmt *s = sqlite3_malloc(sizeof *s);
+	if (!s) return SQLITE_NOMEM;
+	memset(s, 0, sizeof *s);
+	s->c = c;
+	c->may_wait = 1;
+	int rc = sqlite3_prepare_v3(c->db, (const char *)sql.p, (int)sql.len, SQLITE_PREPARE_PERSISTENT, &s->st, NULL);
+	c->may_wait = 0;
+	if (rc != SQLITE_OK) {
+		sqlite3_free(s);
+		return rc;
+	}
+	*out = s;
+	return rc;
 }
 
-int64_t sq_sqlite_bind_int(void *st, int64_t i, int64_t v) { return sqlite3_bind_int64(st, (int)i, v); }
-int64_t sq_sqlite_bind_text(void *st, int64_t i, sq_string s) {
-	return sqlite3_bind_text(st, (int)i, (const char *)s.p, (int)s.len, SQLITE_TRANSIENT);
+// Bind calls take the connection for the statement (until Reset).
+int64_t sq_sqlite_bind_int(stmt *s, int64_t i, int64_t v) {
+	sq_sqlite_stmt_use(s);
+	return sqlite3_bind_int64(s->st, (int)i, v);
 }
-int64_t sq_sqlite_bind_null(void *st, int64_t i) { return sqlite3_bind_null(st, (int)i); }
-int64_t sq_sqlite_step(void *st) { return sqlite3_step(st); }
-int64_t sq_sqlite_reset(void *st) { return sqlite3_reset(st); }
-int64_t sq_sqlite_clear(void *st) { return sqlite3_clear_bindings(st); }
-int64_t sq_sqlite_finalize(void *st) { return sqlite3_finalize(st); }
-int64_t sq_sqlite_column_int(void *st, int64_t i) { return sqlite3_column_int64(st, (int)i); }
-int64_t sq_sqlite_column_type(void *st, int64_t i) { return sqlite3_column_type(st, (int)i); }
-int64_t sq_sqlite_column_count(void *st) { return sqlite3_column_count(st); }
+int64_t sq_sqlite_bind_text(stmt *s, int64_t i, sq_string v) {
+	sq_sqlite_stmt_use(s);
+	return sqlite3_bind_text(s->st, (int)i, (const char *)v.p, (int)v.len, SQLITE_TRANSIENT);
+}
+int64_t sq_sqlite_bind_null(stmt *s, int64_t i) {
+	sq_sqlite_stmt_use(s);
+	return sqlite3_bind_null(s->st, (int)i);
+}
+
+// sq_sqlite_step runs the statement to its next row inline (after sq_sqlite_stmt_use). It returns
+// -1 if the database was locked and the busy handler declined to wait: the caller retries with
+// sq_sqlite_step_wait on a helper thread. (Retrying is safe: SQLite gave up at a lock it would
+// have waited for. A BUSY without asking the handler, where waiting could deadlock, is returned.)
+int64_t sq_sqlite_step(stmt *s) {
+	s->c->declined = 0;
+	int rc = sqlite3_step(s->st);
+	if ((rc & 0xff) == SQLITE_BUSY && s->c->declined) return -1;
+	return rc;
+}
+
+// sq_sqlite_step_wait runs the statement to its next row, waiting for locks (blocking).
+int64_t sq_sqlite_step_wait(stmt *s) {
+	s->c->may_wait = 1;
+	int rc = sqlite3_step(s->st);
+	s->c->may_wait = 0;
+	return rc;
+}
+
+// sq_sqlite_reset readies the statement to run again, clears its bindings and gives back the
+// connection.
+int64_t sq_sqlite_reset(stmt *s) {
+	conn *c = s->c;
+	acquire(c);
+	int rc = sqlite3_reset(s->st);
+	sqlite3_clear_bindings(s->st);
+	if (s->active) {
+		s->active = 0;
+		c->active--;
+	}
+	release(c);
+	return rc;
+}
+
+// sq_sqlite_finalize frees the statement (blocking; its caller holds the lock).
+int64_t sq_sqlite_finalize(stmt *s) {
+	if (!s) return SQLITE_OK;
+	s->c->may_wait = 1;
+	int rc = sqlite3_finalize(s->st);
+	s->c->may_wait = 0;
+	if (s->active) s->c->active--;
+	sqlite3_free(s);
+	return rc;
+}
+
+// Column calls read the row the running goroutine stepped to; on a statement it isn't using
+// (after Reset, or another goroutine's) they return nothing rather than touch it.
+int64_t sq_sqlite_column_int(stmt *s, int64_t i) { return owned(s) ? sqlite3_column_int64(s->st, (int)i) : 0; }
+int64_t sq_sqlite_column_type(stmt *s, int64_t i) { return owned(s) ? sqlite3_column_type(s->st, (int)i) : SQLITE_NULL; }
+int64_t sq_sqlite_column_count(stmt *s) { return sqlite3_column_count(s->st); } // fixed at prepare
 
 // Copies column text into buf; returns the full length (callers detect truncation when > cap).
-int64_t sq_sqlite_column_text(void *st, int64_t i, sq_bytes buf) {
-	const unsigned char *t = sqlite3_column_text(st, (int)i);
-	int64_t n = sqlite3_column_bytes(st, (int)i);
+int64_t sq_sqlite_column_text(stmt *s, int64_t i, sq_bytes buf) {
+	if (!owned(s)) return 0;
+	const unsigned char *t = sqlite3_column_text(s->st, (int)i);
+	int64_t n = sqlite3_column_bytes(s->st, (int)i);
 	int64_t k = n < buf.cap ? n : buf.cap;
 	if (t && k > 0) memcpy(buf.p, t, (size_t)k);
 	return n;
 }
 
-int64_t sq_sqlite_changes(void *db) { return sqlite3_changes64(db); }
-int64_t sq_sqlite_last_insert_rowid(void *db) { return sqlite3_last_insert_rowid(db); }
+// Changes and LastInsertRowID report the holder's last statement: call them before Reset.
+int64_t sq_sqlite_changes(conn *c) {
+	acquire(c);
+	int64_t n = sqlite3_changes64(c->db);
+	release(c);
+	return n;
+}
+int64_t sq_sqlite_last_insert_rowid(conn *c) {
+	acquire(c);
+	int64_t n = sqlite3_last_insert_rowid(c->db);
+	release(c);
+	return n;
+}
 
 // sqlite3_errstr returns static strings, so they can become squark error messages.
 sq_string sq_sqlite_errstr(int64_t rc) {

@@ -1,0 +1,47 @@
+package main
+
+// Blocking externs run on helper threads: while one goroutine waits in a 300ms C call, the others
+// on its thread keep running (the ticker ticks), and two slow calls overlap.
+
+import "time"
+
+extern "slow_ms" func slowMS(ms int) int stack 8K blocking
+extern "slow_fill" func slowFill(p *byte, n int, v int) stack 8K blocking
+
+var ticks int
+var done chan int cap 4
+
+task ticker() pool 1 {
+	for i := 0; i < 1000; i++ {
+		time.Sleep(10 * time.Millisecond)
+		ticks++
+		if len(done) == 2 {
+			return
+		}
+	}
+}
+
+task sleeper(ms int) pool 2 {
+	done <- slowMS(ms)
+}
+
+func main() {
+	var buf [8]byte
+	slowFill(&buf[0], len(buf), 7) // arguments point into the goroutine's stack
+	println(buf[0], buf[7])
+
+	start := time.Now()
+	go ticker()
+	go sleeper(300)
+	go sleeper(300)
+	sum := <-done + <-done
+	elapsed := time.Since(start).Milliseconds()
+	println(sum)
+	if elapsed >= 550 {
+		println("slow calls did not overlap:", elapsed, "ms")
+	}
+	if ticks < 15 {
+		println("other goroutines were blocked: ticks", ticks)
+	}
+	println("ok")
+}

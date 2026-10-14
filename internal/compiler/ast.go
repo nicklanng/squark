@@ -462,6 +462,8 @@ type FuncDecl struct {
 	ExternSym string // extern "sym" (empty: same as Name)
 	Pool      Expr   // task ... pool N
 	Stack     Expr   // ... stack N
+	Blocking  bool   // extern ... blocking: the call runs on a helper thread
+	BlockingPos Pos
 }
 
 // Directive is a top-level `budget N`, `link "lib"`, `cflags "..."` or `ldflags "..."`.

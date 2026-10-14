@@ -162,7 +162,7 @@ typedef struct sq_shard {
 	sq_g *remote_head, *remote_tail;
 	atomic_bool remote_pending;
 	int wake_fd;              // Linux: eventfd
-	int64_t shared_parked;    // this shard's goroutines waiting on shared channels
+	int64_t shared_parked;    // this shard's goroutines waiting for other threads (shared channels, locks, blocking calls)
 	struct {
 		int fd;
 		int entry; // in listen_table
@@ -363,6 +363,7 @@ static void write_all(int fd, const void *p, size_t n) {
 }
 
 void sq_flush(void) {
+	if (!sq_self) return; // a helper thread: nothing buffered
 	if (sq_self->outlen) write_all(1, sq_self->outbuf, sq_self->outlen);
 	sq_self->outlen = 0;
 }
@@ -491,6 +492,10 @@ static void err_int(int64_t v) {
 }
 
 static SQ_NORETURN void die(const char *file, int line) {
+	if (!sq_self) { // a helper thread, in a blocking C call
+		err_write("\n\nin a blocking C call (helper thread)\nexit status 2\n");
+		_exit(2);
+	}
 	err_write("\n\ngoroutine ");
 	if (sq_self->cur_g) {
 		err_int(sq_self->cur_g->id);
@@ -598,7 +603,7 @@ static void on_fault(int sig, siginfo_t *si, void *uctx) {
 	(void)uctx;
 	uintptr_t addr = (uintptr_t)si->si_addr;
 	long pagesz = sysconf(_SC_PAGESIZE);
-	for (int64_t i = 0; i < sq_npools; i++) {
+	for (int64_t i = 0; sq_self && i < sq_npools; i++) {
 		sq_pool *p = sq_self->pools[i];
 		uintptr_t lo = (uintptr_t)p->stacks, hi = lo + (uintptr_t)(p->count * p->slot_size);
 		if (addr >= lo && addr < hi) {
@@ -833,12 +838,108 @@ static void drain_remote(void) {
 	}
 }
 
-static void park_shared(sq_chan *c) {
+// park_shared parks the running goroutine until another thread wakes it (ready_shared); mu is
+// the lock that guards the queue it waits in, released once the goroutine is marked waiting.
+static void park_shared(pthread_mutex_t *mu) {
 	sq_self->shared_parked++;
 	sq_self->cur_g->state = G_WAITING; // before unlocking: a waker may queue it at once
-	pthread_mutex_unlock(&c->mu);
+	if (mu) pthread_mutex_unlock(mu);
 	TSAN_SWITCH(sq_self->tsan_sched);
 	sq_ctx_switch(&sq_self->cur_g->ctx, &sq_self->sched_ctx);
+}
+
+// ---------------------------------------------------------------------------
+// blocking calls: helper threads run a blocking extern while its goroutine waits
+
+static pthread_mutex_t helper_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t helper_cv = PTHREAD_COND_INITIALIZER;
+static sq_g *helper_head, *helper_tail;
+
+static void *helper_thread(void *arg) {
+	(void)arg;
+	sq_self = NULL; // not a scheduler thread (sq_self starts out as shard 0 on every thread)
+	for (;;) {
+		pthread_mutex_lock(&helper_mu);
+		sq_g *g;
+		while (!(g = q_pop(&helper_head, &helper_tail))) pthread_cond_wait(&helper_cv, &helper_mu);
+		pthread_mutex_unlock(&helper_mu);
+		g->blk_fn(g->elem); // the goroutine's stack stays put while it waits: its arguments are safe
+		ready_shared(g);
+	}
+	return NULL;
+}
+
+void sq_blocking(void (*fn)(void *), void *arg) {
+	sq_g *g = sq_self->cur_g;
+	g->blk_fn = fn;
+	g->elem = arg;
+	pthread_mutex_lock(&helper_mu);
+	q_push(&helper_head, &helper_tail, g);
+	pthread_cond_signal(&helper_cv);
+	park_shared(&helper_mu); // only this thread's scheduler resumes g, after it has switched out
+}
+
+// start_helpers starts the helper threads, with every async signal blocked (the scheduler threads
+// handle those) and the proven stack size.
+static void start_helpers(int64_t n) {
+	sigset_t all, old;
+	sigfillset(&all);
+	sigdelset(&all, SIGSEGV);
+	sigdelset(&all, SIGBUS);
+	sigdelset(&all, SIGFPE);
+	sigdelset(&all, SIGILL);
+	pthread_sigmask(SIG_BLOCK, &all, &old);
+	for (int64_t i = 0; i < n; i++) {
+		pthread_t t;
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+		long page = sysconf(_SC_PAGESIZE);
+		size_t sz = (size_t)((sq_helper_stack + 16384 + page - 1) / page * page);
+		if (sz < 65536) sz = 65536; // above PTHREAD_STACK_MIN everywhere
+		pthread_attr_setstacksize(&attr, sz);
+		if (pthread_create(&t, &attr, helper_thread, NULL) != 0) {
+			err_write("fatal error: cannot start helper threads for blocking calls\n");
+			_exit(2);
+		}
+		pthread_attr_destroy(&attr);
+	}
+	pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// goroutine locks
+
+void sq_gmutex_init(sq_gmutex *m) {
+	pthread_mutex_init(&m->mu, NULL);
+	atomic_init(&m->owner, NULL);
+	m->wait_head = m->wait_tail = NULL;
+}
+
+void sq_gmutex_lock(sq_gmutex *m) {
+	sq_g *g = sq_self->cur_g;
+	pthread_mutex_lock(&m->mu);
+	if (!atomic_load_explicit(&m->owner, memory_order_relaxed)) {
+		atomic_store_explicit(&m->owner, g, memory_order_relaxed);
+		pthread_mutex_unlock(&m->mu);
+		return;
+	}
+	q_push(&m->wait_head, &m->wait_tail, g);
+	park_shared(&m->mu); // the unlocker hands the lock to us before waking us
+}
+
+void sq_gmutex_unlock(sq_gmutex *m) {
+	pthread_mutex_lock(&m->mu);
+	sq_g *next = q_pop(&m->wait_head, &m->wait_tail);
+	atomic_store_explicit(&m->owner, next, memory_order_relaxed);
+	pthread_mutex_unlock(&m->mu);
+	if (next) ready_shared(next);
+}
+
+// Only the owner can make the lock stop being its own, so a relaxed load answers "is it mine?"
+// (the mutex orders everything else).
+bool sq_gmutex_held(sq_gmutex *m) {
+	return atomic_load_explicit(&m->owner, memory_order_relaxed) == sq_self->cur_g;
 }
 
 sq_chan *sq_chan_init_shared(sq_chan *c, void *buf, int64_t elemsize, int64_t cap) {
@@ -880,7 +981,7 @@ static void chan_send_shared(sq_chan *c, const void *elem, const char *file, int
 	g->elem = (void *)elem;
 	g->ok = false;
 	q_push(&c->sendq_head, &c->sendq_tail, g);
-	park_shared(c);
+	park_shared(&c->mu);
 	if (!g->ok) sq_panic_cstr("send on closed channel", file, line);
 }
 
@@ -918,7 +1019,7 @@ static bool chan_recv_shared(sq_chan *c, void *outp) {
 	g->elem = outp;
 	g->ok = false;
 	q_push(&c->recvq_head, &c->recvq_tail, g);
-	park_shared(c);
+	park_shared(&c->mu);
 	if (!g->ok) memset(outp, 0, (size_t)c->elemsize);
 	return g->ok;
 }
@@ -2179,6 +2280,7 @@ int main(int argc, char **argv) {
 	if (n > SQ_MAX_SHARDS) n = SQ_MAX_SHARDS;
 	sq_shard_count = n;
 	atomic_store(&live_shards, n);
+	if (sq_helpers_per_thread > 0) start_helpers(sq_helpers_per_thread * n);
 	sq_self->sigstack = sq_sigstack; // shard 0 runs on this thread, with the static copies
 	sq_self->sigstack_size = sizeof sq_sigstack;
 	shard_run(); // the other shards start once shard 0 has initialized (sq_start_shards)
