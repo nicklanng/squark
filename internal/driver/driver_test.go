@@ -1175,3 +1175,51 @@ func TestSharedChanRace(t *testing.T) {
 		}
 	}
 }
+
+// TestThreadsEnv: SQUARK_THREADS sets the thread count of a program written for threads, like
+// GOMAXPROCS; it is ignored without a threads directive and capped by a budget's proven count.
+func TestThreadsEnv(t *testing.T) {
+	dir := t.TempDir()
+	build := func(name, directives string) string {
+		t.Helper()
+		d := filepath.Join(dir, name)
+		os.MkdirAll(d, 0o755)
+		src := "package main\n\nimport \"runtime\"\n\n" + directives + "\n\nfunc main() {\n\tif runtime.Shard() == 0 {\n\t\tprintln(runtime.Shards())\n\t}\n}\n"
+		os.WriteFile(filepath.Join(d, "main.sq"), []byte(src), 0o644)
+		bin := filepath.Join(d, "prog")
+		if _, err := Build(Options{Dir: d, Output: bin}); err != nil {
+			t.Fatal(err)
+		}
+		return bin
+	}
+	run := func(bin, env string) (string, string) {
+		t.Helper()
+		cmd := exec.Command(bin)
+		cmd.Env = append(os.Environ(), "SQUARK_THREADS="+env)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%v\n%s", err, stderr.String())
+		}
+		return strings.TrimSpace(stdout.String()), stderr.String()
+	}
+	auto := build("auto", "threads auto")
+	if got, _ := run(auto, ""); got != strconv.Itoa(runtime.NumCPU()) {
+		t.Errorf("threads auto: %s threads, want %d (the cores)", got, runtime.NumCPU())
+	}
+	if got, _ := run(auto, "3"); got != "3" {
+		t.Errorf("threads auto, SQUARK_THREADS=3: %s threads", got)
+	}
+	if got, warn := run(auto, "lots"); got != strconv.Itoa(runtime.NumCPU()) || !strings.Contains(warn, "ignoring SQUARK_THREADS") {
+		t.Errorf("bad SQUARK_THREADS: %s threads, stderr %q", got, warn)
+	}
+	if got, _ := run(build("none", ""), "3"); got != "1" {
+		t.Errorf("no threads directive, SQUARK_THREADS=3: %s threads, want 1 (not written for threads)", got)
+	}
+	if got, _ := run(build("fixed", "threads 2"), "5"); got != "5" {
+		t.Errorf("threads 2, SQUARK_THREADS=5: %s threads", got)
+	}
+	if got, warn := run(build("budget", "budget 512M\nthreads 2"), "5"); got != "2" || !strings.Contains(warn, "memory budget was proven for") {
+		t.Errorf("threads 2 with a budget, SQUARK_THREADS=5: %s threads, stderr %q", got, warn)
+	}
+}

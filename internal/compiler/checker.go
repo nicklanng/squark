@@ -536,6 +536,9 @@ func (c *Checker) resolveDecls(pkg *Package) {
 				c.errorf(d.P, "duplicate %s", d.Name)
 			}
 			*dir = d
+			if d.Name == "threads" {
+				c.prog.ThreadsSet = true
+			}
 			if id, ok := d.Value.(*Ident); ok && id.Name == "auto" {
 				*count = 0
 				continue

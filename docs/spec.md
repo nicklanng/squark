@@ -65,7 +65,7 @@ import (
 budget 128M                 // package main only: fail the build if worst-case memory exceeds this
 pool http.serveConn 512     // package main only: resize a task's pool (pkg.task or task)
 workers 4                   // package main only: run 4 processes (or auto: one per core); see §9
-threads 4                   // package main only: run 4 scheduler threads (or auto); see §9
+threads auto                // package main only: a scheduler thread per core (or N); see §9
 link "sqlite3"              // link a C library (any package)
 cflags "-I/opt/include"     // C compiler flags for this package's .c files
 ldflags "-L/opt/lib"        // linker flags
@@ -420,7 +420,11 @@ func handle(w *http.ResponseWriter, r *http.Request) {
 - One OS thread by default. Goroutines are cooperative and switch at blocking operations. Netpoll is
   kqueue on macOS and epoll on Linux.
 - `threads N` (1 to 1024, or `auto` for one per core) runs N scheduler threads (shards) in one
-  process. Each shard runs `main` with its own package variables, goroutine pools, timers and
+  process. The directive says the program is written for threads; without it a program runs one
+  thread. `threads auto` is the usual choice: one thread per core, and `SQUARK_THREADS=N` in the
+  environment overrides the count at run time (like `GOMAXPROCS`). `SQUARK_THREADS` also
+  overrides `threads N`, except that with a `budget` it can't go above N, the count the budget
+  was proven for. It has no effect on programs without the directive. Each shard runs `main` with its own package variables, goroutine pools, timers and
   poller; goroutines never move between shards, so rule 10 holds within each and nothing needs
   locks. Error constants are shared (they're read-only). Listening on an address from every shard
   works: on Linux each shard gets its own socket (`SO_REUSEPORT`) and the kernel spreads

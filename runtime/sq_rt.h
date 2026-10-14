@@ -194,6 +194,8 @@ extern const int64_t sq_workers; // workers N (0: one per core)
 extern int64_t sq_worker_count;    // processes actually running
 extern int64_t sq_shard_count;     // scheduler threads in this process
 extern const int64_t sq_threads;   // threads N (0: one per core)
+extern const bool sq_threads_env;  // SQUARK_THREADS applies (the program has a threads directive)
+extern const int64_t sq_threads_max; // with a budget: the count it was proven for (0: no limit)
 extern const size_t sq_globals_size; // generated: one shard's package variables
 void sq_globals_set(void *p);        // generated: point this thread at a shard's package variables
 int64_t sq_shard_id(void);

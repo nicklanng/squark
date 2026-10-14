@@ -251,6 +251,13 @@ func Build(opt Options) (*Result, error) {
 	fmt.Fprintf(&pools, "const int64_t sq_max_goroutines = %d;\n", total)
 	fmt.Fprintf(&pools, "const int64_t sq_workers = %d;\n", prog.Workers)
 	fmt.Fprintf(&pools, "const int64_t sq_threads = %d;\n", prog.Threads)
+	// SQUARK_THREADS overrides the count, but only in programs written for threads (a threads
+	// directive), and never above a count the memory budget was proven for
+	threadsMax := int64(0)
+	if prog.Budget > 0 {
+		threadsMax = prog.Threads
+	}
+	fmt.Fprintf(&pools, "const bool sq_threads_env = %t;\nconst int64_t sq_threads_max = %d;\n", prog.ThreadsSet, threadsMax)
 	fmt.Fprintf(&pools, "sq_g *sq_timer_heap[%d];\n", total)
 	if err := os.WriteFile(filepath.Join(work, "pools.c"), []byte(pools.String()), 0o644); err != nil {
 		return nil, err

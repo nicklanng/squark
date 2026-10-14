@@ -156,6 +156,17 @@ free slot instead of growing. The compiler proves each task's stack size from cl
 and the call graph; recursion is banned so that this is possible. `stack N` asserts an upper bound,
 and a program can resize a library's pool with `pool http.serveConn 512`.
 
+### Using every core
+
+```go
+threads auto   // this program is written for threads: one scheduler per core
+```
+
+Each scheduler thread runs its own copy of `main`, with its own package variables and goroutines,
+so nothing needs locks. Threads share only constants, `shared var` data (read-only after start-up)
+and shared channels (`shared var jobs chan Job cap 64`). `SQUARK_THREADS=N` overrides the count at
+run time, like `GOMAXPROCS`. Without the directive a program runs on one thread.
+
 ### Memory budgets
 
 ```go
@@ -256,10 +267,8 @@ docs/design.md      the language design and its rationale
 - Interfaces and generics.
 - Provenance contracts on function types. Indirect calls use whole-program inference instead.
 - `select`.
-- Sharing data between scheduler threads. `threads N` runs a scheduler per core in one process,
-  each with its own package variables; shared immutable data and cross-thread channels are next
-  (see [MULTICORE.md](MULTICORE.md)).
-- Blocking C calls stall the scheduler thread.
+- Blocking C calls stall their scheduler thread (SQLite queries, mainly); moving them to helper
+  threads is next (see [MULTICORE.md](MULTICORE.md)).
 - Arena exhaustion panics. A `try`-able allocation form would make it recoverable.
 
 ## License

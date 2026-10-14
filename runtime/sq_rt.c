@@ -2129,6 +2129,31 @@ static void *shard_thread(void *arg) {
 	return NULL;
 }
 
+// threads_from_env applies SQUARK_THREADS (like GOMAXPROCS) to a program written for threads.
+static int64_t threads_from_env(int64_t n) {
+	const char *e = getenv("SQUARK_THREADS");
+	if (!e || !*e) return n;
+	int64_t v = 0;
+	for (const char *p = e; *p; p++) {
+		if (*p < '0' || *p > '9' || v > SQ_MAX_SHARDS) {
+			err_write("squark: ignoring SQUARK_THREADS (want a number from 1 to 1024)\n");
+			return n;
+		}
+		v = v * 10 + (*p - '0');
+	}
+	if (v < 1 || v > SQ_MAX_SHARDS) {
+		err_write("squark: ignoring SQUARK_THREADS (want a number from 1 to 1024)\n");
+		return n;
+	}
+	if (sq_threads_max > 0 && v > sq_threads_max) {
+		err_write("squark: SQUARK_THREADS is above the threads the memory budget was proven for; using ");
+		err_num(sq_threads_max);
+		err_write("\n");
+		return sq_threads_max;
+	}
+	return v;
+}
+
 int main(int argc, char **argv) {
 	g_argc = argc;
 	g_argv = argv;
@@ -2150,6 +2175,7 @@ int main(int argc, char **argv) {
 		long c = sysconf(_SC_NPROCESSORS_ONLN);
 		n = c > 0 ? c : 1;
 	}
+	if (sq_threads_env) n = threads_from_env(n);
 	if (n > SQ_MAX_SHARDS) n = SQ_MAX_SHARDS;
 	sq_shard_count = n;
 	atomic_store(&live_shards, n);

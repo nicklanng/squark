@@ -62,6 +62,11 @@ Design decisions to settle first (record the answers here):
       (eventfd on Linux, EVFILT_USER on macOS). — **decided 2026-10-14: `shared var c chan T cap N`**
       (a property of package-level channel storage); elements may hold no references at all; a
       mutex per channel rather than a lock-free queue (simple, and TSan-checkable).
+- [x] Default thread count — **decided 2026-10-14: opt in, then auto.** A program says it is
+      written for threads with `threads auto` (or N); opted-in programs use every core by default
+      and `SQUARK_THREADS=N` overrides at run time, like GOMAXPROCS (capped at N when a budget was
+      proven for N). Programs without the directive stay single-threaded, since each thread runs
+      its own copy of `main`. Test: `TestThreadsEnv`.
 - [x] Which externs are safe to call from any shard (C libraries with global state). — **decided
       2026-10-14:** externs run on whichever shard calls them, and C libraries must be thread-safe
       (documented in spec §9); per-shard package variables mean each shard has its own handles
@@ -168,3 +173,4 @@ first thing to consider instead.
   channels.
 - 2026-10-14: 2.8a (constant composites) and 2.8b (shared var) done. Next: 2.9 cross-shard channels.
 - 2026-10-14: 2.9 done; stage 2 complete. Next: stage 3 (blocking C calls off the scheduler).
+- 2026-10-14: `SQUARK_THREADS` override added (opt in with `threads auto`, then auto by default).

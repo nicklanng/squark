@@ -73,6 +73,7 @@ type Program struct {
 	Budget   int64 // budget N in package main (0: none)
 	Workers  int64 // workers N in package main: processes to run (default 1; 0: one per core)
 	Threads  int64 // threads N in package main: scheduler threads per process (default 1; 0: one per core)
+	ThreadsSet bool // the program has a threads directive: it is written for threads, so SQUARK_THREADS applies
 
 	GoSites    []*GoStmt
 	MakeSites  []*CallExpr
