@@ -426,6 +426,71 @@ Squark may differ from Go here. For each: either fix it, or add a line to `docs/
 
 ---
 
+## E: found by writing the examples (2026-10-15)
+
+Five new examples (`examples/kv`, `life`, `chat`, `jsonq`, `jobs`) were written to use the
+language as a user would. Repros below are minimal; the examples carry workarounds with comments.
+
+### Runtime and compiler bugs
+
+- [ ] **E1. Closing a conn doesn't wake a goroutine blocked in `Read` on it** (bug)
+  A goroutine parked in `c.Read` stays parked forever after another goroutine calls `c.Close()`,
+  and the deadlock check never fires (it still counts as an fd waiter). Go returns an error from
+  the Read. Fix: `sq_close` wakes goroutines waiting on that fd (with an error).
+- [ ] **E2. epoll: reading and writing one fd from two goroutines loses a wakeup** (bug, Linux,
+  suspected from the code) `arm_fd` uses one epoll registration per fd, carrying one goroutine;
+  a writer waiting on a socket replaces the reader parked on it, which is never woken. kqueue keys
+  by (fd, filter) and is fine.
+- [ ] **E3. `string(s) in a` doesn't copy when `s` is already a string** (bug: spec says it
+  copies) The result still views the original bytes. Workaround: `string([]byte(s) in a)`.
+- [ ] **E4. A pointer to a vector doesn't dereference** (bug: arrays do) With `v *[..4]int`,
+  `v.Push(x)`, `len(v)` and `v[i]` are errors; `(*v).Push(x)` works.
+- [ ] **E5. `len`, index and `range` reject a non-addressable vector** (bug: spec says they work on
+  storage) `len(fresh().hist)`, `fresh().hist[0]`, `range fresh().hist` fail with "must be stored
+  in a variable to be used as a []int"; arrays in the same place work.
+- [ ] **E6. `len` of a package-level array isn't constant at package level** (go-diff) `var a
+  [5]int; const N = len(a)` and `task t() pool len(a)` fail with "used before its type is known
+  (initialization order)".
+- [ ] **E7. `squark doc` shows a `shared var` as `const NAME = <initializer>`** (bug)
+- [ ] **E8. Arrays and structs of shared channels are rejected, with a self-contradicting error**
+  (missing feature + bug) `shared var reqs [4]chan Req cap 8` says "chan Req cap 8 can't be shared
+  (... or a channel ...)". Needed for a request channel per thread or a reply channel per worker.
+- [ ] **E9. `json.Decoder` accepts invalid JSON** (bug) `Skip` accepts `@@@` and `nul`; `Int`
+  accepts `007`, and on `1.5`/`1e3` returns `(1, true)` with the error surfacing later as a syntax
+  error; `Bool` accepts `truex`.
+- [ ] **E10. Errors cascade from invalid types** (polish) One mistake reports many: `sort.Slice(&v,
+  less)` gives 17 errors inside `sort.sq`; `undefined: strings.CutPrefix` is followed by
+  "cannot use ... as type invalid type"; a failed `range` reports `undefined: h`. Errors whose
+  operands already have the invalid type should be dropped.
+
+### Error messages
+
+- [ ] **E11.** Name the culprit: the shared-channel element error should name the field
+  (`Result.Name string`), "cannot be compared" should name the vector field that prevents it; a
+  `shared var` is called "a constant" in "cannot slice t.P (t is a constant ...)"; `name string
+  static` gives "expected ), found identifier" (want: write `name static string`); "append exceeds
+  capacity" could suggest `in a`; a `thread var`/`var` map without `cap` only fails at run time
+  (hint: `map[K]V cap N`); the budget error lists no fixes.
+
+### Standard library gaps
+
+- [ ] **E12.** A line reader over a `net.Conn`/`os.File` (every line protocol hand-writes one).
+- [ ] **E13.** Text that can cross threads: `append`/`Append(s)` for byte vectors (`[..N]byte` can be
+  sent on a shared channel but filled only byte by byte).
+- [ ] **E14.** `strconv.Itoa`, integer formatting in other bases (hex) and padding, shortest float
+  formatting, `ParseFloat`; `math.Round`, `Trunc`, `Mod`, `Inf`, `NaN`, `IsNaN`, `MaxFloat64`;
+  `strings.Repeat`, `CutPrefix`, `CutSuffix`; `os.ReadFile`; `strings.Fields` overflow detection.
+- [ ] **E15.** `net.Conn.CloseWrite` (half close); a zero `bytes.Buffer` silently drops writes;
+  `json.Decoder` has no position, no `Null()`, no recovery after an error.
+
+### Docs
+
+- [ ] **E16.** Spec/stdlib gaps: vectors aren't comparable; arena growth policy (append reserves cap
+  4, outgrown slices stay); listening on port 0 with threads gives each thread its own port;
+  `select {}`; `try` zeroes named results; the memory report prints whenever a budget is declared;
+  helper stacks are at least 64 KiB; ~350 KiB of runtime data per thread; a `net.Conn` (an fd) may
+  cross threads; using one fd from two goroutines; `stdlib.md` drops the doc comments in `std/`.
+
 ## Progress log
 
 Append one line per work session: date, items closed, anything left half-done.
@@ -450,3 +515,5 @@ Append one line per work session: date, items closed, anything left half-done.
   found and fixed; `TestNoHeapAtRuntime` (macOS + Linux) now guards it. Exception, as documented:
   the `sqlite` package's C library allocates.
 - 2026-10-14: audited every libc call (both OSes); R21 found and fixed; no-heap test widened.
+- 2026-10-15: five examples written by separate agents found E1–E16 (section E). Examples
+  committed with workarounds.
