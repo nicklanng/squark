@@ -95,8 +95,12 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
 - [x] 2.6 Tests: shards serve concurrently; stress tests; the no-heap test with N shards; budget
       × N — done: `TestThreads` (spread, per-shard counters exact under 64 concurrent clients,
       listen rules, SIGTERM, panic), `TestNoHeapAtRuntime` with threads 1 and 4, error tests.
-- [ ] 2.6b The runtime under ThreadSanitizer. Needs fiber annotations
-      (`__tsan_switch_to_fiber`) around goroutine context switches, or TSan misreads them.
+- [x] 2.6b The runtime under ThreadSanitizer. Needs fiber annotations
+      (`__tsan_switch_to_fiber`) around goroutine context switches, or TSan misreads them. — done:
+      fiber per goroutine slot plus one per scheduler, switched at park/yield/exit and in
+      `schedule` (compiled out of normal builds); `Options.Sanitize`; `TestThreadsRace` serves
+      concurrent load on 4 shards with no reports on macOS and Linux, and reports races when the
+      shards are made to share package variables.
 - [x] 2.7 Benchmark against `workers` and Go. — done (`bench/workers-linux.sh`, Linux, 6 cores shared with the
       load generator): threads 3 ≈ 815k / 577k / 207k req/s for health / note / mix vs workers 3
       836k / 660k / 205k and Go GOMAXPROCS=3 468k / 255k / 92k. `/notes/1` is ~13% behind workers,
@@ -138,5 +142,5 @@ first thing to consider instead.
 - 2026-10-14: stage 2 decisions recorded (main on every shard; per-shard package variables);
   steps 2.1–2.9 written; 2.1 done.
 - 2026-10-14: 2.2 done.
-- 2026-10-14: 2.3–2.7 done (2.6b TSan open). Next: 2.8 shared immutable data, 2.9 cross-shard
+- 2026-10-14: 2.3–2.7 done; 2.6b (TSan) done after. Next: 2.8 shared immutable data, 2.9 cross-shard
   channels.

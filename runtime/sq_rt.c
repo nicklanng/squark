@@ -39,6 +39,25 @@
 
 void sq_ctx_switch(sq_ctx *from, sq_ctx *to);
 
+// ThreadSanitizer has to be told when the runtime switches stacks (goroutine <-> scheduler), or it
+// sees one thread jumping between unrelated stacks. Nothing of this exists in normal builds.
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define SQ_TSAN 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__) && !defined(SQ_TSAN)
+#define SQ_TSAN 1
+#endif
+#ifdef SQ_TSAN
+void *__tsan_get_current_fiber(void);
+void *__tsan_create_fiber(unsigned flags);
+void __tsan_switch_to_fiber(void *fiber, unsigned flags);
+#define TSAN_SWITCH(fiber) __tsan_switch_to_fiber((fiber), 0)
+#else
+#define TSAN_SWITCH(fiber) ((void)0)
+#endif
+
 #if defined(__aarch64__)
 #if defined(__APPLE__)
 #define SQ_SYM(x) "_" #x
@@ -141,6 +160,7 @@ typedef struct sq_shard {
 	} listeners[32];   // this shard's listening sockets
 	int nlisteners;
 	void *globals;     // this shard's package variables (shard 0: the generated static copy)
+	void *tsan_sched;  // ThreadSanitizer builds only: the scheduler's own fiber
 	uint8_t *sigstack; // this thread's signal stack (for stack-overflow reports)
 	size_t sigstack_size;
 } sq_shard;
@@ -176,6 +196,7 @@ static sq_g *runq_pop(void) {
 static void sq_park(void) {
 	sq_g *g = sq_self->cur_g;
 	g->state = G_WAITING;
+	TSAN_SWITCH(sq_self->tsan_sched);
 	sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
 }
 
@@ -184,6 +205,7 @@ static void sq_ready(sq_g *g) { runq_push(g); }
 void sq_gosched(void) {
 	sq_g *g = sq_self->cur_g;
 	runq_push(g);
+	TSAN_SWITCH(sq_self->tsan_sched);
 	sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
 }
 
@@ -191,11 +213,15 @@ static void g_entry(void) {
 	sq_g *g = sq_self->cur_g;
 	g->entry(g->args);
 	g->state = G_DEAD;
+	TSAN_SWITCH(sq_self->tsan_sched);
 	sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
 	__builtin_unreachable();
 }
 
 static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t argsize) {
+#ifdef SQ_TSAN
+	if (!g->tsan_fiber) g->tsan_fiber = __tsan_create_fiber(0); // kept for the slot's next goroutine
+#endif
 	uintptr_t top = (uintptr_t)g->stack_hi;
 	top -= (argsize + 15) & ~(uintptr_t)15;
 	if (argsize) memcpy((void *)top, args, argsize);
@@ -1631,6 +1657,7 @@ static void schedule(void) {
 		while ((g = runq_pop())) {
 			sq_self->cur_g = g;
 			g->state = G_RUNNING;
+			TSAN_SWITCH(g->tsan_fiber);
 			sq_ctx_switch(&sq_self->sched_ctx, &g->ctx);
 			sq_self->cur_g = NULL;
 			if (g->state == G_DEAD) {
@@ -1851,6 +1878,9 @@ static sq_shard *shard_new(void) {
 
 // shard_run runs the current thread's shard: signal stack, poller, pools, then main.
 static void shard_run(void) {
+#ifdef SQ_TSAN
+	sq_self->tsan_sched = __tsan_get_current_fiber();
+#endif
 	stack_t ss = {.ss_sp = sq_self->sigstack, .ss_size = sq_self->sigstack_size, .ss_flags = 0};
 	sigaltstack(&ss, NULL);
 #if SQ_KQUEUE

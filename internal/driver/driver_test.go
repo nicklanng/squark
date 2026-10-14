@@ -1084,3 +1084,67 @@ func TestThreads(t *testing.T) {
 		t.Errorf("after a panic: exit status %d, stderr %q", code, stderr.String())
 	}
 }
+
+// TestThreadsRace builds testdata/threads (4 scheduler threads) with ThreadSanitizer and serves
+// concurrent load: shards share no mutable state, so TSan must report nothing.
+func TestThreadsRace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "threads")
+	if _, err := Build(Options{Dir: "../../testdata/threads", Output: bin, Sanitize: "thread"}); err != nil {
+		t.Skipf("no ThreadSanitizer build here: %v", err)
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	cmd := exec.Command(bin, addr)
+	cmd.Env = append(os.Environ(), "TSAN_OPTIONS=halt_on_error=0 report_signal_unsafe=0")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	for i := 0; ; i++ {
+		if c, err := net.Dial("tcp", addr); err == nil {
+			c.Close()
+			break
+		}
+		if i == 300 {
+			t.Fatalf("server did not start: %s", stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var wg sync.WaitGroup
+	for w := 0; w < 16; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cl := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 1}}
+			for i := 0; i < 100; i++ {
+				resp, err := cl.Get("http://" + addr + "/")
+				if err != nil {
+					return
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+		}()
+	}
+	for i := 0; i < 100; i++ { // fresh connections: accepts on every shard
+		if resp, err := (&http.Client{Transport: &http.Transport{DisableKeepAlives: true}}).Get("http://" + addr + "/"); err == nil {
+			resp.Body.Close()
+		}
+	}
+	wg.Wait()
+	cmd.Process.Signal(syscall.SIGTERM)
+	cmd.Wait()
+	if strings.Contains(stderr.String(), "ThreadSanitizer") {
+		t.Errorf("ThreadSanitizer reports:\n%s", stderr.String())
+	}
+}

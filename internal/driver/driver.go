@@ -29,6 +29,9 @@ type Options struct {
 	Verbose bool
 	CC      string
 	OptFlag string
+	// Sanitize, if set, builds with -fsanitize=<Sanitize> (e.g. "thread") and -g, for the
+	// runtime's own tests. The no-heap check still applies to the program's objects.
+	Sanitize string
 }
 
 type PoolReport struct {
@@ -128,6 +131,9 @@ func Build(opt Options) (*Result, error) {
 	}
 
 	cflags := []string{opt.OptFlag, "-std=gnu11", "-pthread", "-fwrapv", "-fno-strict-aliasing", "-w", "-fstack-usage", "-I", work}
+	if opt.Sanitize != "" {
+		cflags = append(cflags, "-fsanitize="+opt.Sanitize, "-g")
+	}
 	var extraCflags, ldflags []string
 	for _, p := range prog.Packages {
 		extraCflags = append(extraCflags, p.CFlags...)
@@ -282,6 +288,9 @@ func Build(opt Options) (*Result, error) {
 		return nil, fmt.Errorf("build output %q already exists and is a directory (use -o)", output)
 	}
 	args := append(append([]string{opt.OptFlag, "-pthread", "-o", absOut}, objs...), ldflags...)
+	if opt.Sanitize != "" {
+		args = append(args, "-fsanitize="+opt.Sanitize)
+	}
 	cmd := ccCommand(args...)
 	cmd.Dir = work
 	var stderr bytes.Buffer
