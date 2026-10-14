@@ -544,7 +544,7 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			}
 			named.Methods = append(named.Methods, fn)
 		}
-		c.anyParams = recv == nil && d.Kind == KindFunc
+		c.anyParams = d.Kind == KindFunc // functions and methods, not tasks or externs
 		fn.Sig = c.signature(d.Type, recv)
 		c.anyParams = false
 		fn.Generic = hasAnyParam(fn.Sig)

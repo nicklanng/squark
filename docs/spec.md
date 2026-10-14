@@ -223,8 +223,9 @@ s []main.Entry, called at main.go:40"). Nothing happens at run time and nothing 
 instance is code, as if written by hand for those types. Storage passed as `anytype` (a map or
 channel with `cap`) becomes its view, and untyped constants their default type.
 
-Only plain functions take `anytype` parameters (not methods, tasks or externs), not as their
-variadic parameter, and results have ordinary types. A function with `anytype` parameters can only
+Functions and methods take `anytype` parameters (tasks and externs don't), not as their variadic
+parameter, and results have ordinary types (`bufio.Reader.ReadLine(src anytype)` reads from a
+conn or a file alike). A function with `anytype` parameters can only
 be called, not used as a value.
 
 ### Provenance (optional)

@@ -1,0 +1,10 @@
+[first]
+[]
+<bufio: line longer than the buffer>
+[after]
+[last]
+<eof>
+[hello]
+[world]
+[bye]
+<eof>

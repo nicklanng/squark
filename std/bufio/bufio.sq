@@ -1,0 +1,76 @@
+// Package bufio reads lines through a buffer the caller provides, from any source with a
+// Read([]byte) (int, error) method (a net.Conn, an os.File, ...).
+package bufio
+
+import (
+	"io"
+	"strings"
+)
+
+// ErrTooLong is returned for a line that doesn't fit in the buffer; the line is skipped.
+const ErrTooLong = error(-10, "bufio: line longer than the buffer")
+
+// Reader holds input read ahead of the lines returned so far.
+type Reader struct {
+	buf        []byte
+	start, end int
+	err        error // the source's error (io.EOF at its end), returned once the buffer is empty
+	skipping   bool  // inside a line too long for the buffer
+}
+
+// NewReader returns a Reader that buffers into storage (its capacity is the longest line).
+func NewReader(storage []byte) Reader from storage {
+	return Reader{buf: storage[:cap(storage)]}
+}
+
+// Buffered returns how many bytes have been read from the source but not returned yet.
+func (r *Reader) Buffered() int { return r.end - r.start }
+
+// ReadLine returns the next line from src, without its "\n" or "\r\n", as a view of the buffer
+// that stays valid until the next call. A last line without a newline is returned before the
+// source's error (io.EOF at the end of the input). A line longer than the buffer is skipped and
+// reported as ErrTooLong; the next call reads the line after it.
+func (r *Reader) ReadLine(src anytype) (string, error) from r {
+	for {
+		if i := strings.IndexByte(string(r.buf[r.start:r.end]), '\n'); i >= 0 {
+			line := r.buf[r.start : r.start+i]
+			r.start += i + 1
+			if r.skipping {
+				r.skipping = false
+				return "", ErrTooLong
+			}
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			return string(line), nil
+		}
+		if r.err != nil { // the source is done: what's left is the last line
+			if r.skipping {
+				r.skipping = false
+				r.start = r.end
+				return "", ErrTooLong
+			}
+			if r.start < r.end {
+				line := r.buf[r.start:r.end]
+				r.start = r.end
+				return string(line), nil
+			}
+			return "", r.err
+		}
+		if r.start > 0 { // make room
+			copy(r.buf, r.buf[r.start:r.end])
+			r.end -= r.start
+			r.start = 0
+		}
+		if r.end == len(r.buf) { // full, and no newline: the line is too long, drop it
+			r.skipping = true
+			r.end = 0
+		}
+		n, err := src.Read(r.buf[r.end:])
+		r.end += n
+		if err == nil && n == 0 {
+			err = io.EOF // a connection's reader reports the end with a zero-length read
+		}
+		r.err = err
+	}
+}

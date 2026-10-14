@@ -13,6 +13,39 @@ const ErrShortBuffer = error(-3, "short buffer")
 const ErrUnexpectedEOF = error(-4, "unexpected EOF")
 const ErrTooLarge = error(-5, "input larger than the buffer")
 
+package strings
+
+func HasPrefix(s string, prefix string) bool
+func HasSuffix(s string, suffix string) bool
+func IndexByte(s string, c byte) int
+func LastIndexByte(s string, c byte) int
+func Index(s string, sep string) int
+func Contains(s string, substr string) bool
+func TrimSpace(s string) string from s
+func TrimPrefix(s string, prefix string) string from s
+func TrimSuffix(s string, suffix string) string from s
+func Cut(s string, sep string) (string, string, bool) from s
+func CutPrefix(s string, prefix string) (string, bool) from s
+func CutSuffix(s string, suffix string) (string, bool) from s
+func AppendRepeat(dst []byte, s string, n int) []byte from dst
+func EqualFold(a string, b string) bool
+func AppendLower(dst []byte, s string) []byte from dst
+func Split(s string into out, sep string, out []string) []string from out
+func Fields(s string into out, out []string) []string from out
+func Count(s string, sub string) int
+
+package bufio
+
+const ErrTooLong = error(-10, "bufio: line longer than the buffer")
+
+type Reader struct {
+	// unexported fields
+}
+func (r *bufio.Reader) Buffered() int
+func (r *bufio.Reader) ReadLine(src anytype) (string, error) static
+
+func NewReader(storage []byte) bufio.Reader from storage
+
 package math
 
 const Pi = 3.141592653589793
@@ -65,27 +98,6 @@ func AppendFloat(dst []byte, v float64, prec int) []byte from dst
 func Atoi(s string) (int, error)
 func ParseInt(s string, base int) (int, error)
 func ParseBool(s string) (bool, error)
-
-package strings
-
-func HasPrefix(s string, prefix string) bool
-func HasSuffix(s string, suffix string) bool
-func IndexByte(s string, c byte) int
-func LastIndexByte(s string, c byte) int
-func Index(s string, sep string) int
-func Contains(s string, substr string) bool
-func TrimSpace(s string) string from s
-func TrimPrefix(s string, prefix string) string from s
-func TrimSuffix(s string, suffix string) string from s
-func Cut(s string, sep string) (string, string, bool) from s
-func CutPrefix(s string, prefix string) (string, bool) from s
-func CutSuffix(s string, suffix string) (string, bool) from s
-func AppendRepeat(dst []byte, s string, n int) []byte from dst
-func EqualFold(a string, b string) bool
-func AppendLower(dst []byte, s string) []byte from dst
-func Split(s string into out, sep string, out []string) []string from out
-func Fields(s string into out, out []string) []string from out
-func Count(s string, sub string) int
 
 package bytes
 

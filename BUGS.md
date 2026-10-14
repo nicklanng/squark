@@ -474,7 +474,7 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 
 ### Standard library gaps
 
-- [ ] **E12.** A line reader over a `net.Conn`/`os.File` (every line protocol hand-writes one).
+- [x] **E12.** A line reader over a `net.Conn`/`os.File` (every line protocol hand-writes one). — added `bufio.Reader` (`NewReader(storage)`, `ReadLine(src anytype)`, `Buffered`, `ErrTooLong`); `anytype` parameters are now allowed on methods; test: `testdata/run/bufio.sq`
 - [ ] **E13.** Text that can cross threads: `append`/`Append(s)` for byte vectors (`[..N]byte` can be
   sent on a shared channel but filled only byte by byte).
 - [x] **E14.** (done except shortest-float formatting and `ParseFloat`, which need a correctly rounding algorithm: libc's may allocate; `Itoa` can't return memory without a heap, `FormatInt(buf, v)` is it; Fields overflow left as documented) — added `math.Round/Trunc/Mod/Log2/Log10/Tan/Atan/Atan2/Hypot/Inf/NaN/IsNaN/IsInf/MaxInt/MinInt/MaxFloat64/SmallestNonzeroFloat64`, `strconv.AppendIntBase/AppendUintBase/AppendIntPad`, `strings.CutPrefix/CutSuffix/AppendRepeat`, `os.ReadFile`, `io.ErrUnexpectedEOF/ErrTooLarge` (ReadFull returns ErrUnexpectedEOF on a short read, as Go); test: `testdata/run/stdlib_more.sq`. Was: `strconv.Itoa`, integer formatting in other bases (hex) and padding, shortest float

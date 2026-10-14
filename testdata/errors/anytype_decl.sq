@@ -8,7 +8,7 @@ func ret() anytype { // ERROR "anytype is only allowed as the type of a function
 
 type T struct{}
 
-func (t T) m(a anytype) {} // ERROR "anytype is only allowed as the type of a function's parameter"
+func (t T) m(a anytype) {} // fine: methods take anytype too
 
 task tk(a anytype) pool 1 {} // ERROR "anytype is only allowed as the type of a function's parameter"
 

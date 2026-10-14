@@ -1,0 +1,59 @@
+package main
+
+// bufio.Reader reads lines from any source with a Read method (a file, a connection) through a
+// small buffer: CRLF, an empty line, a line too long for the buffer (skipped, reported once), a
+// last line without a newline, and lines split across reads.
+
+import (
+	"bufio"
+	"io"
+	"net"
+	"os"
+	"strconv"
+	"time"
+)
+
+func readAll(r *bufio.Reader, src anytype) {
+	for {
+		line, err := r.ReadLine(src)
+		if err == io.EOF {
+			println("<eof>")
+			return
+		}
+		if err != nil {
+			print("<", err.Error(), ">\n")
+			continue
+		}
+		print("[", line, "]\n")
+	}
+}
+
+task peer(l net.Listener) pool 1 {
+	c, _ := l.Accept()
+	c.WriteString("he")
+	time.Sleep(5 * time.Millisecond)
+	c.WriteString("llo\nwor")
+	time.Sleep(5 * time.Millisecond)
+	c.WriteString("ld\r\nbye")
+	c.Close()
+}
+
+func main() {
+	path := "/tmp/squark_bufio_test.txt"
+	f, _ := os.Create(path)
+	f.WriteString("first\r\n\nthis line is far too long for the buffer\nafter\nlast")
+	f.Close()
+	var store [16]byte
+	r := bufio.NewReader(store[:])
+	g, _ := os.Open(path)
+	readAll(&r, g)
+	g.Close()
+
+	l, _ := net.Listen("127.0.0.1:0")
+	go peer(l)
+	var b [32]byte
+	c, _ := net.Dial(string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), l.Port())))
+	r2 := bufio.NewReader(store[:])
+	readAll(&r2, c)
+	c.Close()
+}
