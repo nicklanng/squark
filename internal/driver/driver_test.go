@@ -1473,3 +1473,20 @@ func TestPreempt(t *testing.T) {
 		t.Errorf("a goroutine running alone: output %q, stderr %q (want no warning)", out, errs)
 	}
 }
+
+// TestDocVarKinds: squark doc names shared and thread variables as declared (it used to show a
+// shared var as a const with its initializer).
+func TestDocVarKinds(t *testing.T) {
+	dir := t.TempDir()
+	src := "package main\n\nshared var Table = makeTable()\nshared var Jobs chan int cap 4\nthread var Hits int\nvar Plain int\n\nfunc makeTable() [4]int { return [4]int{1, 2, 3, 4} }\n\nfunc main() {}\n"
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
+	out, err := Doc(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"shared var Table [4]int", "shared var Jobs chan int cap 4", "thread var Hits int", "var Plain int"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doc lacks %q:\n%s", want, out)
+		}
+	}
+}

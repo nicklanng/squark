@@ -148,6 +148,10 @@ func DocPackage(p *Package, all bool) string {
 			switch {
 			case v.ArenaSize > 0:
 				vars = append(vars, entry{o.Pos, fmt.Sprintf("arena %s %d", name, v.ArenaSize)})
+			case v.Shared:
+				vars = append(vars, entry{o.Pos, fmt.Sprintf("shared var %s %s", name, v.Type)})
+			case v.Thread:
+				vars = append(vars, entry{o.Pos, fmt.Sprintf("thread var %s %s", name, v.Type)})
 			case v.ConstData:
 				vars = append(vars, entry{o.Pos, fmt.Sprintf("const %s %s", name, v.Type)})
 			case v.ReadOnly:

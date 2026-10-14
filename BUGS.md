@@ -451,7 +451,7 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 - [x] **E6. `len` of a package-level array isn't constant at package level** (go-diff) — fixed: a package variable used before the variable declarations are resolved gets its declared type on demand (`declaredVarType`); test: `testdata/run/const_len_global.sq` `var a
   [5]int; const N = len(a)` and `task t() pool len(a)` fail with "used before its type is known
   (initialization order)".
-- [ ] **E7. `squark doc` shows a `shared var` as `const NAME = <initializer>`** (bug)
+- [x] **E7. `squark doc` shows a `shared var` as `const NAME = <initializer>`** (bug) — fixed: shared and thread vars have their own cases; test: `TestDocVarKinds`
 - [ ] **E8. Arrays and structs of shared channels are rejected, with a self-contradicting error**
   (missing feature + bug) `shared var reqs [4]chan Req cap 8` says "chan Req cap 8 can't be shared
   (... or a channel ...)". Needed for a request channel per thread or a reply channel per worker.
