@@ -311,7 +311,10 @@ without a value) is one channel for all of them. Send, receive, `close`, `len` a
 as for any channel; a goroutine blocked on it is woken by whichever thread completes the
 operation. Its elements may not hold references (no strings, slices, maps or pointers), since a
 reference could view one thread's own memory; send numbers, bools, errors, or arrays and structs
-of them (an index or ID instead of a string).
+of them (an index or ID instead of a string). Arrays and structs of shared channels work too:
+`shared var inbox [4]chan Req cap 8` gives each thread its own request channel and `shared var
+replies [64]chan int cap 1` each client its own reply channel; other fields of such a struct are
+read-only data.
 
 ## 5. Expressions
 

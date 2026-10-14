@@ -81,23 +81,8 @@ type Msg struct {
 
 shared var toHub chan Msg cap 64
 
-// Shared vars can't be arrays of channels, so each relay has its own and relayChan picks one.
-shared var relay0 chan Msg cap 64
-shared var relay1 chan Msg cap 64
-shared var relay2 chan Msg cap 64
-shared var relay3 chan Msg cap 64
-
-func relayChan(shard int) chan Msg {
-	switch shard {
-	case 0:
-		return relay0
-	case 1:
-		return relay1
-	case 2:
-		return relay2
-	}
-	return relay3
-}
+// one channel per relay (per scheduler thread that takes clients)
+shared var relays [Relays]chan Msg cap 64
 
 thread var relayDone chan bool cap 1
 
@@ -175,7 +160,7 @@ task session(c net.Conn, id int) pool MaxClients {
 // relay owns its shard's client sockets: it starts their sessions and writes to them.
 task relay(shard int) pool 1 {
 	var conns [MaxClients]net.Conn
-	for m := range relayChan(shard) {
+	for m := range relays[shard] {
 		c := &conns[m.ID]
 		if m.Kind == DoAttach {
 			*c = m.Conn
@@ -211,7 +196,7 @@ type Hub struct {
 
 func (h *Hub) send(kind, id int, line *Line) {
 	select {
-	case relayChan(h.room[id].Shard) <- Msg{Kind: kind, ID: id, Line: *line}:
+	case relays[h.room[id].Shard] <- Msg{Kind: kind, ID: id, Line: *line}:
 		h.sent++
 	case <-time.After(time.Second):
 		h.dropped++ // that relay is stuck: don't let it hold up the whole room
@@ -232,7 +217,7 @@ func (h *Hub) accept(c net.Conn) {
 			h.room[i] = Client{Used: true, Shard: h.rr % h.shards} // spread clients over relays
 			h.rr++
 			h.online++
-			relayChan(h.room[i].Shard) <- Msg{Kind: DoAttach, ID: i, Conn: c}
+			relays[h.room[i].Shard] <- Msg{Kind: DoAttach, ID: i, Conn: c}
 			return
 		}
 	}
@@ -319,7 +304,7 @@ task hub() pool 1 {
 	}
 	println("room closed:", h.sent, "lines sent,", h.dropped, "dropped")
 	for s := 0; s < h.shards; s++ {
-		close(relayChan(s))
+		close(relays[s])
 	}
 }
 

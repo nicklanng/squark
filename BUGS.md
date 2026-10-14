@@ -452,8 +452,8 @@ language as a user would. Repros below are minimal; the examples carry workaroun
   [5]int; const N = len(a)` and `task t() pool len(a)` fail with "used before its type is known
   (initialization order)".
 - [x] **E7. `squark doc` shows a `shared var` as `const NAME = <initializer>`** (bug) — fixed: shared and thread vars have their own cases; test: `TestDocVarKinds`
-- [ ] **E8. Arrays and structs of shared channels are rejected, with a self-contradicting error**
-  (missing feature + bug) `shared var reqs [4]chan Req cap 8` says "chan Req cap 8 can't be shared
+- [x] **E8. Arrays and structs of shared channels are rejected, with a self-contradicting error**
+  (missing feature + bug) — fixed: shared vars may hold channels in arrays and structs (set up eagerly by shard 0, element by element); the error names the field holding a reference (`Msg.Body is a string`); examples/chat uses an array of relay channels; tests: `testdata/run/shared_chan_array.sq` (also under TSan), `testdata/errors/shared_chan_array.sq` `shared var reqs [4]chan Req cap 8` says "chan Req cap 8 can't be shared
   (... or a channel ...)". Needed for a request channel per thread or a reply channel per worker.
 - [ ] **E9. `json.Decoder` accepts invalid JSON** (bug) `Skip` accepts `@@@` and `nul`; `Int`
   accepts `007`, and on `1.5`/`1e3` returns `(1, true)` with the error surfacing later as a syntax

@@ -1163,7 +1163,7 @@ func TestSharedChanRace(t *testing.T) {
 		t.Skip("slow")
 	}
 	// shared channels, and select over them with timeouts (select_shared.sq)
-	for _, name := range []string{"shared_chan", "select_shared"} {
+	for _, name := range []string{"shared_chan", "select_shared", "shared_chan_array"} {
 		dir := t.TempDir()
 		src, err := os.ReadFile("../../testdata/run/" + name + ".sq")
 		if err != nil {

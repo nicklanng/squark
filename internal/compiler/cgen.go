@@ -212,10 +212,9 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 				// one copy for every shard, set by shard 0 before the others start
 				v.CName = member
 				fmt.Fprintf(&g.sharedGlobals, "static %s;\n", g.decl(v.Type, member))
-				if ch, ok := v.Type.Underlying().(*ChanStore); ok {
-					// a shared channel: set up eagerly (lazy setup on first use would race)
-					fmt.Fprintf(&g.sharedInits, "\t\tsq_chan_init_shared(&%s.h, %s.buf, sizeof(%s), %d);\n", member, member, g.ctype(ch.Elem), ch.Cap)
-				}
+				// shared channels (alone or in arrays and structs): set up eagerly, since lazy
+				// setup on first use would race
+				g.initSharedChans(member, v.Type, 2)
 				continue
 			}
 			v.CName = "sq_gl->" + member
@@ -571,6 +570,28 @@ func (g *gen) proto(f *Func) string {
 		ps = []string{"void"}
 	}
 	return fmt.Sprintf("%s %s(%s)", g.resultC(f.Sig), f.CName, strings.Join(ps, ", "))
+}
+
+// initSharedChans emits the setup of every channel in the shared variable (or part) expr of type t.
+func (g *gen) initSharedChans(expr string, t Type, ind int) {
+	tabs := strings.Repeat("\t", ind)
+	switch u := t.Underlying().(type) {
+	case *ChanStore:
+		fmt.Fprintf(&g.sharedInits, "%ssq_chan_init_shared(&%s.h, %s.buf, sizeof(%s), %d);\n", tabs, expr, expr, g.ctype(u.Elem), u.Cap)
+	case *Array:
+		if containsChan(u.Elem) {
+			i := g.tmp()
+			fmt.Fprintf(&g.sharedInits, "%sfor (int64_t %s = 0; %s < %d; %s++) {\n", tabs, i, i, u.Len, i)
+			g.initSharedChans(fmt.Sprintf("%s.a[%s]", expr, i), u.Elem, ind+1)
+			fmt.Fprintf(&g.sharedInits, "%s}\n", tabs)
+		}
+	case *Struct:
+		for i, f := range u.Fields {
+			if containsChan(f.Type) {
+				g.initSharedChans(expr+"."+fieldName(f.Name, i), f.Type, ind)
+			}
+		}
+	}
 }
 
 // blockingWrapper declares a blocking extern and defines the wrapper its callers use: the

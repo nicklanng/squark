@@ -304,14 +304,27 @@ func isErrorConst(vs *ValueSpec) bool {
 // Shared channels are the exception: their operations are synchronized, and their elements may not
 // hold references at all (a string could view one thread's own memory).
 func (c *Checker) checkSharedType(n *Ident, t Type) {
-	if ch, ok := t.Underlying().(*ChanStore); ok {
-		if hasRefs(ch.Elem, map[Type]bool{}) {
-			c.errorf(n.P, "shared var %s: a shared channel's elements can't hold references (%s): send numbers, bools, errors or arrays and structs of them; a string or slice could view one thread's own memory", n.Name, ch.Elem)
+	switch u := t.Underlying().(type) {
+	case *ChanStore:
+		if d := refDesc(u.Elem); d != "" {
+			c.errorf(n.P, "shared var %s: a shared channel's elements can't hold references (%s): send numbers, bools, errors or arrays and structs of them; a string or slice could view one thread's own memory", n.Name, d)
 		}
 		return
+	case *Array:
+		if containsChan(u.Elem) { // an array of channels (or of structs holding some)
+			c.checkSharedType(n, u.Elem)
+			return
+		}
+	case *Struct:
+		if containsChan(t) {
+			for _, f := range u.Fields {
+				c.checkSharedType(n, f.Type)
+			}
+			return
+		}
 	}
 	if bad := constDataType(t, map[Type]bool{}); bad != nil {
-		c.errorf(n.P, "shared var %s: %s can't be shared (only numbers, strings, bools, errors and arrays or structs of them, or a channel: nothing a shared value points to could be kept read-only)", n.Name, bad)
+		c.errorf(n.P, "shared var %s: %s can't be shared (only numbers, strings, bools, errors, channels, and arrays or structs of them: nothing a shared value points to could be kept read-only)", n.Name, bad)
 	}
 }
 
@@ -698,8 +711,8 @@ func (c *Checker) globalVarSpec(vs *ValueSpec) {
 			c.checkConstData(n.Name, x)
 		}
 		if n.Obj.Var.Shared && t != tInvalid {
-			if _, ok := t.Underlying().(*ChanStore); ok {
-				c.errorf(x.Pos(), "shared var %s: a shared channel is declared without a value (shared var %s chan T cap N)", n.Name, n.Name)
+			if containsChan(t) {
+				c.errorf(x.Pos(), "shared var %s: shared channels are declared without a value (shared var %s chan T cap N)", n.Name, n.Name)
 			} else {
 				c.checkSharedType(n, t)
 			}

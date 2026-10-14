@@ -1,0 +1,22 @@
+package main
+
+type Msg struct {
+	ID   int
+	Body string
+}
+
+type Pair struct {
+	In  chan Msg cap 4
+	Out chan int cap 4
+}
+
+shared var good [3]chan int cap 2
+shared var bad [2]chan Msg cap 4 // ERROR "shared var bad: a shared channel's elements can't hold references (Msg.Body is a string)"
+shared var pairs [2]Pair // ERROR "shared var pairs: a shared channel's elements can't hold references (Msg.Body is a string)"
+shared var withValue = [1]int{1}
+shared var notData [2]*int // ERROR "shared var notData: *int can't be shared"
+
+func main() {
+	good[0] <- 1
+	println(<-good[0], withValue[0])
+}

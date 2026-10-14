@@ -512,6 +512,64 @@ func hasRefs(t Type, seen map[Type]bool) bool {
 	return false
 }
 
+// refDesc describes the first reference inside t for error messages: "string" if t is one,
+// "Msg.Body is a string" if a field holds it; "" if t holds none.
+func refDesc(t Type) string {
+	path, rt := refPath(t, map[Type]bool{})
+	switch {
+	case rt == nil:
+		return ""
+	case path == "":
+		return rt.String()
+	}
+	return path + " is a " + rt.String()
+}
+
+func refPath(t Type, seen map[Type]bool) (string, Type) {
+	if seen[t] {
+		return "", nil
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *Array:
+		return refPath(u.Elem, seen)
+	case *VecType:
+		return refPath(u.Elem, seen)
+	case *Struct:
+		for _, f := range u.Fields {
+			if p, rt := refPath(f.Type, seen); rt != nil {
+				name := t.String() + "." + f.Name
+				if p != "" {
+					name += p[strings.Index(p, "."):]
+				}
+				return name, rt
+			}
+		}
+		return "", nil
+	}
+	if hasRefs(t, map[Type]bool{}) {
+		return "", t
+	}
+	return "", nil
+}
+
+// containsChan reports whether t is channel storage or an array or struct holding some.
+func containsChan(t Type) bool {
+	switch u := t.Underlying().(type) {
+	case *ChanStore:
+		return true
+	case *Array:
+		return containsChan(u.Elem)
+	case *Struct:
+		for _, f := range u.Fields {
+			if containsChan(f.Type) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Comparable reports whether == is defined.
 func Comparable(t Type) bool {
 	switch u := t.Underlying().(type) {
