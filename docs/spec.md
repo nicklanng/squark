@@ -26,12 +26,14 @@ current.
 8. **Errors are values with a static message:** `const ErrX = error(404, "not found")`. They can't
    be formatted with dynamic text; use the code, or log separately.
 9. **`string(b)` is a zero-copy view of `b`.** `[]byte(s)` is an error without an arena.
-10. **Single-threaded and cooperative.** Goroutines switch only at blocking operations (I/O, channel
-    operations, `time.Sleep`, `go` on a full pool). A busy loop blocks everything; data shared
-    between goroutines needs no locks as long as you don't block mid-update. To use more cores,
-    `threads N` runs N scheduler threads in one process and `workers N` runs N processes; either
-    way each runs its own copy of `main` with its own package variables, so this rule holds in
-    each.
+10. **Cooperative within a thread; threads share nothing mutable.** A thread's goroutines switch
+    only at blocking operations (I/O, channel operations, `time.Sleep`, `go` on a full pool,
+    `runtime.Gosched()`) and in the loops of tasks marked `preemptible`. So data shared between a
+    thread's goroutines needs no locks as long as you don't block mid-update. With `threads N` (or
+    `workers N`) each thread runs its own copy of `main` with its own package variables; threads
+    share only read-only data and shared channels. No lock is ever needed. A busy loop in an
+    ordinary task holds up its thread: mark CPU-heavy tasks `preemptible`, and the runtime warns
+    about a goroutine that holds its thread for 100ms while others wait.
 
 ## 1. Lexical elements
 
@@ -162,6 +164,7 @@ func name(params) results { ... }
 
 task name(params) pool N { ... }               // a goroutine entry point; no results
 task name(params) pool N stack 64K { ... }     // also assert a stack upper bound
+task name(params) pool N preemptible { ... }   // its loops may yield after a time slice
 
 extern func sqrt(x float64) float64 stack 1K               // C function of the same name
 extern "sq_read" func read(fd int, b []byte) int stack 8K  // C symbol differs from the name
@@ -169,6 +172,12 @@ extern "slow_query" func query(q string) int stack 128K blocking // runs on a he
 ```
 
 - `pool N`: at most N instances run at once. `go` on a full pool waits for a slot.
+- `preemptible` on a task: once one of its goroutines has run for a time slice (about 10ms)
+  without blocking, it yields at the next loop iteration, in its own code or any function it
+  calls, so a long computation doesn't hold up its thread. Those functions get a check at each
+  loop iteration (a load and a branch, too cheap to measure); called from other goroutines they
+  never yield. Only a preemptible task can be interrupted mid-loop, so keep it from leaving state
+  that other goroutines read half-updated across a loop iteration (or update it in one step).
 - `stack N` on an extern is required: it's the C function's stack budget used in the stack proof.
   On a task it is an assertion, and the build fails if the proven size is larger.
 - Extern parameter types map to C as follows: `int`/`int64` → `int64_t`, `int32` → `int32_t`, and so
@@ -387,6 +396,7 @@ must not outlive the memory it points to:
 | `shared var X: T can't be shared` | share numbers, strings, bools, errors or arrays/structs of them; keep everything else per thread |
 | `a shared channel's elements can't hold references` | send an index, ID or fixed-size array instead of a string or slice |
 | `time.After can only be used as a select case` | `select { case <-time.After(d): ... }`; to just wait, `time.Sleep(d)` |
+| `only tasks can be preemptible` | mark the task the work runs in; functions it calls yield too |
 | `only extern functions can be blocking` | drop `blocking`; squark code waits by parking already (channels, I/O, sleeps) |
 | `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (error constants, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |
 | `defer inside a loop` | move the loop body into a function and defer there |
@@ -458,16 +468,20 @@ func handle(w *http.ResponseWriter, r *http.Request) {
 
 ## 9. Runtime behaviour
 
-- One OS thread by default. Goroutines are cooperative and switch at blocking operations. Netpoll is
-  kqueue on macOS and epoll on Linux.
+- One OS thread by default. Goroutines are cooperative and switch at blocking operations (and in
+  preemptible tasks' loops). Netpoll is kqueue on macOS and epoll on Linux.
+- A watchdog thread asks a goroutine that has run for a time slice to yield (only preemptible
+  tasks do), and prints a warning naming the task when a goroutine has held its thread for 100ms
+  while other goroutines waited on it. A program with nothing else to run isn't warned about.
+  `runtime.Gosched()` yields by hand.
 - `threads N` (1 to 1024, or `auto` for one per core) runs N scheduler threads (shards) in one
   process. The directive says the program is written for threads; without it a program runs one
   thread. `threads auto` is the usual choice: one thread per core, and `SQUARK_THREADS=N` in the
   environment overrides the count at run time (like `GOMAXPROCS`). `SQUARK_THREADS` also
   overrides `threads N`, except that with a `budget` it can't go above N, the count the budget
   was proven for. It has no effect on programs without the directive. Each shard runs `main`
-  with its own package variables (see `thread var`, §4), goroutine pools, timers and poller; goroutines never move between shards, so rule 10 holds within each and nothing needs
-  locks. Error constants are shared (they're read-only). Listening on an address from every shard
+  with its own package variables (see `thread var`, §4), goroutine pools, timers and poller;
+  goroutines never move between shards, so rule 10 holds within each and nothing needs locks. Error constants are shared (they're read-only). Listening on an address from every shard
   works: on Linux each shard gets its own socket (`SO_REUSEPORT`) and the kernel spreads
   connections; on macOS the shards share one socket. `runtime.Shard()` and `runtime.Shards()`
   report where a goroutine runs. The process exits when every shard's `main` has returned (a

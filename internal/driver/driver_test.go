@@ -1418,3 +1418,52 @@ func TestDetach(t *testing.T) {
 		run("race", "thread", 4)
 	}
 }
+
+// TestPreempt runs testdata/preempt: a preemptible task's loop yields to a ticker on its thread, an
+// ordinary task's loop can't be interrupted (rule 10) and the watchdog names it, and Gosched yields.
+// A goroutine running alone gets no warning: nothing waits for it. Also under TSan (the watchdog
+// thread reads the schedulers' state).
+func TestPreempt(t *testing.T) {
+	dir := t.TempDir()
+	want := "preemptible: ticker kept running true\nordinary task: ticks while it ran 0\nGosched: ticker kept running true\n"
+	run := func(src, name, sanitize string) (string, string) {
+		t.Helper()
+		bin := filepath.Join(dir, name)
+		if _, err := Build(Options{Dir: src, Output: bin, Sanitize: sanitize}); err != nil {
+			if sanitize != "" {
+				t.Logf("no ThreadSanitizer build here: %v", err)
+				return "", ""
+			}
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bin)
+		cmd.Env = append(os.Environ(), "TSAN_OPTIONS=halt_on_error=0 report_signal_unsafe=0")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v\n%s", name, err, stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+	for _, sanitize := range []string{"", "thread"} {
+		if sanitize != "" && testing.Short() {
+			continue
+		}
+		out, errs := run("../../testdata/preempt", "prog"+sanitize, sanitize)
+		if sanitize != "" && out == "" {
+			continue
+		}
+		if out != want || strings.Contains(errs, "ThreadSanitizer") {
+			t.Fatalf("%s: got\n%s\nwant\n%s\n%s", sanitize, out, want, errs)
+		}
+		if !strings.Contains(errs, "goroutine [main.hog] has run for") || strings.Contains(errs, "main.cruncher") {
+			t.Errorf("%s: watchdog warnings:\n%s", sanitize, errs)
+		}
+	}
+	alone := filepath.Join(dir, "alone")
+	os.MkdirAll(alone, 0o755)
+	os.WriteFile(filepath.Join(alone, "main.sq"), []byte("package main\n\nimport \"time\"\n\nfunc main() {\n\tstart := time.Now()\n\tn := 0\n\tfor time.Since(start).Milliseconds() < 150 {\n\t\tn++\n\t}\n\tprintln(n > 0)\n}\n"), 0o644)
+	if out, errs := run(alone, "aloneprog", ""); out != "true\n" || errs != "" {
+		t.Errorf("a goroutine running alone: output %q, stderr %q (want no warning)", out, errs)
+	}
+}

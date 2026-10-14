@@ -1,0 +1,70 @@
+package main
+
+// Test program for TestPreempt (internal/driver). A preemptible task spinning in a loop (inside a
+// function it calls) lets a ticker on the same thread keep ticking; the same loop in an ordinary
+// task can't be interrupted, so the ticker doesn't tick at all while it runs (rule 10).
+
+import (
+	"runtime"
+	"time"
+)
+
+var ticks int
+var done chan int cap 4
+
+task ticker() pool 1 {
+	for {
+		time.Sleep(2 * time.Millisecond)
+		ticks++
+		if len(done) > 0 {
+			return
+		}
+	}
+}
+
+// spin runs for ms milliseconds without blocking; a counter keeps the loop from being optimized
+func spin(ms int) int {
+	start := time.Now()
+	n := 0
+	for time.Since(start).Milliseconds() < ms {
+		n++
+	}
+	return n
+}
+
+task cruncher() pool 1 preemptible {
+	spin(200)
+	done <- 1
+}
+
+task hog() pool 1 {
+	before := ticks
+	spin(150)
+	done <- ticks - before
+}
+
+task yielder() pool 1 {
+	before := ticks
+	start := time.Now()
+	for time.Since(start).Milliseconds() < 100 {
+		runtime.Gosched()
+	}
+	done <- ticks - before
+}
+
+func main() {
+	go ticker()
+	time.Sleep(10 * time.Millisecond)
+
+	before := ticks
+	go cruncher()
+	<-done
+	println("preemptible: ticker kept running", ticks-before >= 5)
+
+	go hog()
+	println("ordinary task: ticks while it ran", <-done)
+
+	go yielder()
+	println("Gosched: ticker kept running", <-done >= 10)
+	done <- 0 // stop the ticker
+}

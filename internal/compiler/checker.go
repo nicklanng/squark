@@ -507,6 +507,12 @@ func (c *Checker) resolveDecls(pkg *Package) {
 				}
 			}
 		}
+		if d.Preemptible {
+			if !fn.IsTask {
+				c.errorf(d.PreemptiblePos, "only tasks can be preemptible (a goroutine's entry point decides whether it may be interrupted)")
+			}
+			fn.Preemptible = true
+		}
 		if d.Blocking {
 			if fn.Extern == "" {
 				c.errorf(d.BlockingPos, "only extern functions can be blocking (blocking runs a C call on a helper thread)")

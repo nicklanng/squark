@@ -246,11 +246,11 @@ the OS.
 `bench/run.sh` builds both versions of everything and runs `bench/harness`. Results are in
 `bench/results/latest.md`, along with the caveats below.
 
-- The squark server is single-threaded; Go's uses every core. The load generator runs on the same
-  machine. With `workers 3` on Linux (Docker, 6 cores shared with the load generator) notes serves
-  about 800k req/s on `/health` and 630k on `/notes/1`, against 450k and 295k for one process and
-  about 470k and 265k for Go with `GOMAXPROCS=3`; `threads 3` (one process) is close behind
-  `workers 3`. See `bench/workers-linux.sh`.
+- The squark server here runs one thread; Go's uses every core. The load generator runs on the
+  same machine. On Linux (Docker, 6 cores shared with the load generator), `threads 3` serves
+  about 800k req/s on `/health`, 550k on `/notes/1` and 250k on the write-heavy mix, against
+  450k, 290k and 170k for one thread and about 450k, 250k and 95k for Go with `GOMAXPROCS=3`;
+  `workers 3` (processes) is similar. See `bench/workers-linux.sh`.
 - The JSON benchmark compares hand-written append code with Go's reflection-based `encoding/json`.
 - wordfreq streams the file and interns words in an arena, while Go's version reads the whole file,
   as idiomatic Go does.

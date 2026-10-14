@@ -142,7 +142,14 @@ typedef struct sq_pool {
 	int64_t live, peak, started;
 	int64_t observed; // deepest stack use seen (only with SQ_STACKCHECK=1)
 	int64_t index;    // position in sq_pools; each shard has its own copy of every pool
+	bool preemptible; // task ... preemptible: its loops yield when asked (sq_preempt)
 } sq_pool;
+
+// Preemption: loops in preemptible tasks (and the functions they call) check their thread's flag
+// at every iteration; the watchdog sets it when a goroutine has run for a time slice.
+extern _Thread_local _Atomic int *sq_preempt_flag;
+void sq_preempt(void);
+extern const bool sq_any_preemptible;
 
 void sq_go(sq_pool *pool, void (*entry)(void *), const void *args, size_t argsize);
 void sq_gosched(void);

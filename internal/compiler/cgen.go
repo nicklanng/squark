@@ -51,6 +51,9 @@ type gen struct {
 	topDecls []string
 	labelIDs map[Stmt]int
 	selRecv  map[*UnaryExpr][2]string // a select case's receive: the value and ok the select delivered
+	preemptFns  map[*Func]bool // reachable from a preemptible task: loops check for preemption
+	fnPreempt   bool           // the function being generated is one of them
+	usesPreempt bool           // it has a loop (needs sq_pf)
 	nextLbl  int
 	file     string
 
@@ -136,6 +139,23 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 		}
 	}
 	prog.InitFunc.CName = "sq_init_globals"
+	// loops in preemptible tasks and everything they call check for preemption; elsewhere none
+	g.preemptFns = map[*Func]bool{}
+	var mark func(f *Func)
+	mark = func(f *Func) {
+		if g.preemptFns[f] || f.Extern != "" {
+			return
+		}
+		g.preemptFns[f] = true
+		for _, c := range prog.Callees(f) {
+			mark(c)
+		}
+	}
+	for _, f := range prog.Funcs {
+		if f.Preemptible {
+			mark(f)
+		}
+	}
 	mainPool := &PoolInfo{CName: "sq_main_pool", Name: "main.main", Count: 1, Trampolines: []string{"sq_program_main"}}
 	g.poolOrder = append(g.poolOrder, mainPool)
 
@@ -798,6 +818,7 @@ func (g *gen) function(f *Func) string {
 	g.fn = f
 	g.tmpN = 0
 	g.usesGlobals = false
+	g.fnPreempt, g.usesPreempt = g.preemptFns[f], false
 	g.topDecls = nil
 	var body strings.Builder
 	g.out = &body
@@ -826,6 +847,9 @@ func (g *gen) function(f *Func) string {
 	b.WriteString("static " + attr + g.proto(f) + " {\n")
 	if g.usesGlobals {
 		b.WriteString("\tstruct sq_globals *const sq_gl = sq_globals_self;\n")
+	}
+	if g.usesPreempt {
+		b.WriteString("\t_Atomic int *const sq_pf = sq_preempt_flag;\n")
 	}
 	for _, d := range g.topDecls {
 		b.WriteString("\t" + d + "\n")

@@ -484,6 +484,8 @@ type FuncDecl struct {
 	Stack     Expr   // ... stack N
 	Blocking  bool   // extern ... blocking: the call runs on a helper thread
 	BlockingPos Pos
+	Preemptible    bool // task ... preemptible: its loops may yield after a time slice
+	PreemptiblePos Pos
 }
 
 // Directive is a top-level `budget N`, `link "lib"`, `cflags "..."` or `ldflags "..."`.

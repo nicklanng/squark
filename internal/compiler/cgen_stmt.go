@@ -759,6 +759,16 @@ func (g *gen) switchStmt(s *SwitchStmt) {
 	g.close()
 }
 
+// preemptCheck ends a loop iteration in a function a preemptible task may run: if the watchdog
+// asked this thread's goroutine to yield, a preemptible one does (sq_preempt).
+func (g *gen) preemptCheck() {
+	if !g.fnPreempt {
+		return
+	}
+	g.usesPreempt = true
+	g.line("if (__builtin_expect(atomic_load_explicit(sq_pf, memory_order_relaxed), 0)) sq_preempt();")
+}
+
 func (g *gen) forStmt(s *ForStmt) {
 	id := g.label(s)
 	g.open()
@@ -790,6 +800,7 @@ func (g *gen) forStmt(s *ForStmt) {
 	g.stmts(s.Body.List)
 	g.close()
 	g.line("sq_cont%d:;", id)
+	g.preemptCheck()
 	g.out.WriteString(post.String())
 	g.ind--
 	g.line("}")
@@ -823,6 +834,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		g.stmts(s.Body.List)
 		g.close()
 		g.line("sq_cont%d:;", id)
+		g.preemptCheck()
 	}
 	switch u := xt.Underlying().(type) {
 	case *Basic:

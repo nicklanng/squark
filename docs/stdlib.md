@@ -264,6 +264,7 @@ package runtime
 
 extern func Shard() int stack 1024
 extern func Shards() int stack 1024
+extern func Gosched() stack 1024
 
 package sqlite
 

@@ -165,6 +165,12 @@ typedef struct sq_shard {
 	int64_t shared_parked;    // this shard's goroutines waiting for other threads (shared channels, locks, blocking calls)
 	sq_g *detach_g;           // a goroutine detaching (sq_detach), handed to a helper once switched out
 	uint64_t rand;            // select's random start
+	sq_g *preempted;          // the goroutine that just yielded to preemption
+	// read by the watchdog thread
+	_Atomic int preempt;          // asks the running goroutine to yield (if it is preemptible)
+	_Atomic uint64_t switches;    // goroutines run so far
+	_Atomic(const char *) running; // the running goroutine's task (NULL: in the scheduler)
+	_Atomic bool others;          // other goroutines were waiting when it started
 	struct {
 		int fd;
 		int entry; // in listen_table
@@ -2132,8 +2138,13 @@ static void schedule(void) {
 		while ((g = runq_pop())) {
 			sq_self->cur_g = g;
 			g->state = G_RUNNING;
+			atomic_store_explicit(&sq_self->preempt, 0, memory_order_relaxed);
+			atomic_store_explicit(&sq_self->switches, (uint64_t)++switches, memory_order_relaxed);
+			atomic_store_explicit(&sq_self->others, sq_self->runq_head || sq_self->fd_waiters > 0 || sq_self->ntimers > 0 || sq_self->idle_parked > 0, memory_order_relaxed);
+			atomic_store_explicit(&sq_self->running, g->pool->name, memory_order_relaxed);
 			TSAN_SWITCH(g->tsan_fiber);
 			sq_ctx_switch(&sq_self->sched_ctx, &g->ctx);
+			atomic_store_explicit(&sq_self->running, NULL, memory_order_relaxed);
 			sq_self->cur_g = NULL;
 			if (sq_self->detach_g) { // g detached: its context is saved now, so a helper may resume it
 				helper_push(sq_self->detach_g);
@@ -2158,7 +2169,13 @@ static void schedule(void) {
 				}
 				g_release(g);
 			}
-			if ((++switches & 63) == 0 && (sq_self->fd_waiters > 0 || sq_self->ntimers > 0 || sq_self->idle_parked > 0)) {
+			if (g == sq_self->preempted) {
+				// preempted: whatever became ready while it ran goes first, then it
+				sq_self->preempted = NULL;
+				fire_timers();
+				if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0) netpoll(0);
+				runq_push(g);
+			} else if ((switches & 63) == 0 && (sq_self->fd_waiters > 0 || sq_self->ntimers > 0 || sq_self->idle_parked > 0)) {
 				fire_timers();
 				if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0) netpoll(0);
 			}
@@ -2314,6 +2331,7 @@ static void run_workers(void) {
 
 #define SQ_SIGSTACK_SIZE 32768
 int64_t sq_shard_count = 1;
+static sq_shard *_Atomic all_shards[SQ_MAX_SHARDS]; // for the watchdog
 // live_shards (declared with sq_shard): shards whose main hasn't returned
 
 static size_t align16(size_t n) { return (n + 15) & ~(size_t)15; }
@@ -2362,6 +2380,91 @@ static sq_shard *shard_new(void) {
 	return s;
 }
 
+// ---------------------------------------------------------------------------
+// preemption and the watchdog
+
+_Thread_local _Atomic int *sq_preempt_flag = &sq_shard0.preempt;
+
+// sq_preempt is called by a loop that found its thread's flag set: a preemptible task yields.
+void sq_preempt(void) {
+	atomic_store_explicit(&sq_self->preempt, 0, memory_order_relaxed);
+	sq_g *g = sq_self->cur_g;
+	if (!g->pool->preemptible) return;
+	sq_self->preempted = g; // the scheduler queues it after polling
+	TSAN_SWITCH(sq_self->tsan_sched);
+	sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
+}
+
+static void watch_warn(const char *task, int64_t ms) {
+	char buf[256];
+	size_t n = 0;
+	const char *parts[] = {"squark: goroutine [", task, "] has run for ", NULL};
+	for (int i = 0; parts[i]; i++) {
+		size_t k = strlen(parts[i]);
+		if (n + k >= sizeof buf) k = sizeof buf - n - 1;
+		memcpy(buf + n, parts[i], k);
+		n += k;
+	}
+	char num[24];
+	int k = 0;
+	do num[k++] = (char)('0' + ms % 10); while ((ms /= 10) > 0 && k < 23);
+	while (k > 0 && n < sizeof buf - 1) buf[n++] = num[--k];
+	const char *tail = "ms without yielding while other goroutines wait on its thread: mark the task "
+	                   "preemptible, or call runtime.Gosched() in its loop\n";
+	size_t t = strlen(tail);
+	if (n + t >= sizeof buf) t = sizeof buf - n - 1;
+	memcpy(buf + n, tail, t);
+	n += t;
+	write_all(2, buf, n);
+}
+
+// watchdog asks a goroutine that has held its thread for a time slice (10ms) to yield, and warns
+// once it has held it for 100ms while others waited. It reads only the shards' atomic fields.
+static void *watchdog(void *arg) {
+	(void)arg;
+	static uint64_t last[SQ_MAX_SHARDS];
+	static int64_t held[SQ_MAX_SHARDS];
+	static bool warned[SQ_MAX_SHARDS];
+	const int64_t tick = sq_any_preemptible ? 5 : 50; // ms
+	for (;;) {
+		struct timespec ts = {0, tick * 1000000};
+		nanosleep(&ts, NULL);
+		for (int64_t i = 0; i < sq_shard_count; i++) {
+			sq_shard *s = atomic_load(&all_shards[i]);
+			if (!s) continue;
+			uint64_t sw = atomic_load_explicit(&s->switches, memory_order_relaxed);
+			const char *task = atomic_load_explicit(&s->running, memory_order_relaxed);
+			if (sw != last[i] || !task) {
+				last[i] = sw;
+				held[i] = 0;
+				warned[i] = false;
+				continue;
+			}
+			held[i] += tick;
+			if (held[i] >= 10) atomic_store_explicit(&s->preempt, 1, memory_order_relaxed);
+			if (held[i] >= 100 && !warned[i] && atomic_load_explicit(&s->others, memory_order_relaxed)) {
+				warned[i] = true;
+				watch_warn(task, held[i]);
+			}
+		}
+	}
+	return NULL;
+}
+
+static void start_watchdog(void) {
+	sigset_t all, old;
+	sigfillset(&all);
+	pthread_sigmask(SIG_BLOCK, &all, &old);
+	pthread_t t;
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	pthread_attr_setstacksize(&attr, 65536);
+	pthread_create(&t, &attr, watchdog, NULL); // without it, nothing is preempted or reported
+	pthread_attr_destroy(&attr);
+	pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
 // shard_run runs the current thread's shard: signal stack, poller, pools, then main.
 static void shard_run(void) {
 #ifdef SQ_TSAN
@@ -2381,6 +2484,8 @@ static void shard_run(void) {
 	epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, sq_self->wake_fd, &wake);
 #endif
 	pthread_mutex_init(&sq_self->remote_mu, NULL);
+	sq_preempt_flag = &sq_self->preempt;
+	atomic_store(&all_shards[sq_self->id], sq_self);
 	for (int64_t i = 0; i < sq_npools; i++) pool_init(sq_self->pools[i]);
 	sq_go(&sq_main_pool, sq_program_main, NULL, 0);
 	schedule();
@@ -2469,6 +2574,7 @@ int main(int argc, char **argv) {
 	sq_shard_count = n;
 	atomic_store(&live_shards, n);
 	if (sq_helpers_per_thread > 0) start_helpers(sq_helpers_per_thread * n);
+	start_watchdog();
 	sq_self->sigstack = sq_sigstack; // shard 0 runs on this thread, with the static copies
 	sq_self->sigstack_size = sizeof sq_sigstack;
 	shard_run(); // the other shards start once shard 0 has initialized (sq_start_shards)

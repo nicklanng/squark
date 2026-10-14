@@ -7,3 +7,7 @@ extern "sq_shard_id" func Shard() int stack 1K
 
 // Shards returns the number of scheduler threads in this process (threads N; 1 by default).
 extern "sq_shard_total" func Shards() int stack 1K
+
+// Gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
+// Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
+extern "sq_gosched" func Gosched() stack 1K

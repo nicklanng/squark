@@ -1,0 +1,13 @@
+package main
+
+task crunch(n int) pool 2 preemptible { // fine: a task
+	println(n)
+}
+
+func helper() preemptible { // ERROR "only tasks can be preemptible"
+}
+
+func main() {
+	go crunch(1)
+	helper()
+}

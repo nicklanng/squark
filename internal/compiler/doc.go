@@ -109,6 +109,9 @@ func DocLine(fn *Func) string {
 	if fn.Blocking {
 		b.WriteString(" blocking")
 	}
+	if fn.Preemptible {
+		b.WriteString(" preemptible")
+	}
 	return b.String()
 }
 

@@ -316,6 +316,7 @@ type Func struct {
 	Pool      int   // goroutine pool size if a go target
 	StackHint int64 // //squark:stack N (for externs)
 	Blocking  bool  // extern ... blocking: called on a helper thread while the goroutine waits
+	Preemptible bool // task ... preemptible: loops in it and its callees may yield after a time slice
 	CName     string
 	Intrinsic string
 	IsTask    bool
