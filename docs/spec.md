@@ -472,7 +472,9 @@ func handle(w *http.ResponseWriter, r *http.Request) {
   preemptible tasks' loops). Netpoll is kqueue on macOS and epoll on Linux.
 - A watchdog thread asks a goroutine that has run for a time slice to yield (only preemptible
   tasks do), and prints a warning naming the task when a goroutine has held its thread for 100ms
-  while other goroutines waited on it. A program with nothing else to run isn't warned about.
+  while other goroutines waited on it. Both count the CPU time the thread actually got, so an
+  overloaded machine that doesn't run the thread doesn't make its goroutine look slow. A program
+  with nothing else to run isn't warned about.
   `runtime.Gosched()` yields by hand.
 - `threads N` (1 to 1024, or `auto` for one per core) runs N scheduler threads (shards) in one
   process. The directive says the program is written for threads; without it a program runs one

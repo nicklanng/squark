@@ -1,5 +1,5 @@
 {
-  "date": "2026-10-14T17:39:45+01:00",
+  "date": "2026-10-14T23:16:09+01:00",
   "machine": "Apple M4, 10 cores, 16 GiB, darwin/arm64",
   "duration": "10s",
   "connections": 64,
@@ -8,56 +8,56 @@
       "bench": "sieve 50M",
       "impl": "go",
       "seconds": 0.15,
-      "max_rss_bytes": 55017472,
+      "max_rss_bytes": 55050240,
       "output": "3001134"
     },
     {
       "bench": "sieve 50M",
       "impl": "squark",
       "seconds": 0.14,
-      "max_rss_bytes": 51232768,
+      "max_rss_bytes": 51363840,
       "output": "3001134"
     },
     {
       "bench": "nbody 50M",
       "impl": "go",
       "seconds": 1.52,
-      "max_rss_bytes": 4423680,
+      "max_rss_bytes": 4407296,
       "output": "-0.169075164\n-0.169059907"
     },
     {
       "bench": "nbody 50M",
       "impl": "squark",
-      "seconds": 1.12,
-      "max_rss_bytes": 1261568,
+      "seconds": 1.13,
+      "max_rss_bytes": 1409024,
       "output": "-0.169075164\n-0.169059907"
     },
     {
       "bench": "wordfreq 100MiB",
       "impl": "go",
-      "seconds": 0.45,
-      "max_rss_bytes": 215859200,
+      "seconds": 0.46,
+      "max_rss_bytes": 217677824,
       "output": "902730 ka\n662579 ra\n619085 si\n618524 zo\n616136 el\n603914 da\n603157 ston\n585062 ber\n577049 dro\n567018 mar"
     },
     {
       "bench": "wordfreq 100MiB",
       "impl": "squark",
-      "seconds": 0.31,
-      "max_rss_bytes": 7897088,
+      "seconds": 0.33,
+      "max_rss_bytes": 8060928,
       "output": "902730 ka\n662579 ra\n619085 si\n618524 zo\n616136 el\n603914 da\n603157 ston\n585062 ber\n577049 dro\n567018 mar"
     },
     {
       "bench": "json encode 2M",
       "impl": "go",
       "seconds": 2.66,
-      "max_rss_bytes": 4931584,
+      "max_rss_bytes": 5095424,
       "output": "1449888890"
     },
     {
       "bench": "json encode 2M",
       "impl": "squark",
       "seconds": 0.56,
-      "max_rss_bytes": 1245184,
+      "max_rss_bytes": 1392640,
       "output": "1449888890"
     }
   ],
@@ -65,145 +65,145 @@
     {
       "impl": "squark",
       "scenario": "GET /health",
-      "rps": 226576.89456135334,
-      "p50_us": 275.456,
-      "p99_us": 542.72,
+      "rps": 223593.39102792495,
+      "p50_us": 279.552,
+      "p99_us": 567.296,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.597837917,
-      "server_peak_rss_bytes": 7340032,
-      "server_peak_threads": 1
+      "server_cpu_s": 9.496887083,
+      "server_peak_rss_bytes": 7192576,
+      "server_peak_threads": 4
     },
     {
       "impl": "squark",
       "scenario": "GET /notes/1",
-      "rps": 201889.84530295953,
-      "p50_us": 310.272,
+      "rps": 195483.08967278007,
+      "p50_us": 322.56,
       "p99_us": 465.92,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.810392499,
-      "server_peak_rss_bytes": 7340032,
-      "server_peak_threads": 1
+      "server_cpu_s": 9.875204083,
+      "server_peak_rss_bytes": 7192576,
+      "server_peak_threads": 4
     },
     {
       "impl": "squark",
       "scenario": "mix 80/10/10",
-      "rps": 152594.23043137952,
-      "p50_us": 410.624,
-      "p99_us": 624.64,
+      "rps": 143759.08337042414,
+      "p50_us": 435.2,
+      "p99_us": 620.544,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.814093584,
-      "server_peak_rss_bytes": 9453568,
-      "server_peak_threads": 1
+      "server_cpu_s": 9.809253084,
+      "server_peak_rss_bytes": 9224192,
+      "server_peak_threads": 4
     },
     {
       "impl": "go",
       "scenario": "GET /health",
-      "rps": 179442.65153171468,
-      "p50_us": 318.464,
-      "p99_us": 1200.128,
+      "rps": 177020.96361344337,
+      "p50_us": 330.752,
+      "p99_us": 1126.4,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 41.158763167,
-      "server_peak_rss_bytes": 22740992,
-      "server_peak_threads": 31
+      "server_cpu_s": 43.741443875,
+      "server_peak_rss_bytes": 22282240,
+      "server_peak_threads": 20
     },
     {
       "impl": "go",
       "scenario": "GET /notes/1",
-      "rps": 109819.95642881031,
-      "p50_us": 172.544,
-      "p99_us": 2301.952,
+      "rps": 107954.70335262091,
+      "p50_us": 178.688,
+      "p99_us": 2318.336,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 42.157334292,
-      "server_peak_rss_bytes": 23412736,
-      "server_peak_threads": 31
+      "server_cpu_s": 42.946493999,
+      "server_peak_rss_bytes": 22462464,
+      "server_peak_threads": 20
     },
     {
       "impl": "go",
       "scenario": "mix 80/10/10",
-      "rps": 81992.41764852121,
-      "p50_us": 1009.664,
-      "p99_us": 2367.488,
+      "rps": 82110.13032891763,
+      "p50_us": 1017.856,
+      "p99_us": 2318.336,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 35.863776333,
-      "server_peak_rss_bytes": 24887296,
-      "server_peak_threads": 31
+      "server_cpu_s": 36.234633125,
+      "server_peak_rss_bytes": 23986176,
+      "server_peak_threads": 20
     },
     {
       "impl": "go GOMAXPROCS=1",
       "scenario": "GET /health",
-      "rps": 155830.72209565778,
-      "p50_us": 406.528,
-      "p99_us": 763.904,
+      "rps": 152024.6923301307,
+      "p50_us": 416.768,
+      "p99_us": 788.48,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.965931541,
-      "server_peak_rss_bytes": 15400960,
+      "server_cpu_s": 9.975389333,
+      "server_peak_rss_bytes": 15843328,
       "server_peak_threads": 4
     },
     {
       "impl": "go GOMAXPROCS=1",
       "scenario": "GET /notes/1",
-      "rps": 118858.29253962246,
-      "p50_us": 534.528,
-      "p99_us": 964.608,
+      "rps": 116089.17275935011,
+      "p50_us": 546.816,
+      "p99_us": 980.992,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.994131834,
-      "server_peak_rss_bytes": 15564800,
+      "server_cpu_s": 9.994194917,
+      "server_peak_rss_bytes": 15990784,
       "server_peak_threads": 4
     },
     {
       "impl": "go GOMAXPROCS=1",
       "scenario": "mix 80/10/10",
-      "rps": 79712.29390837428,
+      "rps": 79716.49478738234,
       "p50_us": 792.576,
-      "p99_us": 1495.04,
+      "p99_us": 1478.656,
       "errors": 0,
       "non2xx": 0,
-      "server_cpu_s": 9.935601125,
-      "server_peak_rss_bytes": 16809984,
+      "server_cpu_s": 9.941770708,
+      "server_peak_rss_bytes": 17219584,
       "server_peak_threads": 4
     }
   ],
   "servers": [
     {
       "impl": "squark",
-      "startup_ms": 3.261,
-      "idle_rss_bytes": 3211264,
-      "rss_with_idle_conns_bytes": 5275648,
+      "startup_ms": 3.132,
+      "idle_rss_bytes": 3063808,
+      "rss_with_idle_conns_bytes": 5046272,
       "idle_conns": 5000,
       "per_conn_kib": -0.816
     },
     {
       "impl": "go",
-      "startup_ms": 6.869,
-      "idle_rss_bytes": 9715712,
-      "rss_with_idle_conns_bytes": 117751808,
+      "startup_ms": 5.581,
+      "idle_rss_bytes": 9502720,
+      "rss_with_idle_conns_bytes": 116539392,
       "idle_conns": 5000,
-      "per_conn_kib": 18.1376
+      "per_conn_kib": 18.0768
     },
     {
       "impl": "go GOMAXPROCS=1",
-      "startup_ms": 5.584,
-      "idle_rss_bytes": 9043968,
-      "rss_with_idle_conns_bytes": 110968832,
+      "startup_ms": 5.474,
+      "idle_rss_bytes": 9158656,
+      "rss_with_idle_conns_bytes": 112508928,
       "idle_conns": 5000,
-      "per_conn_kib": 18.3904
+      "per_conn_kib": 18.6112
     }
   ],
   "binary_sizes": {
     "gocompute": 3870338,
     "gonotes": 9501826,
-    "notes": 110312,
-    "sq-jsonenc": 89336,
-    "sq-nbody": 90088,
-    "sq-sieve": 72808,
-    "sq-wordfreq": 73432
+    "notes": 131464,
+    "sq-jsonenc": 93000,
+    "sq-nbody": 110232,
+    "sq-sieve": 92952,
+    "sq-wordfreq": 93400
   }
 }

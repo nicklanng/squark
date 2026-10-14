@@ -215,8 +215,9 @@ int64_t sq_nanotime(void);
 // sq_gmutex: a lock held by a goroutine; others that want it wait (park) instead of blocking their
 // thread. Usable from any scheduler thread. Zero-initialized storage needs sq_gmutex_init.
 typedef struct sq_gmutex {
-	pthread_mutex_t mu;
-	struct sq_g *_Atomic owner; // changed under mu; read without it by sq_gmutex_held
+	pthread_mutex_t mu;         // guards the wait queue (only used when goroutines wait)
+	struct sq_g *_Atomic owner;
+	_Atomic bool contended;     // goroutines may be waiting: unlock must look
 	struct sq_g *wait_head, *wait_tail;
 } sq_gmutex;
 void sq_gmutex_init(sq_gmutex *m);

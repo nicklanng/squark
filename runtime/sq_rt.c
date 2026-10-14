@@ -25,6 +25,9 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach.h> // thread_info: the watchdog reads threads' CPU time
+#endif
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/event.h>
 #define SQ_KQUEUE 1
@@ -171,6 +174,11 @@ typedef struct sq_shard {
 	_Atomic uint64_t switches;    // goroutines run so far
 	_Atomic(const char *) running; // the running goroutine's task (NULL: in the scheduler)
 	_Atomic bool others;          // other goroutines were waiting when it started
+#if defined(__APPLE__)
+	mach_port_t mach_thread;      // for the watchdog: this thread's CPU time
+#else
+	clockid_t cpu_clock;
+#endif
 	struct {
 		int fd;
 		int entry; // in listen_table
@@ -183,7 +191,9 @@ typedef struct sq_shard {
 } sq_shard;
 
 extern sq_g *sq_timer_heap[];
-static sq_shard sq_shard0 = {.next_gid = 1, .pollfd = -1, .pools = sq_pools, .timer_heap = sq_timer_heap, .date_cached_at = -1};
+// Zero-initialized, so it costs no space in the binary (an initializer would store the whole
+// struct, buffers included): main sets the few non-zero fields first.
+static sq_shard sq_shard0;
 static _Thread_local sq_shard *sq_self = &sq_shard0;
 static atomic_int_fast64_t live_shards;
 
@@ -879,17 +889,24 @@ static void start_helpers(int64_t n) {
 // ---------------------------------------------------------------------------
 // goroutine locks
 
+// An uncontended lock or unlock is one compare-and-swap; the mutex and queue come in only when
+// goroutines wait. A waiter sets contended before its last try, and unlock clears the owner
+// before looking at contended (both sequentially consistent), so either the waiter's try
+// succeeds or unlock sees it and hands the lock over.
 void sq_gmutex_init(sq_gmutex *m) {
 	pthread_mutex_init(&m->mu, NULL);
 	atomic_init(&m->owner, NULL);
+	atomic_init(&m->contended, false);
 	m->wait_head = m->wait_tail = NULL;
 }
 
 void sq_gmutex_lock(sq_gmutex *m) {
-	sq_g *g = sq_self->cur_g;
+	sq_g *g = sq_self->cur_g, *none = NULL;
+	if (atomic_compare_exchange_strong(&m->owner, &none, g)) return;
 	pthread_mutex_lock(&m->mu);
-	if (!atomic_load_explicit(&m->owner, memory_order_relaxed)) {
-		atomic_store_explicit(&m->owner, g, memory_order_relaxed);
+	atomic_store(&m->contended, true);
+	none = NULL;
+	if (atomic_compare_exchange_strong(&m->owner, &none, g)) {
 		pthread_mutex_unlock(&m->mu);
 		return;
 	}
@@ -898,9 +915,17 @@ void sq_gmutex_lock(sq_gmutex *m) {
 }
 
 void sq_gmutex_unlock(sq_gmutex *m) {
+	atomic_store(&m->owner, NULL);
+	if (!atomic_load(&m->contended)) return;
 	pthread_mutex_lock(&m->mu);
-	sq_g *next = q_pop(&m->wait_head, &m->wait_tail);
-	atomic_store_explicit(&m->owner, next, memory_order_relaxed);
+	sq_g *next = NULL;
+	if (m->wait_head) {
+		sq_g *none = NULL;
+		// else someone took it on the fast path meanwhile; their unlock hands it on
+		if (atomic_compare_exchange_strong(&m->owner, &none, m->wait_head)) next = q_pop(&m->wait_head, &m->wait_tail);
+	} else {
+		atomic_store(&m->contended, false);
+	}
 	pthread_mutex_unlock(&m->mu);
 	if (next) ready_shared(next);
 }
@@ -2409,8 +2434,8 @@ static void watch_warn(const char *task, int64_t ms) {
 	int k = 0;
 	do num[k++] = (char)('0' + ms % 10); while ((ms /= 10) > 0 && k < 23);
 	while (k > 0 && n < sizeof buf - 1) buf[n++] = num[--k];
-	const char *tail = "ms without yielding while other goroutines wait on its thread: mark the task "
-	                   "preemptible, or call runtime.Gosched() in its loop\n";
+	const char *tail = "ms of CPU without yielding while other goroutines wait on its thread: mark the "
+	                   "task preemptible, or call runtime.Gosched() in its loop\n";
 	size_t t = strlen(tail);
 	if (n + t >= sizeof buf) t = sizeof buf - n - 1;
 	memcpy(buf + n, tail, t);
@@ -2418,12 +2443,29 @@ static void watch_warn(const char *task, int64_t ms) {
 	write_all(2, buf, n);
 }
 
-// watchdog asks a goroutine that has held its thread for a time slice (10ms) to yield, and warns
-// once it has held it for 100ms while others waited. It reads only the shards' atomic fields.
+// thread_cpu_ms is the CPU time a shard's thread has used (-1: unknown). The watchdog measures
+// goroutines in CPU time, so a thread the OS didn't run (an overloaded machine) isn't blamed.
+static int64_t thread_cpu_ms(sq_shard *s) {
+#if defined(__APPLE__)
+	thread_basic_info_data_t info;
+	mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
+	if (thread_info(s->mach_thread, THREAD_BASIC_INFO, (thread_info_t)&info, &n) != KERN_SUCCESS) return -1;
+	return (int64_t)(info.user_time.seconds + info.system_time.seconds) * 1000 +
+	       (int64_t)(info.user_time.microseconds + info.system_time.microseconds) / 1000;
+#else
+	struct timespec ts;
+	if (s->cpu_clock == (clockid_t)-1 || clock_gettime(s->cpu_clock, &ts) != 0) return -1;
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
+// watchdog asks a goroutine that has used its thread for a time slice (10ms of CPU) to yield, and
+// warns once it has used 100ms while others waited. It reads only the shards' atomic fields and
+// their threads' CPU clocks.
 static void *watchdog(void *arg) {
 	(void)arg;
 	static uint64_t last[SQ_MAX_SHARDS];
-	static int64_t held[SQ_MAX_SHARDS];
+	static int64_t start[SQ_MAX_SHARDS], held[SQ_MAX_SHARDS];
 	static bool warned[SQ_MAX_SHARDS];
 	const int64_t tick = sq_any_preemptible ? 5 : 50; // ms
 	for (;;) {
@@ -2434,13 +2476,15 @@ static void *watchdog(void *arg) {
 			if (!s) continue;
 			uint64_t sw = atomic_load_explicit(&s->switches, memory_order_relaxed);
 			const char *task = atomic_load_explicit(&s->running, memory_order_relaxed);
-			if (sw != last[i] || !task) {
+			int64_t cpu = thread_cpu_ms(s);
+			if (sw != last[i] || !task) { // a new stint (or none): measure from here
 				last[i] = sw;
+				start[i] = cpu;
 				held[i] = 0;
 				warned[i] = false;
 				continue;
 			}
-			held[i] += tick;
+			held[i] = cpu >= 0 && start[i] >= 0 ? cpu - start[i] : held[i] + tick;
 			if (held[i] >= 10) atomic_store_explicit(&s->preempt, 1, memory_order_relaxed);
 			if (held[i] >= 100 && !warned[i] && atomic_load_explicit(&s->others, memory_order_relaxed)) {
 				warned[i] = true;
@@ -2485,7 +2529,12 @@ static void shard_run(void) {
 #endif
 	pthread_mutex_init(&sq_self->remote_mu, NULL);
 	sq_preempt_flag = &sq_self->preempt;
-	atomic_store(&all_shards[sq_self->id], sq_self);
+#if defined(__APPLE__)
+	sq_self->mach_thread = pthread_mach_thread_np(pthread_self());
+#else
+	if (pthread_getcpuclockid(pthread_self(), &sq_self->cpu_clock) != 0) sq_self->cpu_clock = (clockid_t)-1;
+#endif
+	atomic_store(&all_shards[sq_self->id], sq_self); // publishes the fields above to the watchdog
 	for (int64_t i = 0; i < sq_npools; i++) pool_init(sq_self->pools[i]);
 	sq_go(&sq_main_pool, sq_program_main, NULL, 0);
 	schedule();
@@ -2549,6 +2598,11 @@ static int64_t threads_from_env(int64_t n) {
 }
 
 int main(int argc, char **argv) {
+	sq_shard0.next_gid = 1;
+	sq_shard0.pollfd = -1;
+	sq_shard0.pools = sq_pools;
+	sq_shard0.timer_heap = sq_timer_heap;
+	sq_shard0.date_cached_at = -1;
 	g_argc = argc;
 	g_argv = argv;
 	run_workers(); // returns in each worker process (or at once, for a single worker)
