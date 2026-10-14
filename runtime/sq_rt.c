@@ -163,6 +163,7 @@ typedef struct sq_shard {
 	atomic_bool remote_pending;
 	int wake_fd;              // Linux: eventfd
 	int64_t shared_parked;    // this shard's goroutines waiting for other threads (shared channels, locks, blocking calls)
+	sq_g *detach_g;           // a goroutine detaching (sq_detach), handed to a helper once switched out
 	struct {
 		int fd;
 		int entry; // in listen_table
@@ -599,12 +600,15 @@ void sq_panic_divide(const char *file, int line) {
 
 static uint8_t sq_sigstack[32768]; // not "sigstack": glibc declares a function of that name
 
+static _Thread_local sq_g *helper_g; // a helper thread's detached goroutine (see sq_detach)
+
 static void on_fault(int sig, siginfo_t *si, void *uctx) {
 	(void)uctx;
 	uintptr_t addr = (uintptr_t)si->si_addr;
 	long pagesz = sysconf(_SC_PAGESIZE);
-	for (int64_t i = 0; sq_self && i < sq_npools; i++) {
-		sq_pool *p = sq_self->pools[i];
+	sq_shard *home = sq_self ? sq_self : helper_g ? helper_g->shard : NULL; // a detached goroutine's
+	for (int64_t i = 0; home && i < sq_npools; i++) {
+		sq_pool *p = home->pools[i];
 		uintptr_t lo = (uintptr_t)p->stacks, hi = lo + (uintptr_t)(p->count * p->slot_size);
 		if (addr >= lo && addr < hi) {
 			uintptr_t off = (addr - lo) % (uintptr_t)p->slot_size;
@@ -855,21 +859,79 @@ static pthread_mutex_t helper_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t helper_cv = PTHREAD_COND_INITIALIZER;
 static sq_g *helper_head, *helper_tail;
 
+// a helper running a detached goroutine: its own context, and the goroutine
+static _Thread_local sq_ctx helper_ctx;
+static _Thread_local void *helper_fiber;
+static _Thread_local bool on_helper;
+
+static void helper_push(sq_g *g) {
+	pthread_mutex_lock(&helper_mu);
+	q_push(&helper_head, &helper_tail, g);
+	pthread_cond_signal(&helper_cv);
+	pthread_mutex_unlock(&helper_mu);
+}
+
 static void *helper_thread(void *arg) {
 	(void)arg;
 	sq_self = NULL; // not a scheduler thread (sq_self starts out as shard 0 on every thread)
+	on_helper = true;
+#ifdef SQ_TSAN
+	helper_fiber = __tsan_get_current_fiber();
+#endif
+	// a signal stack, so a stack overflow in a detached goroutine reports like any other
+	static const size_t sigsz = 64 << 10;
+	void *sig = mmap(NULL, sigsz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (sig != MAP_FAILED) {
+		stack_t ss = {.ss_sp = sig, .ss_size = sigsz, .ss_flags = 0};
+		sigaltstack(&ss, NULL);
+	}
 	for (;;) {
 		pthread_mutex_lock(&helper_mu);
 		sq_g *g;
 		while (!(g = q_pop(&helper_head, &helper_tail))) pthread_cond_wait(&helper_cv, &helper_mu);
 		pthread_mutex_unlock(&helper_mu);
-		g->blk_fn(g->elem); // the goroutine's stack stays put while it waits: its arguments are safe
+		if (g->blk_fn) {
+			g->blk_fn(g->elem); // the goroutine's stack stays put while it waits: its arguments are safe
+		} else {
+			// a detached goroutine: carry on with its C call here until sq_reattach switches back
+			helper_g = g;
+			TSAN_SWITCH(g->tsan_fiber);
+			sq_ctx_switch(&helper_ctx, &g->ctx);
+			helper_g = NULL;
+		}
 		ready_shared(g);
 	}
 	return NULL;
 }
 
+bool sq_on_helper(void) { return on_helper; }
+
+bool sq_detach(void) {
+	if (!sq_self || sq_helpers_per_thread == 0) return false;
+	sq_g *g = sq_self->cur_g;
+	g->blk_fn = NULL;
+	sq_self->detach_g = g; // the scheduler hands g to a helper once its context is saved
+	park_shared(NULL);
+	// now on a helper thread: nothing thread-local from before the switch is valid here
+	return true;
+}
+
+// The thread-local accesses are made before the switch: after it, the function runs on the home
+// thread, and a TLS address computed earlier would be the helper's.
+void sq_reattach(void) {
+	if (!on_helper) return;
+	sq_g *g = helper_g;
+	if (!g) return; // a blocking call's helper, not a detached goroutine
+	sq_ctx *back = &helper_ctx;
+	TSAN_SWITCH(helper_fiber);
+	sq_ctx_switch(&g->ctx, back);
+}
+
 void sq_blocking(void (*fn)(void *), void *arg) {
+	if (!sq_self) { // already on a helper (a detached goroutine): just call it
+		fn(arg);
+		return;
+	}
 	sq_g *g = sq_self->cur_g;
 	g->blk_fn = fn;
 	g->elem = arg;
@@ -1951,6 +2013,10 @@ static void schedule(void) {
 			TSAN_SWITCH(g->tsan_fiber);
 			sq_ctx_switch(&sq_self->sched_ctx, &g->ctx);
 			sq_self->cur_g = NULL;
+			if (sq_self->detach_g) { // g detached: its context is saved now, so a helper may resume it
+				helper_push(sq_self->detach_g);
+				sq_self->detach_g = NULL;
+			}
 			drain_remote();
 			if (sq_self->start_pending) {
 				sq_self->start_pending = false;

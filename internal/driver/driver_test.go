@@ -1340,3 +1340,73 @@ func TestSQLiteThreads(t *testing.T) {
 		run("race", "thread", 1)
 	}
 }
+
+// TestSQLiteSlow runs testdata/sqlite_slow: a slow query and a slow write inside a transaction move
+// to a helper thread mid-call (sq_detach), so a ticker on the same thread keeps running; also under
+// ThreadSanitizer, since the goroutine changes OS threads in the middle of SQLite.
+func TestSQLiteSlow(t *testing.T) {
+	dir := t.TempDir()
+	want := "2000001000000\nslow read ok\nslow write in a transaction ok\n1000000 500000500000\n"
+	run := func(name, sanitize string) {
+		t.Helper()
+		bin := filepath.Join(dir, name)
+		if _, err := Build(Options{Dir: "../../testdata/sqlite_slow", Output: bin, Sanitize: sanitize}); err != nil {
+			if sanitize != "" {
+				t.Logf("no ThreadSanitizer build here: %v", err)
+				return
+			}
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			cmd := exec.Command(bin, filepath.Join(dir, fmt.Sprintf("%s%d.db", name, i)))
+			cmd.Env = append(os.Environ(), "TSAN_OPTIONS=halt_on_error=0 report_signal_unsafe=0")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil || stdout.String() != want || strings.Contains(stderr.String(), "ThreadSanitizer") {
+				t.Fatalf("%s run %d: %v\n%s\n%s", name, i, err, stdout.String(), stderr.String())
+			}
+		}
+	}
+	run("prog", "")
+	if !testing.Short() {
+		run("race", "thread")
+	}
+}
+
+// TestDetach runs testdata/detach: C code moves its goroutine to a helper thread mid-call and back
+// (sq_detach, sq_reattach), without blocking externs; on one thread, four, and under TSan.
+func TestDetach(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"main.sq", "crunch.c"} {
+		b, err := os.ReadFile(filepath.Join("../../testdata/detach", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(dir, n), b, 0o644)
+	}
+	run := func(name, sanitize string, copies int) {
+		t.Helper()
+		bin := filepath.Join(dir, name)
+		if _, err := Build(Options{Dir: dir, Output: bin, Sanitize: sanitize}); err != nil {
+			if sanitize != "" {
+				t.Logf("no ThreadSanitizer build here: %v", err)
+				return
+			}
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bin)
+		cmd.Env = append(os.Environ(), "TSAN_OPTIONS=halt_on_error=0 report_signal_unsafe=0")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		if out := stdout.String(); err != nil || out != strings.Repeat("moved and back: 2\n", copies) || strings.Contains(stderr.String(), "ThreadSanitizer") {
+			t.Fatalf("%s: %v\n%s\n%s", name, err, out, stderr.String())
+		}
+	}
+	run("one", "", 1)
+	os.WriteFile(filepath.Join(dir, "threads.sq"), []byte("package main\n\nthreads 4\n"), 0o644)
+	run("four", "", 4)
+	if !testing.Short() {
+		run("race", "thread", 4)
+	}
+}

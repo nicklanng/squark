@@ -177,12 +177,20 @@ extern "slow_query" func query(q string) int stack 128K blocking // runs on a he
 - `blocking` on an extern runs each call on a helper thread while the calling goroutine waits, so
   a C call that blocks (a slow query, a lock wait, a read from a slow disk) doesn't stop the other
   goroutines of its scheduler thread. Each call costs two thread handoffs (microseconds), so mark
-  only calls that really wait; a C library can also try inline and fall back to a blocking extern
-  when it would wait, as `sqlite` does. Arguments may point into the goroutine's stack (it stays
-  put while the goroutine waits). The C function's `stack N` budget applies to the helper threads
-  (two per scheduler thread, counted in the memory report), not to goroutine stacks. While a
-  goroutine waits, others on its thread run, so C state they share needs a lock: the runtime's
-  `sq_gmutex` (in `sq_rt.h`) parks waiting goroutines instead of blocking the thread.
+  only calls that always wait. Arguments may point into the goroutine's stack (it stays put while
+  the goroutine waits). The C function's `stack N` budget applies to the helper threads (two per
+  scheduler thread, counted in the memory report), not to goroutine stacks.
+- C code that is usually fast but sometimes slow can move itself instead: `sq_detach()` (in
+  `sq_rt.h`), called in the middle of a C call, moves the running goroutine (its stack, mid-call)
+  to a helper thread and lets its scheduler thread go on; the C code carries on there.
+  `sq_reattach()`, called before the C function returns, moves it back. Fast calls cost nothing
+  extra. Between the two, the C code runs on another OS thread, so it must not call into the
+  squark runtime or rely on thread-local state or thread-owned locks taken before `sq_detach`.
+  `sqlite` does this from SQLite's progress handler (a statement running over 100µs) and busy
+  handler (a lock wait). The stack stays the goroutine's, so `stack N` still counts there.
+- While a goroutine waits or runs elsewhere, others on its thread run, so C state they share
+  needs a lock: the runtime's `sq_gmutex` (in `sq_rt.h`) parks waiting goroutines instead of
+  blocking the thread.
 
 ### Provenance (optional)
 

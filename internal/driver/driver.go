@@ -74,7 +74,7 @@ func helperStackReserved(need int64) int64 {
 		return 0
 	}
 	page := int64(os.Getpagesize())
-	return (need + 16384 + page - 1) / page * page
+	return max((need+16384+page-1)/page*page, 65536)
 }
 
 // Worst returns the worst-case total. Worker processes share the code but each has its own static
@@ -248,6 +248,20 @@ func Build(opt Options) (*Result, error) {
 		helperStack += 2 * rtMax
 		helpers = helpersPerThread
 	}
+	// C code that moves its goroutine to a helper mid-call (sq_detach) needs helpers too; the C
+	// code then runs on the goroutine's own stack, so the helper's stack only runs its loop
+	for _, o := range checked {
+		syms, err := undefinedSymbols(filepath.Join(work, o))
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range syms {
+			if s == "sq_detach" || s == "_sq_detach" {
+				helpers = helpersPerThread
+				helperStack = max(helperStack, 4*rtMax)
+			}
+		}
+	}
 	page := int64(os.Getpagesize())
 	const margin = 1024
 	res := &Result{CBytes: len(out.MainC)}
@@ -411,7 +425,7 @@ func FormatMemory(m *MemoryReport) string {
 		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack (proven %d B)\n", name, human(int64(p.Count)*p.Touchable), p.Count, human(p.Touchable), p.Stack)
 	}
 	if m.Helpers > 0 {
-		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack: threads that run blocking C calls\n", "blocking-call helpers", human(m.Helpers*m.HelperStack), m.Helpers, human(m.HelperStack))
+		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack: threads that run blocking and detached C calls\n", "blocking-call helpers", human(m.Helpers*m.HelperStack), m.Helpers, human(m.HelperStack))
 	}
 	switch {
 	case m.Workers == 0:

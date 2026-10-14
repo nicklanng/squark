@@ -1,0 +1,74 @@
+package main
+
+// Test program for TestSQLiteSlow (internal/driver): a slow query and a slow write inside a
+// transaction, while a ticker goroutine on the same thread counts 5ms ticks. The slow statements
+// move to a helper thread mid-call, so the ticker keeps ticking.
+
+import (
+	"os"
+	"sqlite"
+	"time"
+)
+
+var ticks int
+var done bool
+
+task ticker() pool 1 {
+	for !done {
+		time.Sleep(5 * time.Millisecond)
+		ticks++
+	}
+}
+
+// during runs a slow statement and reports whether the ticker kept going meanwhile.
+func report(what string, before int, start time.Time) {
+	ms := time.Since(start).Milliseconds()
+	n := ticks - before
+	if ms < 50 {
+		println(what, "too fast to tell:", ms, "ms")
+	} else if n < int(ms)/20 {
+		println(what, "blocked the thread:", n, "ticks in", ms, "ms")
+	} else {
+		println(what, "ok")
+	}
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
+func main() {
+	db, err := sqlite.Open(os.Arg(1))
+	must(err)
+	go ticker()
+	time.Sleep(10 * time.Millisecond)
+
+	sum, err := db.Prepare("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000) SELECT sum(x) FROM c")
+	must(err)
+	before, start := ticks, time.Now()
+	_, err = sum.Step()
+	must(err)
+	println(sum.ColumnInt(0))
+	sum.Reset()
+	report("slow read", before, start)
+
+	must(db.Exec("CREATE TABLE t(x INTEGER)"))
+	must(db.Exec("BEGIN"))
+	fill, err := db.Prepare("INSERT INTO t WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1000000) SELECT x FROM c")
+	must(err)
+	before, start = ticks, time.Now()
+	_, err = fill.Step()
+	must(err)
+	fill.Reset()
+	report("slow write in a transaction", before, start)
+	must(db.Exec("COMMIT"))
+
+	count, err := db.Prepare("SELECT count(*), sum(x) FROM t")
+	must(err)
+	count.Step()
+	println(count.ColumnInt(0), count.ColumnInt(1))
+	count.Reset()
+	done = true
+}

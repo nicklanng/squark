@@ -169,6 +169,16 @@ A blocking C call (a SQLite query, file I/O on a slow disk) stops every goroutin
       — `TestBlocking` (testdata/blocking: two 300ms calls overlap and a ticker keeps ticking; 1
       and 4 threads, TSan), `TestSQLiteThreads` (4 threads × 8 goroutines insert and read back on
       one database; fails with the connection lock removed; TSan), no-heap test (uses SQLite).
+- [x] Slow statements (not just lock waits) — **decided 2026-10-14: move the goroutine mid-call.**
+      `sq_detach()` / `sq_reattach()` in `sq_rt.h`: C code that turns out slow moves its goroutine
+      (its stack, mid-call) to a helper thread and back; the scheduler hands it over once its
+      context is saved. SQLite calls it from its progress handler (over 100µs, checked every 1000
+      VM steps) and busy handler (then retries the lock at once and backs off from 50µs), which
+      replaces the inline-then-retry Step. Reads and writes, inside transactions too, with no
+      restart. Tests: `TestSQLiteSlow` (a 2M-row read and a 1M-row insert in a transaction while a
+      ticker keeps ticking; fails without the detach; TSan), `TestDetach` (plain C, no blocking
+      externs; 1 and 4 threads; TSan). Linux mix, two runs: threads 3 261k/247k req/s, p99 1.42ms
+      (was 1.99ms); workers 3 223k/254k, p99 ~2ms; health and note unchanged.
 
 ## Out of scope: Go-style M:N
 
@@ -197,3 +207,4 @@ first thing to consider instead.
 - 2026-10-14: `SQUARK_THREADS` override added (opt in with `threads auto`, then auto by default).
 - 2026-10-14: per-thread variable note and `thread var`.
 - 2026-10-14: stage 3 done: blocking externs, helper threads, SQLite waits off the scheduler.
+- 2026-10-14: slow SQLite statements move to a helper mid-call (sq_detach).

@@ -169,6 +169,18 @@ extern const int64_t sq_helpers_per_thread; // 0: the program makes no blocking 
 extern const int64_t sq_helper_stack;       // their stack size, proven like goroutine stacks
 void sq_blocking(void (*fn)(void *), void *arg);
 
+// sq_detach moves the running goroutine, in the middle of a C call that turned out to be slow, to a
+// helper thread: its scheduler thread goes on with its other goroutines, and the C code carries on
+// (on the same stack) on the helper. It returns true once running there (false if it can't: no
+// helpers, or already on one). sq_reattach, called before the C function returns to squark code,
+// moves the goroutine back to its own thread (it does nothing if the goroutine wasn't moved).
+// In between, the C code runs on another OS thread: it must not touch the squark runtime or rely on
+// thread-local state or thread-owned locks from before sq_detach.
+bool sq_detach(void);
+void sq_reattach(void);
+bool sq_on_helper(void); // running on a helper thread (a blocking call, or detached)
+int64_t sq_nanotime(void);
+
 // sq_gmutex: a lock held by a goroutine; others that want it wait (park) instead of blocking their
 // thread. Usable from any scheduler thread. Zero-initialized storage needs sq_gmutex_init.
 typedef struct sq_gmutex {

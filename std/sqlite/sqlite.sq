@@ -30,15 +30,15 @@ type Stmt struct {
 }
 
 // SQLite calls get a generous stack budget: the query planner and VDBE are not tiny. Statements
-// run inline; one that must wait for another connection's lock waits on a helper thread (a
-// blocking extern), so the thread's other goroutines keep running. Each connection has a lock
-// that keeps one goroutine in it at a time (see shim.c).
+// start inline; one that runs long or must wait for another connection's lock moves to a helper
+// thread mid-call, so the thread's other goroutines keep running. Each connection has a lock that
+// keeps one goroutine in it at a time (see shim.c).
 
 extern "sq_sqlite_open" func open(path string, db *rawptr) int stack 128K blocking
 
 extern "sq_sqlite_close" func closeDB(db rawptr) int stack 64K blocking
 
-extern "sq_sqlite_exec" func exec(db rawptr, sql string) int stack 128K blocking
+extern "sq_sqlite_exec" func exec(db rawptr, sql string) int stack 128K
 
 extern "sq_sqlite_prepare" func prepare(db rawptr, sql string, st *rawptr) int stack 128K blocking
 
@@ -55,8 +55,6 @@ extern "sq_sqlite_bind_text" func bindText(st rawptr, i int, s string) int stack
 extern "sq_sqlite_bind_null" func bindNull(st rawptr, i int) int stack 16K
 
 extern "sq_sqlite_step" func step(st rawptr) int stack 128K
-
-extern "sq_sqlite_step_wait" func stepWait(st rawptr) int stack 128K blocking
 
 extern "sq_sqlite_reset" func reset(st rawptr) int stack 64K
 
@@ -135,9 +133,6 @@ func (s Stmt) BindNull(i int) error           { return check(bindNull(s.h, i)) }
 func (s Stmt) Step() (bool, error) {
 	stmtUse(s.h)
 	rc := step(s.h)
-	if rc == -1 {
-		rc = stepWait(s.h) // the database is locked: wait on a helper thread
-	}
 	if rc == ROW {
 		return true, nil
 	}
