@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
+#include <pthread.h>
 
 typedef struct { const uint8_t *p; int64_t len; } sq_string;
 typedef struct { int64_t code; sq_string msg; } sq_error;
@@ -151,13 +152,17 @@ typedef struct sq_chan {
 	int64_t elemsize, cap, len, head;
 	bool closed;
 	sq_g *recvq_head, *recvq_tail, *sendq_head, *sendq_tail;
+	bool shared;        // shared var ... chan: used by every scheduler thread, under mu
+	pthread_mutex_t mu;
 } sq_chan;
 
 sq_chan *sq_chan_init(sq_chan *c, void *buf, int64_t elemsize, int64_t cap);
 void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line);
 bool sq_chan_recv(sq_chan *c, void *out);
 void sq_chan_close(sq_chan *c, const char *file, int line);
-static inline int64_t sq_chan_len(sq_chan *c) { return c ? c->len : 0; }
+int64_t sq_chan_len_locked(sq_chan *c);
+static inline int64_t sq_chan_len(sq_chan *c) { return c ? (c->shared ? sq_chan_len_locked(c) : c->len) : 0; }
+sq_chan *sq_chan_init_shared(sq_chan *c, void *buf, int64_t elemsize, int64_t cap);
 static inline int64_t sq_chan_cap(sq_chan *c) { return c ? c->cap : 0; }
 
 // ---- maps: fixed-capacity open addressing ----

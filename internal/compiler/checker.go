@@ -262,6 +262,21 @@ func isErrorConst(vs *ValueSpec) bool {
 	return ok && id.Name == "error"
 }
 
+// checkSharedType reports a shared var whose type could let one thread change what another reads.
+// Shared channels are the exception: their operations are synchronized, and their elements may not
+// hold references at all (a string could view one thread's own memory).
+func (c *Checker) checkSharedType(n *Ident, t Type) {
+	if ch, ok := t.Underlying().(*ChanStore); ok {
+		if hasRefs(ch.Elem, map[Type]bool{}) {
+			c.errorf(n.P, "shared var %s: a shared channel's elements can't hold references (%s): send numbers, bools, errors or arrays and structs of them; a string or slice could view one thread's own memory", n.Name, ch.Elem)
+		}
+		return
+	}
+	if bad := constDataType(t, map[Type]bool{}); bad != nil {
+		c.errorf(n.P, "shared var %s: %s can't be shared (only numbers, strings, bools, errors and arrays or structs of them, or a channel: nothing a shared value points to could be kept read-only)", n.Name, bad)
+	}
+}
+
 // isCompositeConst reports const X = T{...}: a constant table or struct.
 func isCompositeConst(vs *ValueSpec) bool {
 	if len(vs.Values) == 0 {
@@ -591,6 +606,9 @@ func (c *Checker) globalVarSpec(vs *ValueSpec) {
 		for _, n := range vs.Names {
 			n.Obj.Var.Type = typ
 			n.Obj.Type = typ
+			if n.Obj.Var.Shared && typ != nil {
+				c.checkSharedType(n, typ)
+			}
 		}
 		return
 	}
@@ -623,9 +641,11 @@ func (c *Checker) globalVarSpec(vs *ValueSpec) {
 		if n.Obj.Var.ConstData {
 			c.checkConstData(n.Name, x)
 		}
-		if n.Obj.Var.Shared {
-			if bad := constDataType(t, map[Type]bool{}); bad != nil && t != tInvalid {
-				c.errorf(x.Pos(), "shared var %s: %s can't be shared (only numbers, strings, bools, errors and arrays or structs of them: nothing a shared value points to could be kept read-only)", n.Name, bad)
+		if n.Obj.Var.Shared && t != tInvalid {
+			if _, ok := t.Underlying().(*ChanStore); ok {
+				c.errorf(x.Pos(), "shared var %s: a shared channel is declared without a value (shared var %s chan T cap N)", n.Name, n.Name)
+			} else {
+				c.checkSharedType(n, t)
 			}
 		}
 		n.Obj.Var.Type = t

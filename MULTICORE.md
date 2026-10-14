@@ -57,10 +57,15 @@ Design decisions to settle first (record the answers here):
 - [x] Package variables: per-shard copies by default (thread-local), with a way to declare
       shared data that is immutable after initialization, checked by the compiler. — **decided
       2026-10-14: per-shard copies by default**; rule 10 keeps holding per shard.
-- [ ] Cross-shard channels: a separate type or a property of package-level channels? Element
+- [x] Cross-shard channels: a separate type or a property of package-level channels? Element
       rules as today (no stack/arena references), plus a lock-free queue and a cross-thread wakeup
-      (eventfd on Linux, EVFILT_USER on macOS).
-- [ ] Which externs are safe to call from any shard (C libraries with global state).
+      (eventfd on Linux, EVFILT_USER on macOS). — **decided 2026-10-14: `shared var c chan T cap N`**
+      (a property of package-level channel storage); elements may hold no references at all; a
+      mutex per channel rather than a lock-free queue (simple, and TSan-checkable).
+- [x] Which externs are safe to call from any shard (C libraries with global state). — **decided
+      2026-10-14:** externs run on whichever shard calls them, and C libraries must be thread-safe
+      (documented in spec §9); per-shard package variables mean each shard has its own handles
+      (e.g. its own SQLite connection).
 
 Implementation steps (each lands with the full suite passing on macOS and Linux):
 
@@ -120,10 +125,15 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
       `sq_start_shards` has shard 0's scheduler create the other threads. Tests:
       `testdata/run/shared_var.sq` (fails if shards start before init), error tests, and
       `TestThreadsRace` now reads a shared var from every shard.
-- [ ] 2.9 Cross-shard channels.
+- [x] 2.9 Cross-shard channels. — done: `shared var c chan T cap N`, set up eagerly by shard 0;
+      operations under the channel's mutex; a waiter of another shard goes to that shard's remote
+      queue and its poller is woken (EVFILT_USER / eventfd); a shard with shared waiters sleeps
+      instead of reporting deadlock. Tests: `testdata/run/shared_chan.sq` (1000 jobs over 4 shards,
+      unbuffered ping-pong), `TestSharedChanRace` (TSan, 5 runs), error tests.
 
 **Done when** one process uses every core with no data races by construction, and matches or
-beats stage 1.
+beats stage 1. — **Stage 2 done 2026-10-14.** Races: none by construction (per-shard state) and
+none under TSan; throughput close to stage 1 (see 2.7).
 
 ## Stage 3: blocking C calls off the scheduler
 
@@ -157,3 +167,4 @@ first thing to consider instead.
 - 2026-10-14: 2.3–2.7 done; 2.6b (TSan) done after. Next: 2.8 shared immutable data, 2.9 cross-shard
   channels.
 - 2026-10-14: 2.8a (constant composites) and 2.8b (shared var) done. Next: 2.9 cross-shard channels.
+- 2026-10-14: 2.9 done; stage 2 complete. Next: stage 3 (blocking C calls off the scheduler).

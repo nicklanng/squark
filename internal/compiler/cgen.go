@@ -62,6 +62,7 @@ type gen struct {
 	arenaInits    strings.Builder
 	constGlobals  strings.Builder // error constants: static const, shared by all shards
 	sharedGlobals strings.Builder // shared vars: one static copy, set before the other shards start
+	sharedInits   strings.Builder // shared channels' setup, on shard 0 before anything else
 	constInit     map[*Var]Expr   // constants' initializers
 	constC        map[*Var]string // their C values, inlined where one constant's initializer uses
 	// another (a const variable isn't a constant expression in C); functions read them by name
@@ -182,6 +183,10 @@ func Generate(prog *Program, order []*Func) (*Output, error) {
 				// one copy for every shard, set by shard 0 before the others start
 				v.CName = member
 				fmt.Fprintf(&g.sharedGlobals, "static %s;\n", g.decl(v.Type, member))
+				if ch, ok := v.Type.Underlying().(*ChanStore); ok {
+					// a shared channel: set up eagerly (lazy setup on first use would race)
+					fmt.Fprintf(&g.sharedInits, "\t\tsq_chan_init_shared(&%s.h, %s.buf, sizeof(%s), %d);\n", member, member, g.ctype(ch.Elem), ch.Cap)
+				}
 				continue
 			}
 			v.CName = "sq_gl->" + member
@@ -844,6 +849,11 @@ func (g *gen) initFunction() string {
 	}
 	b.WriteString("\nstatic void sq_init_globals(bool first) {\n\tstruct sq_globals *const sq_gl = sq_globals_self;\n\t(void)first;\n")
 	b.WriteString(g.arenaInits.String())
+	if g.sharedInits.Len() > 0 {
+		b.WriteString("\tif (first) {\n")
+		b.WriteString(g.sharedInits.String())
+		b.WriteString("\t}\n")
+	}
 	b.WriteString(body.String())
 	b.WriteString("}\n")
 	for _, n := range g.staticNames {

@@ -30,6 +30,7 @@
 #define SQ_KQUEUE 1
 #else
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/prctl.h>
 #endif
 
@@ -155,6 +156,13 @@ typedef struct sq_shard {
 	int64_t id;        // 0 .. sq_shard_count-1
 	bool main_done;    // this shard's main has returned; it keeps serving its other goroutines
 	bool start_pending; // shard 0: start the other shards from the scheduler's stack
+	// goroutines woken by other shards (shared channels): queued here, then this shard's poller
+	// is woken (EVFILT_USER on macOS, an eventfd on Linux)
+	pthread_mutex_t remote_mu;
+	sq_g *remote_head, *remote_tail;
+	atomic_bool remote_pending;
+	int wake_fd;              // Linux: eventfd
+	int64_t shared_parked;    // this shard's goroutines waiting on shared channels
 	struct {
 		int fd;
 		int entry; // in listen_table
@@ -263,6 +271,7 @@ static void pool_init(sq_pool *p) {
 		g->wait_fd = -1;
 		g->stack_hi = slot + p->slot_size;
 		g->pool = p;
+		g->shard = sq_self;
 		g->state = G_FREE;
 		g->next = p->free;
 		p->free = g;
@@ -669,7 +678,15 @@ static sq_g *q_pop(sq_g **head, sq_g **tail) {
 	return g;
 }
 
+static void chan_send_shared(sq_chan *c, const void *elem, const char *file, int line);
+static bool chan_recv_shared(sq_chan *c, void *outp);
+static void chan_close_shared(sq_chan *c, const char *file, int line);
+
 void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line) {
+	if (c && c->shared) {
+		chan_send_shared(c, elem, file, line);
+		return;
+	}
 	if (!c) {
 		sq_self->total_parked++;
 		sq_park(); // send on nil channel blocks forever
@@ -699,6 +716,7 @@ void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line) {
 }
 
 bool sq_chan_recv(sq_chan *c, void *outp) {
+	if (c && c->shared) return chan_recv_shared(c, outp);
 	if (!c) {
 		sq_self->total_parked++;
 		sq_park();
@@ -741,6 +759,10 @@ bool sq_chan_recv(sq_chan *c, void *outp) {
 }
 
 void sq_chan_close(sq_chan *c, const char *file, int line) {
+	if (c && c->shared) {
+		chan_close_shared(c, file, line);
+		return;
+	}
 	if (!c) sq_panic_cstr("close of nil channel", file, line);
 	if (c->closed) sq_panic_cstr("close of closed channel", file, line);
 	c->closed = true;
@@ -754,6 +776,171 @@ void sq_chan_close(sq_chan *c, const char *file, int line) {
 		g->ok = false;
 		sq_self->total_parked--;
 		sq_ready(g);
+	}
+}
+
+// Shared channels (shared var ... chan): every scheduler thread may use them, so each operation
+// holds the channel's mutex, and a waiter that belongs to another shard is handed to that shard
+// (ready_shared) instead of this one's run queue. A waiter's stack stays put while it is parked,
+// so copying into it from another thread is safe; it runs again only on its own shard.
+
+static void wake_shard(sq_shard *s) {
+#if SQ_KQUEUE
+	struct kevent ev;
+	EV_SET(&ev, 1, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+	kevent(s->pollfd, &ev, 1, NULL, 0, NULL);
+#else
+	uint64_t one = 1;
+	ssize_t r = write(s->wake_fd, &one, sizeof one);
+	(void)r;
+#endif
+}
+
+// ready_shared makes runnable a goroutine that was parked on a shared channel.
+static void ready_shared(sq_g *g) {
+	sq_shard *s = g->shard;
+	if (s == sq_self) {
+		s->shared_parked--;
+		runq_push(g);
+		return;
+	}
+	pthread_mutex_lock(&s->remote_mu);
+	g->next = NULL;
+	if (s->remote_tail) s->remote_tail->next = g; else s->remote_head = g;
+	s->remote_tail = g;
+	pthread_mutex_unlock(&s->remote_mu);
+	if (!atomic_exchange(&s->remote_pending, true)) wake_shard(s);
+}
+
+// drain_remote moves goroutines other shards have woken onto this shard's run queue.
+static void drain_remote(void) {
+	if (!atomic_load_explicit(&sq_self->remote_pending, memory_order_acquire)) return;
+	atomic_store(&sq_self->remote_pending, false);
+#if !SQ_KQUEUE
+	uint64_t v;
+	ssize_t r = read(sq_self->wake_fd, &v, sizeof v);
+	(void)r;
+#endif
+	pthread_mutex_lock(&sq_self->remote_mu);
+	sq_g *g = sq_self->remote_head;
+	sq_self->remote_head = sq_self->remote_tail = NULL;
+	pthread_mutex_unlock(&sq_self->remote_mu);
+	while (g) {
+		sq_g *next = g->next;
+		sq_self->shared_parked--;
+		runq_push(g);
+		g = next;
+	}
+}
+
+static void park_shared(sq_chan *c) {
+	sq_self->shared_parked++;
+	sq_self->cur_g->state = G_WAITING; // before unlocking: a waker may queue it at once
+	pthread_mutex_unlock(&c->mu);
+	TSAN_SWITCH(sq_self->tsan_sched);
+	sq_ctx_switch(&sq_self->cur_g->ctx, &sq_self->sched_ctx);
+}
+
+sq_chan *sq_chan_init_shared(sq_chan *c, void *buf, int64_t elemsize, int64_t cap) {
+	sq_chan_init(c, buf, elemsize, cap);
+	c->shared = true;
+	pthread_mutex_init(&c->mu, NULL);
+	return c;
+}
+
+int64_t sq_chan_len_locked(sq_chan *c) {
+	pthread_mutex_lock(&c->mu);
+	int64_t n = c->len;
+	pthread_mutex_unlock(&c->mu);
+	return n;
+}
+
+static void chan_send_shared(sq_chan *c, const void *elem, const char *file, int line) {
+	pthread_mutex_lock(&c->mu);
+	if (c->closed) {
+		pthread_mutex_unlock(&c->mu);
+		sq_panic_cstr("send on closed channel", file, line);
+	}
+	sq_g *r = q_pop(&c->recvq_head, &c->recvq_tail);
+	if (r) {
+		memcpy(r->elem, elem, (size_t)c->elemsize);
+		r->ok = true;
+		pthread_mutex_unlock(&c->mu);
+		ready_shared(r);
+		return;
+	}
+	if (c->len < c->cap) {
+		int64_t tail = (c->head + c->len) % c->cap;
+		memcpy(c->buf + tail * c->elemsize, elem, (size_t)c->elemsize);
+		c->len++;
+		pthread_mutex_unlock(&c->mu);
+		return;
+	}
+	sq_g *g = sq_self->cur_g;
+	g->elem = (void *)elem;
+	g->ok = false;
+	q_push(&c->sendq_head, &c->sendq_tail, g);
+	park_shared(c);
+	if (!g->ok) sq_panic_cstr("send on closed channel", file, line);
+}
+
+static bool chan_recv_shared(sq_chan *c, void *outp) {
+	pthread_mutex_lock(&c->mu);
+	if (c->len > 0) {
+		memcpy(outp, c->buf + c->head * c->elemsize, (size_t)c->elemsize);
+		c->head = (c->head + 1) % c->cap;
+		c->len--;
+		sq_g *s = q_pop(&c->sendq_head, &c->sendq_tail);
+		if (s) {
+			int64_t tail = (c->head + c->len) % c->cap;
+			memcpy(c->buf + tail * c->elemsize, s->elem, (size_t)c->elemsize);
+			c->len++;
+			s->ok = true;
+		}
+		pthread_mutex_unlock(&c->mu);
+		if (s) ready_shared(s);
+		return true;
+	}
+	sq_g *s = q_pop(&c->sendq_head, &c->sendq_tail);
+	if (s) {
+		memcpy(outp, s->elem, (size_t)c->elemsize);
+		s->ok = true;
+		pthread_mutex_unlock(&c->mu);
+		ready_shared(s);
+		return true;
+	}
+	if (c->closed) {
+		pthread_mutex_unlock(&c->mu);
+		memset(outp, 0, (size_t)c->elemsize);
+		return false;
+	}
+	sq_g *g = sq_self->cur_g;
+	g->elem = outp;
+	g->ok = false;
+	q_push(&c->recvq_head, &c->recvq_tail, g);
+	park_shared(c);
+	if (!g->ok) memset(outp, 0, (size_t)c->elemsize);
+	return g->ok;
+}
+
+static void chan_close_shared(sq_chan *c, const char *file, int line) {
+	pthread_mutex_lock(&c->mu);
+	if (c->closed) {
+		pthread_mutex_unlock(&c->mu);
+		sq_panic_cstr("close of closed channel", file, line);
+	}
+	c->closed = true;
+	sq_g *waiters = NULL, *g;
+	while ((g = q_pop(&c->recvq_head, &c->recvq_tail)) || (g = q_pop(&c->sendq_head, &c->sendq_tail))) {
+		g->ok = false;
+		g->next = waiters; // q_pop cleared nothing; relink into a private list
+		waiters = g;
+	}
+	pthread_mutex_unlock(&c->mu);
+	while (waiters) {
+		g = waiters;
+		waiters = g->next;
+		ready_shared(g);
 	}
 }
 
@@ -1663,6 +1850,7 @@ static void schedule(void) {
 			TSAN_SWITCH(g->tsan_fiber);
 			sq_ctx_switch(&sq_self->sched_ctx, &g->ctx);
 			sq_self->cur_g = NULL;
+			drain_remote();
 			if (sq_self->start_pending) {
 				sq_self->start_pending = false;
 				start_shards();
@@ -1686,8 +1874,10 @@ static void schedule(void) {
 				if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0) netpoll(0);
 			}
 		}
-		// nothing runnable: block in the poller until I/O or a timer fires
-		if (sq_self->fd_waiters == 0 && sq_self->ntimers == 0 && sq_self->idle_parked == 0) {
+		// nothing runnable: block in the poller until I/O, a timer or another shard wakes us
+		drain_remote();
+		if (sq_self->runq_head) continue;
+		if (sq_self->fd_waiters == 0 && sq_self->ntimers == 0 && sq_self->idle_parked == 0 && sq_self->shared_parked == 0) {
 			if (sq_self->main_done) pthread_exit(NULL); // nothing left on this shard
 			sq_flush();
 			err_write("fatal error: all goroutines are asleep - deadlock!\n");
@@ -1698,7 +1888,7 @@ static void schedule(void) {
 			timeout = sq_self->timer_heap[0]->wake_at - sq_nanotime();
 			if (timeout < 0) timeout = 0;
 		}
-		if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0) {
+		if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0 || sq_self->shared_parked > 0) {
 			netpoll(timeout);
 		} else if (timeout > 0) {
 			struct timespec ts = {timeout / 1000000000, timeout % 1000000000};
@@ -1892,9 +2082,16 @@ static void shard_run(void) {
 	sigaltstack(&ss, NULL);
 #if SQ_KQUEUE
 	sq_self->pollfd = kqueue();
+	struct kevent wake; // other shards trigger this to hand us goroutines (shared channels)
+	EV_SET(&wake, 1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+	kevent(sq_self->pollfd, &wake, 1, NULL, 0, NULL);
 #else
 	sq_self->pollfd = epoll_create1(0);
+	sq_self->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	struct epoll_event wake = {.events = EPOLLIN | EPOLLET}; // data 0: no goroutine, just a wakeup
+	epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, sq_self->wake_fd, &wake);
 #endif
+	pthread_mutex_init(&sq_self->remote_mu, NULL);
 	for (int64_t i = 0; i < sq_npools; i++) pool_init(sq_self->pools[i]);
 	sq_go(&sq_main_pool, sq_program_main, NULL, 0);
 	schedule();

@@ -1,0 +1,65 @@
+package main
+
+// shared channels: 4 scheduler threads; shard 0 produces jobs, every shard's workers take them
+// and send results back, shard 0 sums them. An unbuffered shared channel hands values across
+// threads one at a time.
+
+import "runtime"
+
+threads 4
+
+shared var jobs chan int cap 16
+shared var results chan int cap 16
+shared var ping chan int cap 0
+shared var pong chan int cap 0
+
+var done chan int cap 1 // per shard
+
+task producer() pool 1 {
+	for i := 1; i <= 1000; i++ {
+		jobs <- i
+	}
+	close(jobs)
+}
+
+task collector() pool 1 {
+	sum := 0
+	for i := 0; i < 1000; i++ {
+		sum += <-results
+	}
+	done <- sum
+}
+
+task worker() pool 2 {
+	for j := range jobs {
+		results <- j * 2
+	}
+}
+
+task echo() pool 1 {
+	for v := range ping {
+		pong <- v + 1
+	}
+}
+
+func main() {
+	if runtime.Shard() == 0 {
+		go producer()
+		go collector()
+	}
+	go worker()
+	go worker()
+	if runtime.Shard() == 1 {
+		go echo()
+	}
+	if runtime.Shard() == 0 {
+		println(<-done)
+		v := 0
+		for i := 0; i < 100; i++ {
+			ping <- v
+			v = <-pong
+		}
+		close(ping)
+		println(v)
+	}
+}

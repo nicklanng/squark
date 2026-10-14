@@ -39,6 +39,7 @@ struct sq_g {
 	bool guarded;       // guard page installed (done lazily on first use)
 	bool release_stack; // return the whole stack to the OS when this goroutine exits
 	void *tsan_fiber;   // ThreadSanitizer builds only: this goroutine's fiber
+	void *shard;        // the shard (scheduler thread) that runs this goroutine
 };
 
 enum { WAKE_NONE, WAKE_FD, WAKE_TIMER };

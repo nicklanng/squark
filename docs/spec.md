@@ -238,6 +238,13 @@ constants. Its type is limited to numbers, strings, bools, errors and arrays or 
 because nothing a shared slice, map or pointer refers to could be kept read-only. A plain `var` is
 one copy per scheduler thread.
 
+A shared channel connects the scheduler threads: `shared var jobs chan Job cap 64` (declared
+without a value) is one channel for all of them. Send, receive, `close`, `len` and `range` work
+as for any channel; a goroutine blocked on it is woken by whichever thread completes the
+operation. Its elements may not hold references (no strings, slices, maps or pointers), since a
+reference could view one thread's own memory; send numbers, bools, errors, or arrays and structs
+of them (an index or ID instead of a string).
+
 ## 5. Expressions
 
 | expression | squark |
@@ -338,6 +345,8 @@ must not outlive the memory it points to:
 | `memory budget exceeded` | lower pool sizes (`pool pkg.task N`), fewer `workers`, or raise the budget |
 | `workers auto can't be checked against the budget` | `workers N` with the number of cores you deploy on |
 | `threads auto can't be checked against the budget` | `threads N` with the number of cores you deploy on |
+| `shared var X: T can't be shared` | share numbers, strings, bools, errors or arrays/structs of them; keep everything else per thread |
+| `a shared channel's elements can't hold references` | send an index, ID or fixed-size array instead of a string or slice |
 | `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (error constants, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |
 | `defer inside a loop` | move the loop body into a function and defer there |
 
@@ -420,6 +429,11 @@ func handle(w *http.ResponseWriter, r *http.Request) {
   shard whose `main` returns stops its goroutines), at the first panic, or at `os.Exit`. The
   memory budget counts static data and stacks once per shard (and `threads auto` can't be
   combined with `budget`). `threads` and `workers` combine: workers × threads shards in all.
+  Shards share only constants, `shared var` data and shared channels. A shard whose goroutines
+  all wait on shared channels sleeps until another shard wakes them, so a deadlock across shards
+  hangs instead of reporting `all goroutines are asleep`. Externs are called from whichever shard
+  runs the goroutine, so C libraries must be thread-safe (libc and SQLite are; each shard opens
+  its own SQLite connection, since package variables are per shard).
 - `workers N` (1 to 1024, or `auto` for one per core) starts N processes before any squark code
   runs; each has its own package variables, goroutines and connections. Listening sockets use
   `SO_REUSEPORT`, so the kernel spreads connections across the workers (on Linux; macOS sends them
