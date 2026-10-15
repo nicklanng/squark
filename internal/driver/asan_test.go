@@ -14,6 +14,14 @@ import (
 // scheduler thread exits.
 const asanOptions = "detect_stack_use_after_return=1:detect_stack_use_after_scope=1:use_sigaltstack=0:exitcode=86"
 
+// needClangASan skips a test under gcc: gcc's AddressSanitizer loses track of the fake stack across
+// squark's goroutine stack switches ("False positive error reports may follow"), clang's doesn't.
+func needClangASan(t *testing.T) {
+	if strings.Contains(os.Getenv("CC"), "gcc") {
+		t.Skip("the ASan harness needs clang (CC=" + os.Getenv("CC") + ")")
+	}
+}
+
 // TestRunASan runs every TestRun program built with AddressSanitizer. A squark program that the
 // checker accepts must never touch memory after its lifetime ends; ASan turns a lifetime-checker
 // hole into a failing test instead of silently wrong output.
@@ -21,6 +29,7 @@ func TestRunASan(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow: rebuilds every program with AddressSanitizer")
 	}
+	needClangASan(t)
 	runPrograms(t, "address")
 }
 
@@ -56,6 +65,7 @@ MAIN}
 
 // TestASanCatchesDangling makes sure the harness sees the bug class at all.
 func TestASanCatchesDangling(t *testing.T) {
+	needClangASan(t)
 	for where, body := range map[string]string{
 		"main": "\tp := leak()\n\tprintln(clobber(), *p)\n\truntime.Gosched()\n",
 		"task": "\tgo t()\n\truntime.Gosched()\n",

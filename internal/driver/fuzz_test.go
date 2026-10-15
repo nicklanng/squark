@@ -31,6 +31,7 @@ func TestFuzzSoundness(t *testing.T) {
 	if n <= 0 {
 		t.Skip("set SQUARK_FUZZ=<mutants> to fuzz")
 	}
+	needClangASan(t)
 	seed := time.Now().UnixNano()
 	if s, err := strconv.ParseInt(os.Getenv("SQUARK_FUZZ_SEED"), 10, 64); err == nil {
 		seed = s

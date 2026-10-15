@@ -868,13 +868,27 @@ HTTP throughput about 3–5% lower, nbody 3.5% slower, the notes binary 109 → 
   Also re-measure the HTTP rewrite alone with longer runs (`DURATION=30s`): per-commit numbers
   were too noisy (±5%) to attribute anything to it.
 
-## Z: found by fuzzing (`TestFuzzSoundness`)
+## Z: found by tooling (`TestFuzzSoundness`, `scripts/test-linux.sh`)
 
 - [x] **Z1. Sizing a type that contains itself by value overflows the compiler's stack** (bug,
   compiler crash; introduced by F38's `sizeBound`) — fixed: `sizeBoundSeen` stops at a named type it
   is already inside; test: `testdata/errors/type_cycle_size.sq`
   `type V struct{ x int; v [..2]V }` with `var g [..2]V`: the cycle is reported, then sizing
   `[..2]V` recursed forever. Found within the first 5000 mutants.
+- [x] **Z2. Every build with gcc failed: `-fno-strict-float-cast-overflow` is clang-only** (bug,
+  from F8) — fixed: flag dropped; the saturating `sq_f2i`/`sq_f2u` make it unnecessary; test:
+  `CC=gcc scripts/test-linux.sh`
+- [x] **Z3. gcc builds could overflow a goroutine's proven stack** (bug, pre-existing: it is why
+  `TestWorkers` failed with gcc) — fixed: gcc clones functions (`f.isra.0`, `f.part.0`,
+  `f.constprop.0`) and may report a frame only under the clone's name, which the stack proof never
+  matched, so the frame counted as 0 (`http.serveConn` lost 20 KiB). `readStackUsage` takes the
+  name before the first `.` and sums a function's variants; test: `CC=gcc scripts/test-linux.sh`
+  (`TestHTTP`, `TestThreads`, `TestWorkers`)
+- [x] **Z4. On Linux, gcc programs using `math` didn't link** (bug) — fixed: `-lm` on Linux (gcc
+  calls `sqrt`, clang inlines it); test: `TestNoHeapAtRuntime` under `CC=gcc scripts/test-linux.sh`
+- [x] **Z5. gcc's AddressSanitizer loses the fake stack across goroutine switches** (tooling) —
+  the ASan harness is clang-only (`needClangASan`); clang's needs no fiber annotations on macOS or
+  Linux
 
 ## Progress log
 

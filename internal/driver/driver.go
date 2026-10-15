@@ -174,7 +174,7 @@ func Build(opt Options) (*Result, error) {
 	}
 
 	// one section per function and datum, so the linker drops what the program doesn't use
-	cflags := []string{opt.OptFlag, "-std=gnu11", "-pthread", "-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks", "-fno-strict-float-cast-overflow", "-w", "-fstack-usage", "-ffunction-sections", "-fdata-sections", "-I", work}
+	cflags := []string{opt.OptFlag, "-std=gnu11", "-pthread", "-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks", "-w", "-fstack-usage", "-ffunction-sections", "-fdata-sections", "-I", work}
 	if runtime.GOOS == "linux" {
 		// A C frame (or VLA) larger than a page must touch each page on the way down, or it can
 		// jump over a goroutine stack's one guard page into the next stack. gcc on arm64 assumes a
@@ -378,7 +378,8 @@ func Build(opt Options) (*Result, error) {
 	if runtime.GOOS == "darwin" {
 		args = append(args, "-Wl,-dead_strip")
 	} else {
-		args = append(args, "-Wl,--gc-sections")
+		// libm is separate from libc on Linux; gcc calls sqrt and friends where clang inlines them
+		args = append(args, "-Wl,--gc-sections", "-lm")
 	}
 	if opt.Sanitize != "" {
 		args = append(args, "-fsanitize="+opt.Sanitize)
@@ -510,7 +511,11 @@ func readStackUsage(path string, allowDynamic bool) (frames, rt map[string]int64
 		return nil, nil, fmt.Errorf("reading stack usage: %v", err)
 	}
 	defer f.Close()
-	frames, rt = map[string]int64{}, map[string]int64{}
+	// gcc clones functions under suffixed names (f.isra.0, f.part.0, f.constprop.0, f.cold) and may
+	// report only the clone. A C name has no '.', so the base name is the function; its frame is
+	// the sum of its variants, since a .part clone runs nested inside the original.
+	variants := map[string]map[string]int64{} // base name -> full name -> largest frame
+	rtNames := map[string]bool{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		parts := strings.Split(sc.Text(), "\t")
@@ -518,7 +523,8 @@ func readStackUsage(path string, allowDynamic bool) (frames, rt map[string]int64
 			continue
 		}
 		loc := parts[0]
-		name := loc[strings.LastIndex(loc, ":")+1:]
+		full := loc[strings.LastIndex(loc, ":")+1:]
+		name, _, _ := strings.Cut(full, ".")
 		n, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
 			continue
@@ -526,12 +532,22 @@ func readStackUsage(path string, allowDynamic bool) (frames, rt map[string]int64
 		if strings.Contains(parts[2], "dynamic") && !strings.Contains(parts[2], "bounded") && !allowDynamic {
 			return nil, nil, fmt.Errorf("function %s has a dynamically sized stack frame; cannot prove its stack size", name)
 		}
-		if n > frames[name] {
-			frames[name] = n
+		if variants[name] == nil {
+			variants[name] = map[string]int64{}
 		}
+		variants[name][full] = max(variants[name][full], n)
 		file := filepath.Base(strings.SplitN(loc, ":", 2)[0])
-		if (file == "sq_rt.c" || file == "sq_rt.h" || file == "sq_internal.h") && n > rt[name] {
-			rt[name] = n
+		if file == "sq_rt.c" || file == "sq_rt.h" || file == "sq_internal.h" {
+			rtNames[name] = true
+		}
+	}
+	frames, rt = map[string]int64{}, map[string]int64{}
+	for name, vs := range variants {
+		for _, n := range vs {
+			frames[name] += n
+		}
+		if rtNames[name] {
+			rt[name] = frames[name]
 		}
 	}
 	return frames, rt, sc.Err()

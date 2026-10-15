@@ -17,4 +17,6 @@ again under AddressSanitizer (`TestRunASan`: a report means the lifetime checker
 outlive its memory; `-short` skips it). After changing the checker or codegen, fuzz:
 `SQUARK_FUZZ=5000 go test ./internal/driver -run TestFuzzSoundness -v -timeout 1h` mutates the test
 programs and runs the accepted ones under ASan, reporting ASan errors, compiler crashes and C the
-compiler generates but clang rejects (findings land in a temp dir the log names).
+compiler generates but clang rejects (findings land in a temp dir the log names). On Linux (epoll,
+glibc, gcc): `scripts/test-linux.sh` runs the suite in Docker (`-short`, `CC=gcc`, `FUZZ=N`,
+`PLATFORM=linux/amd64`; see the script).
