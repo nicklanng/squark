@@ -1,0 +1,101 @@
+package main
+
+// json.Decoder.Skip follows the JSON grammar (brackets match, separators where they belong,
+// valid escapes, no raw control characters), never moves Offset past the end of the data, and
+// nests up to 1024 deep. String replaces invalid UTF-8 with U+FFFD, as Go does.
+
+import (
+	"json"
+	"os"
+	"strconv"
+)
+
+var src [4096]byte
+
+func skip(doc string) {
+	n := copy(src[:], doc)
+	d := json.NewDecoder(src[:n])
+	ok := d.Skip()
+	end := d.End()
+	print(doc, " -> ", ok && end, " offset=", d.Offset(), "/", n, "\n")
+}
+
+func deep(n int) {
+	b := src[:0]
+	for range n {
+		b = append(b, '[')
+	}
+	for range n {
+		b = append(b, ']')
+	}
+	d := json.NewDecoder(b)
+	ok := d.Skip()
+	println("depth", n, ok && d.End())
+}
+
+func main() {
+	// valid
+	skip(`[]`)
+	skip(`{}`)
+	skip(` [ [ ] , { } ] `)
+	skip(`{"a":[1,{"b":"é\n\"\\\/"}],"c":null,"d":true,"e":-1.5e3}`)
+	skip(`"x"`)
+	skip(`12`)
+	skip(`[1,[2,[3]],{"x":{"y":[]}}]`)
+	// invalid
+	skip(`[1,]`)
+	skip(`[,1]`)
+	skip(`[1 2]`)
+	skip(`{"a":1,}`)
+	skip(`{"a" 1}`)
+	skip(`{"a":}`)
+	skip(`{1:2}`)
+	skip(`{"a":1 "b":2}`)
+	skip(`[}`)
+	skip(`{]`)
+	skip(`]`)
+	skip(`}`)
+	skip(`,`)
+	skip(`["a":1]`)
+	skip(`[[]`)
+	skip(`"a\qb"`)
+	skip(`"a\u12"`)
+	skip(`"a\u12x4"`)
+	skip("\"a\tb\"")
+	skip(`"abc`)
+	skip(`"abc\`)
+	skip(`[1`)
+	skip(`[`)
+	skip(``)
+	skip(`[tru]`)
+	// a lone closer inside an object doesn't count as a value
+	n := copy(src[:], `{"a": ], "b": 2}`)
+	d := json.NewDecoder(src[:n])
+	var key [8]byte
+	d.BeginObject()
+	k, _ := d.Field(key[:])
+	println(k, d.Skip(), d.Err != nil)
+	deep(1024)
+	deep(1025)
+
+	// String: invalid UTF-8 becomes U+FFFD, valid multi-byte runes pass through
+	n = copy(src[:], "\"a\xffb\xc3\xa9\xed\xa0\x80\xc3\"")
+	d = json.NewDecoder(src[:n])
+	var sb [32]byte
+	s, ok := d.String(sb[:])
+	var out [128]byte
+	o := out[:0]
+	for i := 0; i < len(s); i++ {
+		o = strconv.AppendInt(o, int(s[i]))
+		o = append(o, ' ')
+	}
+	o = append(o, '\n')
+	os.Stdout.Write(o)
+	println(ok)
+	// the replacement needs room for 3 bytes
+	n = copy(src[:], "\"ab\xff\"")
+	d = json.NewDecoder(src[:n])
+	var small [4]byte
+	s, ok = d.String(small[:])
+	println(ok, d.Err == json.ErrBuffer)
+}

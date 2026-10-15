@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // docText renders a declaration's doc comment, one "// " line each, ending in a newline.
@@ -151,21 +152,42 @@ func DocPackage(p *Package, all bool) string {
 		}
 		switch o.Kind {
 		case ObjConst:
+			var doc []string
+			var src Expr // the constant's own expression, if it has one
+			if cd, ok := o.decl.(constDecl); ok {
+				doc = cd.spec.Doc
+				if cd.index < len(cd.spec.Values) {
+					src = cd.spec.Values[cd.index]
+				}
+			}
 			v := ""
-			if cv, ok := o.Const.(constant.Value); ok && cv.Kind() == constant.Float {
-				// String abbreviates (Pi = 3.14159); show the float64 value in full
+			cv, isValue := o.Const.(constant.Value)
+			lit, _ := src.(*BasicLit)
+			switch {
+			case isValue && cv.Kind() == constant.Float:
+				// String abbreviates (Pi = 3.14159); show the value in full, at its type's precision
+				bits := 64
+				if o.Type != nil && basicKind(o.Type) == Float32 {
+					bits = 32
+				}
 				f, _ := constant.Float64Val(cv)
-				v = strconv.FormatFloat(f, 'g', -1, 64)
-			} else if cv, ok := o.Const.(interface{ String() string }); ok {
-				v = cv.String()
+				v = strconv.FormatFloat(f, 'g', -1, bits)
+			case isValue && cv.Kind() == constant.String:
+				v = cv.ExactString() // String abbreviates long strings
+			case isValue && cv.Kind() == constant.Int && (o.Type == tUntypedRune || lit != nil && lit.Kind == CHAR):
+				if r, ok := constant.Int64Val(cv); ok && r >= 0 && r <= utf8.MaxRune {
+					v = strconv.QuoteRune(rune(r))
+				} else {
+					v = cv.String()
+				}
+			default:
+				if s, ok := o.Const.(interface{ String() string }); ok {
+					v = s.String()
+				}
 			}
 			t := ""
 			if o.Type != nil && !isUntyped(o.Type) {
 				t = " " + o.Type.String()
-			}
-			var doc []string
-			if cd, ok := o.decl.(constDecl); ok {
-				doc = cd.spec.Doc
 			}
 			consts = append(consts, entry{o.Pos, docText(doc) + fmt.Sprintf("const %s%s = %s", name, t, v)})
 		case ObjVar:
@@ -198,14 +220,31 @@ func DocPackage(p *Package, all bool) string {
 				b.WriteString(docText(o.TypeDecl.Doc))
 			}
 			if st, ok := n.Underlying().(*Struct); ok {
+				fieldDoc := map[string][]string{} // a field's doc comment, on the first name it declares
+				if o.TypeDecl != nil {
+					if ast, ok := o.TypeDecl.Type.(*StructType); ok {
+						for _, f := range ast.Fields {
+							if len(f.Doc) > 0 && len(f.Names) > 0 {
+								fieldDoc[f.Names[0].Name] = f.Doc
+							}
+						}
+					}
+				}
 				fmt.Fprintf(&b, "type %s struct {", name)
-				hidden := false
+				hidden, shown := false, 0
 				for _, f := range st.Fields {
 					if !show(f.Name) {
 						hidden = true
 						continue
 					}
+					if doc := fieldDoc[f.Name]; len(doc) > 0 {
+						if shown > 0 {
+							b.WriteString("\n") // a blank line before a documented field
+						}
+						b.WriteString("\n\t" + strings.ReplaceAll(strings.TrimSuffix(docText(doc), "\n"), "\n", "\n\t"))
+					}
 					fmt.Fprintf(&b, "\n\t%s %s", f.Name, f.Type)
+					shown++
 				}
 				if hidden {
 					b.WriteString("\n\t// unexported fields")
@@ -238,6 +277,18 @@ func DocPackage(p *Package, all bool) string {
 		})
 	}
 	var b strings.Builder
+	// the package doc comment: the first that starts "Package name", else the first file's
+	var pkgDoc []string
+	for _, f := range p.Files {
+		if len(f.Doc) > 0 && strings.HasPrefix(f.Doc[0], "Package "+p.Name+" ") {
+			pkgDoc = f.Doc
+			break
+		}
+		if pkgDoc == nil {
+			pkgDoc = f.Doc
+		}
+	}
+	b.WriteString(docText(pkgDoc))
 	fmt.Fprintf(&b, "package %s\n", p.Name)
 	for _, group := range [][]entry{consts, vars, types, funcs} {
 		if len(group) == 0 {

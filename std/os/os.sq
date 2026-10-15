@@ -114,9 +114,9 @@ func (f File) Close() error {
 	return nil
 }
 
-// ReadFull reads into p until it is full or the file ends, returning the bytes read.
-// ReadFull reads exactly len(p) bytes. If the file ends first it returns what it read and
-// io.EOF (nothing read) or io.ErrUnexpectedEOF (some read), as Go's io.ReadFull does.
+// ReadFull reads into p until it is full, returning how many bytes it read. If the file ends
+// first, the error is io.EOF if nothing was read and io.ErrUnexpectedEOF otherwise, as with Go's
+// io.ReadFull.
 func (f File) ReadFull(p []byte) (int, error) {
 	n := 0
 	for n < len(p) {

@@ -5,6 +5,7 @@ provenance: `from p` means a result may point into what `p` refers to, `x T into
 `x` may be stored inside `p`, `static` means static memory only. Methods follow their type.
 
 ```go
+// Package io holds the shared error values for readers and writers.
 package io
 
 const EOF = error(-1, "EOF")
@@ -13,6 +14,7 @@ const ErrShortBuffer = error(-3, "short buffer")
 const ErrUnexpectedEOF = error(-4, "unexpected EOF")
 const ErrTooLarge = error(-5, "input larger than the buffer")
 
+// Package strings provides string helpers. Results are views of their inputs; nothing is copied.
 package strings
 
 func HasPrefix(s string, prefix string) bool
@@ -40,12 +42,16 @@ func AppendLower(dst []byte, s string) []byte from dst
 // each UTF-8 sequence, as in Go. It stops when out is full; the last element then holds the
 // unsplit remainder.
 func Split(s string into out, sep string, out []string) []string from out
-// Fields splits s around runs of ASCII whitespace into out.
+// Fields splits s around runs of ASCII whitespace into out, returning the used part of out. It
+// stops when out is full and drops the fields after that (unlike Split, which keeps the
+// remainder); size out for the most fields you accept.
 func Fields(s string into out, out []string) []string from out
 // Count counts the non-overlapping instances of sub in s; an empty sub counts the runes plus one,
 // as in Go.
 func Count(s string, sub string) int
 
+// Package bufio reads lines through a buffer the caller provides, from any source with a
+// Read([]byte) (int, error) method (a net.Conn, an os.File, ...).
 package bufio
 
 const ErrTooLong = error(-10, "bufio: line longer than the buffer")
@@ -58,13 +64,17 @@ type Reader struct {
 func (r *bufio.Reader) Buffered() int
 // ReadLine returns the next line from src, without its "\n" or "\r\n", as a view of the buffer
 // that stays valid until the next call. A last line without a newline is returned before the
-// source's error (io.EOF at the end of the input). A line longer than the buffer is skipped and
-// reported as ErrTooLong; the next call reads the line after it.
+// source's error (io.EOF at the end of the input), without a final "\r" (as Go's bufio.Scanner).
+// A line longer than the buffer (not counting its "\n" or "\r\n") is skipped and reported as
+// ErrTooLong; the next call reads the line after it. A line that fills the buffer exactly is
+// followed by one or two 1-byte reads to find its end.
 func (r *bufio.Reader) ReadLine(src anytype) (string, error) from r
 
-// NewReader returns a Reader that buffers into storage (its capacity is the longest line).
+// NewReader returns a Reader that buffers into storage (its capacity is the longest line, not
+// counting the line end).
 func NewReader(storage []byte) bufio.Reader from storage
 
+// Package math wraps the C math library. Its functions are leaves that need very little stack.
 package math
 
 const Pi = 3.141592653589793
@@ -111,6 +121,7 @@ func IsNaN(f float64) bool
 // sign < 0.
 func IsInf(f float64, sign int) bool
 
+// Package strconv converts between numbers and text using caller-provided buffers.
 package strconv
 
 const ErrSyntax = error(22, "invalid syntax")
@@ -118,14 +129,14 @@ const ErrRange = error(34, "value out of range")
 const ErrBase = error(22, "invalid base")
 
 // ParseFloat converts s ("1.5", "-2e-10", "Inf", "NaN") to the nearest float64 (half to even),
-// as Go's strconv.ParseFloat(s, 64). ErrSyntax if s isn't a number; ErrRange (with ±Inf) if it is
-// too large.
+// as Go's strconv.ParseFloat(s, 64) does for decimal input. ErrSyntax if s isn't a number;
+// ErrRange (with ±Inf) if it is too large. Unlike Go, hexadecimal floats ("0x1p4") and
+// underscores ("1_000") are not accepted (ErrSyntax).
 func ParseFloat(s string) (float64, error)
 // AppendInt appends the decimal form of v to dst.
 func AppendInt(dst []byte, v int) []byte from dst
 // AppendUint appends the decimal form of v to dst.
 func AppendUint(dst []byte, v uint64) []byte from dst
-// FormatInt writes v into buf and returns it as a string view of buf.
 // AppendIntBase appends v in base 2 to 36 (lower-case letters for digits over 9), as Go's
 // strconv.AppendInt(dst, v, base) does. Base 16 gives hex.
 func AppendIntBase(dst []byte, v int, base int) []byte from dst
@@ -134,6 +145,7 @@ func AppendUintBase(dst []byte, v uint64, base int) []byte from dst
 // AppendIntPad appends v in decimal, padded on the left with pad to at least width bytes
 // (AppendIntPad(dst, 7, 3, '0') appends "007"; a zero-padded negative number keeps its sign first).
 func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst
+// FormatInt writes v in decimal into buf and returns it as a string view of buf.
 func FormatInt(buf []byte, v int) string from buf
 // AppendFloat appends v with prec digits after the decimal point, like Go's
 // strconv.AppendFloat(dst, v, 'f', prec, 64): the exact binary value rounded half to even. The
@@ -149,6 +161,7 @@ func ParseInt(s string, base int) (int, error)
 // ParseBool accepts 1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False.
 func ParseBool(s string) (bool, error)
 
+// Package bytes provides a fixed-capacity Buffer and byte-slice helpers.
 package bytes
 
 // Buffer appends into storage supplied by the caller. It never grows: writes that do not fit
@@ -183,6 +196,8 @@ func Index(s []byte, sep []byte) int
 // HasPrefix reports whether s begins with prefix.
 func HasPrefix(s []byte, prefix []byte) bool
 
+// Package errors creates error values. A squark error is a value (code + static message),
+// so creating one never allocates.
 package errors
 
 // New returns an error with the given message. The message must be a string constant or
@@ -193,6 +208,7 @@ func WithCode(code int, msg static string) error
 // Is reports whether err is target.
 func Is(err error, target error) bool
 
+// Package os is a thin, heap-free interface to the operating system.
 package os
 
 const O_RDONLY = 0
@@ -215,9 +231,9 @@ func (f os.File) Read(p []byte) (int, error)
 func (f os.File) Write(p []byte) (int, error)
 func (f os.File) WriteString(s string) (int, error)
 func (f os.File) Close() error
-// ReadFull reads into p until it is full or the file ends, returning the bytes read.
-// ReadFull reads exactly len(p) bytes. If the file ends first it returns what it read and
-// io.EOF (nothing read) or io.ErrUnexpectedEOF (some read), as Go's io.ReadFull does.
+// ReadFull reads into p until it is full, returning how many bytes it read. If the file ends
+// first, the error is io.EOF if nothing was read and io.ErrUnexpectedEOF otherwise, as with Go's
+// io.ReadFull.
 func (f os.File) ReadFull(p []byte) (int, error)
 
 extern func Exit(code int) stack 8192
@@ -239,6 +255,7 @@ func FromFd(fd int) os.File
 // doesn't fit is io.ErrTooLarge (buf then holds its beginning).
 func ReadFile(path string, buf []byte) ([]byte, error) from buf
 
+// Package time measures and waits.
 package time
 
 const Nanosecond time.Duration = 1
@@ -272,6 +289,8 @@ func Sleep(d time.Duration)
 // anywhere else, After is an error.)
 func After(d time.Duration) chan time.Time static
 
+// Package net provides TCP listeners and connections. Blocking calls park only the calling
+// goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
 package net
 
 const ErrBadAddress = error(22, "invalid address (want host:port)")
@@ -320,6 +339,8 @@ func NextIdle() (net.Conn, int)
 // IdleCount reports how many connections are parked in the idle set.
 func IdleCount() int
 
+// Package http is an HTTP/1.1 server. Each connection runs in its own goroutine whose read and
+// write buffers live on that goroutine's (statically sized) stack: no allocation per request.
 package http
 
 // ReadBufferSize bounds request line + headers + body.
@@ -357,6 +378,9 @@ type Request struct {
 	Proto string
 	Body []byte
 	ContentLength int
+
+	// Arena is scratch memory for this request: allocate with `x in r.Arena`. Everything in it is
+	// gone once the response has been written.
 	Arena arena
 	// unexported fields
 }
@@ -401,6 +425,7 @@ func Serve(l net.Listener, h http.HandlerFunc) error
 // StatusText returns the reason phrase for a status code.
 func StatusText(code int) string static
 
+// Package utf8 encodes and decodes UTF-8.
 package utf8
 
 const RuneError = 65533
@@ -416,7 +441,13 @@ func DecodeRuneInString(s string) (int32, int)
 // RuneCountInString counts the runes in s.
 func RuneCountInString(s string) int
 
+// Package json writes and reads JSON without allocating: encoding appends to caller buffers,
+// decoding is a pull parser whose strings are views of the input or of caller buffers.
 package json
+
+// MaxDepth is how deeply Skip follows nested arrays and objects; a deeper value is ErrSyntax.
+// (The decoder doesn't allocate, so Skip keeps its bracket stack in a fixed array.)
+const MaxDepth = 1024
 
 const ErrSyntax = error(1, "json: syntax error")
 const ErrType = error(2, "json: unexpected value type")
@@ -435,7 +466,8 @@ func (d *json.Decoder) BeginArray() bool
 func (d *json.Decoder) More() bool
 // Field reads the next object key into keybuf, returning false at the end of the object.
 func (d *json.Decoder) Field(keybuf []byte) (string, bool) from keybuf
-// String decodes a JSON string into buf and returns a view of buf.
+// String decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD,
+// as in Go. ErrBuffer if the decoded string doesn't fit in buf.
 func (d *json.Decoder) String(buf []byte) (string, bool) from buf
 // Int decodes an integer. A number with a fraction or exponent is ErrType (it is consumed).
 func (d *json.Decoder) Int() (int, bool)
@@ -447,9 +479,12 @@ func (d *json.Decoder) Bool() (bool, bool)
 // Null consumes a null if it is the next value and reports whether it was (a missing or optional
 // value; anything else is left for the other methods).
 func (d *json.Decoder) Null() bool
-// Skip skips one value of any type (iteratively; nesting is tracked with a counter).
+// Skip skips one value of any type, checking that it is valid JSON: brackets match, commas and
+// colons are where they belong, escapes are valid and strings hold no raw control characters
+// (invalid UTF-8 is accepted, as by String). It works iteratively; arrays and objects may nest up
+// to MaxDepth deep.
 func (d *json.Decoder) Skip() bool
-// Offset returns how many bytes of the input have been consumed.
+// Offset returns how many bytes of the input have been consumed (at most len(data)).
 func (d *json.Decoder) Offset() int
 // Line returns the 1-based line the decoder has reached (where an error was found, after one).
 func (d *json.Decoder) Line() int
@@ -471,6 +506,8 @@ func AppendInt(dst []byte, v int) []byte from dst
 func AppendBool(dst []byte, v bool) []byte from dst
 func NewDecoder(data []byte) json.Decoder from data
 
+// Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
+// runs its own copy of main, with its own package variables and goroutines.
 package runtime
 
 // Shard returns the index of the calling goroutine's scheduler thread, from 0 to Shards()-1.
@@ -481,6 +518,9 @@ extern func Shards() int stack 1024
 // Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
 extern func Gosched() stack 1024
 
+// Package sort sorts slices of any element type in place. less(a, b) reports whether a goes
+// before b. Heap sort: O(n log n) comparisons, no extra memory, no recursion; not stable (equal
+// elements may change order).
 package sort
 
 // Slice sorts s ([]T for any T) by less (a func(a, b T) bool).
@@ -492,6 +532,8 @@ func Ints(s []int)
 // Strings sorts s in increasing order.
 func Strings(s []string)
 
+// Package sqlite binds libsqlite3. SQLite manages its own memory; squark code never touches
+// the heap: column text is copied into caller-provided buffers.
 package sqlite
 
 const OK = 0

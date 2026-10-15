@@ -1,0 +1,41 @@
+package main
+
+// bufio.Reader's longest line is the buffer's capacity (not counting "\n" or "\r\n"), and a last
+// line ending in "\r" at EOF loses the "\r", as with Go's bufio.Scanner.
+
+import (
+	"bufio"
+	"io"
+	"os"
+)
+
+func readAll(path string, text string) {
+	f, _ := os.Create(path)
+	f.WriteString(text)
+	f.Close()
+	var store [8]byte
+	r := bufio.NewReader(store[:])
+	g, _ := os.Open(path)
+	for {
+		line, err := r.ReadLine(g)
+		if err == io.EOF {
+			println("<eof>")
+			break
+		}
+		if err != nil {
+			print("<", err.Error(), ">\n")
+			continue
+		}
+		print("[", line, "]\n")
+	}
+	g.Close()
+}
+
+func main() {
+	path := "/tmp/squark_bufio_full_line.txt"
+	readAll(path, "12345678\n1234567\r\n12345678\r\n123456789\nab\n12345678\rx\nlast\r")
+	readAll(path, "abcdefgh")
+	readAll(path, "abcdefgh\r")
+	readAll(path, "abcdefg\r")
+	readAll(path, "abcdefgh\nabcdefgh\n")
+}

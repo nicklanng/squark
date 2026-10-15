@@ -2,6 +2,7 @@
 // same float64, and correctly rounded parsing. Adapted from Go's strconv (decimal.go, ftoa.go,
 // atof.go): Copyright 2009 The Go Authors, BSD-style license (https://go.dev/LICENSE). The
 // numbers live in fixed 800-digit buffers on the stack: no heap, no recursion.
+
 package strconv
 
 import "math"
@@ -447,6 +448,7 @@ func (b *decimal) set(s string) bool {
 		i++
 	}
 	sawdot, sawdigits := false, false
+	ndig := 0 // significant digits seen, including those dropped once d is full
 	for ; i < len(s); i++ {
 		c := s[i]
 		if c == '.' {
@@ -454,17 +456,18 @@ func (b *decimal) set(s string) bool {
 				return false
 			}
 			sawdot = true
-			b.dp = b.nd
+			b.dp = ndig
 			continue
 		}
 		if c < '0' || c > '9' {
 			break
 		}
 		sawdigits = true
-		if c == '0' && b.nd == 0 { // leading zeros
+		if c == '0' && ndig == 0 { // leading zeros
 			b.dp--
 			continue
 		}
+		ndig++
 		if b.nd < len(b.d) {
 			b.d[b.nd] = c
 			b.nd++
@@ -476,7 +479,7 @@ func (b *decimal) set(s string) bool {
 		return false
 	}
 	if !sawdot {
-		b.dp = b.nd
+		b.dp = ndig
 	}
 	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
 		i++
@@ -598,8 +601,9 @@ func special(s string) (float64, bool) {
 }
 
 // ParseFloat converts s ("1.5", "-2e-10", "Inf", "NaN") to the nearest float64 (half to even),
-// as Go's strconv.ParseFloat(s, 64). ErrSyntax if s isn't a number; ErrRange (with ±Inf) if it is
-// too large.
+// as Go's strconv.ParseFloat(s, 64) does for decimal input. ErrSyntax if s isn't a number;
+// ErrRange (with ±Inf) if it is too large. Unlike Go, hexadecimal floats ("0x1p4") and
+// underscores ("1_000") are not accepted (ErrSyntax).
 func ParseFloat(s string) (float64, error) {
 	if f, ok := special(s); ok {
 		return f, nil

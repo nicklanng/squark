@@ -1,0 +1,17 @@
+[12345678]
+[1234567]
+[12345678]
+<bufio: line longer than the buffer>
+[ab]
+<bufio: line longer than the buffer>
+[last]
+<eof>
+[abcdefgh]
+<eof>
+[abcdefgh]
+<eof>
+[abcdefg]
+<eof>
+[abcdefgh]
+[abcdefgh]
+<eof>

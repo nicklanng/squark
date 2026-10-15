@@ -1,0 +1,38 @@
+[] -> true offset=2/2
+{} -> true offset=2/2
+ [ [ ] , { } ]  -> true offset=15/15
+{"a":[1,{"b":"é\n\"\\\/"}],"c":null,"d":true,"e":-1.5e3} -> true offset=57/57
+"x" -> true offset=3/3
+12 -> true offset=2/2
+[1,[2,[3]],{"x":{"y":[]}}] -> true offset=26/26
+[1,] -> false offset=3/4
+[,1] -> false offset=1/4
+[1 2] -> false offset=3/5
+{"a":1,} -> false offset=7/8
+{"a" 1} -> false offset=5/7
+{"a":} -> false offset=5/6
+{1:2} -> false offset=1/5
+{"a":1 "b":2} -> false offset=7/13
+[} -> false offset=1/2
+{] -> false offset=1/2
+] -> false offset=0/1
+} -> false offset=0/1
+, -> false offset=0/1
+["a":1] -> false offset=4/7
+[[] -> false offset=3/3
+"a\qb" -> false offset=4/6
+"a\u12" -> false offset=7/7
+"a\u12x4" -> false offset=7/9
+"a	b" -> false offset=3/5
+"abc -> false offset=4/4
+"abc\ -> false offset=5/5
+[1 -> false offset=2/2
+[ -> false offset=1/1
+ -> false offset=0/0
+[tru] -> false offset=1/5
+a false true
+depth 1024 true
+depth 1025 false
+97 239 191 189 98 195 169 239 191 189 239 191 189 239 191 189 239 191 189 
+true
+false true

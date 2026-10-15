@@ -215,7 +215,8 @@ func (d *Decoder) Field(keybuf []byte) (string, bool) {
 	return key, true
 }
 
-// String decodes a JSON string into buf and returns a view of buf.
+// String decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD,
+// as in Go. ErrBuffer if the decoded string doesn't fit in buf.
 func (d *Decoder) String(buf []byte) (string, bool) from buf {
 	if d.Err != nil {
 		return "", false
@@ -236,12 +237,30 @@ func (d *Decoder) String(buf []byte) (string, bool) from buf {
 			d.fail(ErrSyntax)
 			return "", false
 		}
-		if c != '\\' {
+		if c < 0x80 && c != '\\' {
 			if len(out) == cap(out) {
 				d.fail(ErrBuffer)
 				return "", false
 			}
 			out = append(out, c)
+			continue
+		}
+		if c >= 0x80 { // copy a valid UTF-8 sequence; an invalid byte becomes U+FFFD
+			r, size := utf8.DecodeRuneInString(string(d.data[d.pos-1:]))
+			if r == utf8.RuneError && size == 1 {
+				if cap(out)-len(out) < 3 {
+					d.fail(ErrBuffer)
+					return "", false
+				}
+				out = append(out, "�"...)
+				continue
+			}
+			if cap(out)-len(out) < size {
+				d.fail(ErrBuffer)
+				return "", false
+			}
+			out = append(out, d.data[d.pos-1:d.pos-1+size]...)
+			d.pos += size - 1
 			continue
 		}
 		if d.pos >= len(d.data) {
@@ -476,40 +495,53 @@ func (d *Decoder) Null() bool {
 	return d.literal("null")
 }
 
-// Skip skips one value of any type (iteratively; nesting is tracked with a counter).
+// MaxDepth is how deeply Skip follows nested arrays and objects; a deeper value is ErrSyntax.
+// (The decoder doesn't allocate, so Skip keeps its bracket stack in a fixed array.)
+const MaxDepth = 1024
+
+// Skip skips one value of any type, checking that it is valid JSON: brackets match, commas and
+// colons are where they belong, escapes are valid and strings hold no raw control characters
+// (invalid UTF-8 is accepted, as by String). It works iteratively; arrays and objects may nest up
+// to MaxDepth deep.
 func (d *Decoder) Skip() bool {
 	if d.Err != nil {
 		return false
 	}
+	var objs [MaxDepth / 64]uint64 // bit i: level i is an object (else an array)
 	depth := 0
 	for {
+		// a value
 		c := d.peek()
 		switch {
-		case c == '"':
-			d.pos++
-			for d.pos < len(d.data) && d.data[d.pos] != '"' {
-				if d.data[d.pos] == '\\' {
-					d.pos++
-				}
-				d.pos++
-			}
-			d.pos++
 		case c == '{' || c == '[':
+			if depth == MaxDepth {
+				d.fail(ErrSyntax)
+				return false
+			}
+			obj := c == '{'
+			if obj {
+				objs[depth/64] |= 1 << uint(depth%64)
+			} else {
+				objs[depth/64] &^= 1 << uint(depth%64)
+			}
 			depth++
 			d.pos++
-			continue
-		case c == '}' || c == ']':
-			depth--
-			d.pos++
-		case c == ',' || c == ':':
-			d.pos++
-			continue
-		case c == 0:
-			d.fail(ErrSyntax)
-			return false
+			if e := d.peek(); e != '}' && e != ']' {
+				if obj && !d.skipKey() {
+					return false
+				}
+				continue // the first element
+			}
+			// empty: its closer is checked below, as after an element
+		case c == '"':
+			if !d.skipString() {
+				return false
+			}
 		case c == 't' || c == 'f' || c == 'n':
-			if !d.literal("true") && !d.literal("false") && !d.literal("null") {
+			if !d.literal("true") && d.Err == nil && !d.literal("false") && d.Err == nil && !d.literal("null") {
 				d.fail(ErrSyntax)
+			}
+			if d.Err != nil {
 				return false
 			}
 		default:
@@ -522,18 +554,85 @@ func (d *Decoder) Skip() bool {
 				return false
 			}
 		}
-		if depth <= 0 {
-			if d.pos > len(d.data) {
-				d.fail(ErrSyntax)
-				return false
+		// after a value: close finished arrays and objects, or take the comma before the next element
+		for {
+			if depth == 0 {
+				return true
 			}
-			return true
+			obj := objs[(depth-1)/64]&(1<<uint((depth-1)%64)) != 0
+			c = d.peek()
+			if c == ',' {
+				d.pos++
+				if obj && !d.skipKey() {
+					return false
+				}
+				break
+			}
+			if (obj && c == '}') || (!obj && c == ']') {
+				d.pos++
+				depth--
+				continue
+			}
+			d.fail(ErrSyntax)
+			return false
 		}
 	}
 }
 
-// Offset returns how many bytes of the input have been consumed.
-func (d *Decoder) Offset() int { return d.pos }
+// skipKey skips an object key and the colon after it.
+func (d *Decoder) skipKey() bool {
+	if d.peek() != '"' || !d.skipString() {
+		d.fail(ErrSyntax)
+		return false
+	}
+	if d.peek() != ':' {
+		d.fail(ErrSyntax)
+		return false
+	}
+	d.pos++
+	return true
+}
+
+// skipString skips the string at d.pos, checking its escapes and that it holds no control
+// characters.
+func (d *Decoder) skipString() bool {
+	d.pos++
+	for d.pos < len(d.data) {
+		c := d.data[d.pos]
+		d.pos++
+		if c == '"' {
+			return true
+		}
+		if c < 0x20 {
+			d.fail(ErrSyntax)
+			return false
+		}
+		if c != '\\' {
+			continue
+		}
+		if d.pos >= len(d.data) {
+			break
+		}
+		e := d.data[d.pos]
+		d.pos++
+		switch e {
+		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+		case 'u':
+			d.hex4()
+			if d.Err != nil {
+				return false
+			}
+		default:
+			d.fail(ErrSyntax)
+			return false
+		}
+	}
+	d.fail(ErrSyntax)
+	return false
+}
+
+// Offset returns how many bytes of the input have been consumed (at most len(data)).
+func (d *Decoder) Offset() int { return min(d.pos, len(d.data)) }
 
 // Line returns the 1-based line the decoder has reached (where an error was found, after one).
 func (d *Decoder) Line() int {

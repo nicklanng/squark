@@ -136,6 +136,9 @@ func AppendLower(dst []byte, s string) []byte {
 // unsplit remainder.
 func Split(s string into out, sep string, out []string) []string from out {
 	n := 0
+	if len(out) == 0 {
+		return out[:0]
+	}
 	if len(sep) == 0 {
 		start := 0
 		for i := range s {
@@ -171,7 +174,9 @@ func Split(s string into out, sep string, out []string) []string from out {
 	return out[:n]
 }
 
-// Fields splits s around runs of ASCII whitespace into out.
+// Fields splits s around runs of ASCII whitespace into out, returning the used part of out. It
+// stops when out is full and drops the fields after that (unlike Split, which keeps the
+// remainder); size out for the most fields you accept.
 func Fields(s string, out []string) []string {
 	n := 0
 	i := 0

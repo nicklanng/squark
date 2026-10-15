@@ -207,6 +207,7 @@ type ChanType struct {
 }
 
 type Field struct {
+	Doc      []string // a struct field's doc comment
 	Names    []*Ident
 	Type     Expr
 	Variadic bool
@@ -508,6 +509,7 @@ type ArenaDecl struct {
 }
 
 type File struct {
+	Doc        []string // the package doc comment, above the package clause
 	Path       string
 	Package    string
 	Imports    []*ImportSpec

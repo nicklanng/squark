@@ -31,7 +31,6 @@ func AppendUint(dst []byte, v uint64) []byte {
 	return append(dst, tmp[i:]...)
 }
 
-// FormatInt writes v into buf and returns it as a string view of buf.
 // AppendIntBase appends v in base 2 to 36 (lower-case letters for digits over 9), as Go's
 // strconv.AppendInt(dst, v, base) does. Base 16 gives hex.
 func AppendIntBase(dst []byte, v int, base int) []byte from dst {
@@ -77,6 +76,7 @@ func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst {
 	return append(dst, digits...)
 }
 
+// FormatInt writes v in decimal into buf and returns it as a string view of buf.
 func FormatInt(buf []byte, v int) string {
 	return string(AppendInt(buf[:0], v))
 }

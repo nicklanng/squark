@@ -98,7 +98,7 @@ func (p *parser) ident() *Ident {
 }
 
 func (p *parser) file(path string) *File {
-	f := &File{Path: path, Pragmas: p.tok.pragmas}
+	f := &File{Path: path, Pragmas: p.tok.pragmas, Doc: p.tok.doc}
 	p.expect(PACKAGE)
 	f.Package = p.ident().Name
 	p.semi()
@@ -589,7 +589,7 @@ func (p *parser) structType() *StructType {
 	st := &StructType{P: p.expect(STRUCT)}
 	p.expect(LBRACE)
 	for p.tok.tok != RBRACE {
-		f := &Field{}
+		f := &Field{Doc: p.tok.doc}
 		f.Names = append(f.Names, p.ident())
 		for p.got(COMMA) {
 			f.Names = append(f.Names, p.ident())
