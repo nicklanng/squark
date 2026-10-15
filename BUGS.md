@@ -844,6 +844,28 @@ func clobber() { var junk [1024]int; for i := range 1024 { junk[i] = -1 }; print
   spec §4 says only map and channel storage does.
 
  — documented: spec §4 (a vector becomes its `[]T` view; pass `&v` to Push)
+## O: performance follow-ups (2026-10-15)
+
+Measured with `bench/run.sh` at each commit of the section F fixes against `main` (`88e95da`):
+HTTP throughput about 3–5% lower, nbody 3.5% slower, the notes binary 109 → 128 KiB. Still
+1.7–2.3x Go's HTTP throughput at a quarter of its CPU. Not bugs; recorded to win back later.
+
+- [ ] **O1. Skip nil checks the compiler can prove unnecessary.** Every dereference now goes through
+  `SQ_NN` (F7). The cost shows on nbody (1.12s → 1.17s, appears exactly at the codegen commit) and
+  in binary size (+18 KiB of panic call sites). Skip the check where the pointer is known non-nil:
+  `&x`, `&arr[i]`, `&s.f`, a pointer receiver from an addressable variable, `new(T) in a`, or a
+  pointer already checked earlier in the same block with no assignment in between (a small
+  dataflow pass in cgen, or mark such expressions in the checker). Keep the check for large
+  offsets regardless. Verify: nbody back to ~1.12s, `testdata/run/panic_nil_*` still pass.
+- [ ] **O2. Profile the kqueue change path from F14/F47.** The steadiest HTTP scenario (mix
+  80/10/10) drops 143.7k → 138.7k req/s at the runtime commit, before the HTTP rewrite. Suspect:
+  `kq_change`/`kq_flush` sending changes in chunks with `EV_RECEIPT` instead of riding on the next
+  poll's `kevent`, which may add a syscall per request. Count `kevent` calls per request
+  (`dtruss -c` or a counter in the runtime) on `main` and now; restore batching into the poll if
+  that's the difference, keeping F47's handling of failed changes (`EV_ERROR` per change).
+  Also re-measure the HTTP rewrite alone with longer runs (`DURATION=30s`): per-commit numbers
+  were too noisy (±5%) to attribute anything to it.
+
 ## Progress log
 
 Append one line per work session: date, items closed, anything left half-done.
