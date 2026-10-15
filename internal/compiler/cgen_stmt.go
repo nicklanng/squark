@@ -274,7 +274,7 @@ func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
 			g.ind++
 			g.line("%s %s = %s;", g.ctype(m.Key), k, g.coerce(r.Index, m.Key))
 			g.line("%s *%s = sq_map_get(%s, &%s);", g.ctype(m.Value), p, g.expr(r.X), k)
-			g.storeTarget(lhs[0], targets[0], fmt.Sprintf("(%s ? *%s : %s)", p, p, g.zero(m.Value)))
+			g.storeTarget(lhs[0], targets[0], g.reinterp(fmt.Sprintf("(%s ? *%s : %s)", p, p, g.zero(m.Value)), m.Value, lhs[0].info().T))
 			g.storeTarget(lhs[1], targets[1], fmt.Sprintf("(%s != NULL)", p))
 			g.ind--
 			g.line("}")
@@ -282,7 +282,7 @@ func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
 		}
 	case *UnaryExpr:
 		if sr, ok := g.selRecv[r]; ok && r.CommaOk {
-			g.storeTarget(lhs[0], targets[0], sr[0])
+			g.storeTarget(lhs[0], targets[0], g.reinterp(sr[0], r.X.info().T.Underlying().(*Chan).Elem, lhs[0].info().T))
 			g.storeTarget(lhs[1], targets[1], sr[1])
 			return
 		}
@@ -292,7 +292,7 @@ func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
 			g.line("{")
 			g.ind++
 			g.line("%s %s; bool %s = sq_chan_recv(%s, &%s);", g.ctype(et), v, ok, g.expr(r.X), v)
-			g.storeTarget(lhs[0], targets[0], v)
+			g.storeTarget(lhs[0], targets[0], g.reinterp(v, et, lhs[0].info().T))
 			g.storeTarget(lhs[1], targets[1], ok)
 			g.ind--
 			g.line("}")
@@ -484,7 +484,7 @@ func (g *gen) deferCall(d *DeferStmt) string {
 		return strings.Join(parts, "; ")
 	}
 	if call.Callee == nil {
-		return fmt.Sprintf("(%s)(%s)", names[0], strings.Join(names[1:], ", "))
+		return fmt.Sprintf("SQ_NN(%s)(%s)", names[0], strings.Join(names[1:], ", "))
 	}
 	return fmt.Sprintf("%s(%s)", call.Callee.CName, strings.Join(names, ", "))
 }
@@ -542,6 +542,19 @@ func (g *gen) returnStmt(s *ReturnStmt) {
 	case len(s.Results) == 1:
 		// return f() with a tuple result
 		val = g.expr(s.Results[0])
+		if tu, ok := s.Results[0].info().T.(*Tuple); ok && g.ctype(tu) != g.resultC(sig) {
+			// assignable but not identical result types: convert each element
+			t := g.tmp()
+			var parts []string
+			for i, et := range tu.Types {
+				el := fmt.Sprintf("%s.r%d", t, i)
+				if from, to := g.ctype(et), g.ctype(sig.Results[i].Type); from != to {
+					el = fmt.Sprintf("({ %s _v = %s; *(%s*)&_v; })", from, el, to)
+				}
+				parts = append(parts, el)
+			}
+			val = fmt.Sprintf("({ %s %s = %s; (%s){%s}; })", g.ctype(tu), t, val, g.resultC(sig), strings.Join(parts, ", "))
+		}
 	default:
 		var parts []string
 		for i, x := range s.Results {
@@ -808,6 +821,20 @@ func (g *gen) forStmt(s *ForStmt) {
 	g.close()
 }
 
+// rangeVars assigns the key and value of one iteration. Assigning to existing variables, every
+// index and pointer operand on the left is evaluated before either store (spec §5), so
+// `for i, a[i] = range xs` uses the old i.
+func (g *gen) rangeVars(s *RangeStmt, kval string, kt Type, vval string, vt Type) {
+	if s.Define || s.Key == nil || s.Value == nil || isBlank(s.Key) || isBlank(s.Value) {
+		g.rangeVar(s.Key, s.Define, kval, kt)
+		g.rangeVar(s.Value, s.Define, vval, vt)
+		return
+	}
+	targets := g.lhsTargets([]Expr{s.Key, s.Value}, nil)
+	g.storeTarget(s.Key, targets[0], g.reinterp(kval, kt, s.Key.info().T))
+	g.storeTarget(s.Value, targets[1], g.reinterp(vval, vt, s.Value.info().T))
+}
+
 func (g *gen) rangeVar(x Expr, define bool, val string, t Type) {
 	if x == nil || isBlank(x) {
 		return
@@ -817,10 +844,25 @@ func (g *gen) rangeVar(x Expr, define bool, val string, t Type) {
 		g.line("%s = %s;", g.localDecl(v.Type, v.CName), val)
 		return
 	}
-	if g.ctype(x.info().T) != g.ctype(t) {
-		val = fmt.Sprintf("((%s)(%s))", g.ctype(x.info().T), val)
+	g.store(x, g.reinterp(val, t, x.info().T))
+}
+
+// reinterp converts the C value val of type from to the assignable type to (identical underlying
+// types, so a struct or array keeps its layout under another C name).
+func (g *gen) reinterp(val string, from, to Type) string {
+	if from == nil || to == nil || to == tInvalid {
+		return val
 	}
-	g.store(x, val)
+	fc, tc := g.ctype(from), g.ctype(to)
+	if fc == tc {
+		return val
+	}
+	switch to.Underlying().(type) {
+	case *Basic, *Pointer, *Signature:
+		return fmt.Sprintf("((%s)(%s))", tc, val)
+	}
+	v := g.tmp()
+	return fmt.Sprintf("({ %s %s = %s; *(%s*)&%s; })", fc, v, val, tc, v)
 }
 
 func (g *gen) rangeStmt(s *RangeStmt) {
@@ -845,8 +887,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 			g.ind++
 			r := g.tmp()
 			g.line("int32_t %s = sq_decode_rune(%s, %s, &%s);", r, str, i, w)
-			g.rangeVar(s.Key, s.Define, i, tInt)
-			g.rangeVar(s.Value, s.Define, r, tInt32)
+			g.rangeVars(s, i, tInt, r, tInt32)
 			body()
 			g.ind--
 			g.line("}")
@@ -866,8 +907,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		g.line("%s %s = %s;", g.ctype(xt), sl, g.expr(s.X))
 		g.line("for (int64_t %s = 0; %s < %s.len; %s++) {", i, i, sl, i)
 		g.ind++
-		g.rangeVar(s.Key, s.Define, i, tInt)
-		g.rangeVar(s.Value, s.Define, fmt.Sprintf("%s.p[%s]", sl, i), u.Elem)
+		g.rangeVars(s, i, tInt, fmt.Sprintf("%s.p[%s]", sl, i), u.Elem)
 		body()
 		g.ind--
 		g.line("}")
@@ -877,7 +917,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		var src string
 		if p, ok := u.(*Pointer); ok {
 			a = p.Elem.Underlying()
-			src = g.expr(s.X)
+			src = "SQ_NN(" + g.expr(s.X) + ")"
 		} else if s.X.info().Mode == ModeVar {
 			src = "&" + g.expr(s.X)
 		} else {
@@ -889,8 +929,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		g.line("%s *%s = %s;", g.ctype(arr), ptr, src)
 		g.line("for (int64_t %s = 0; %s < %d; %s++) {", i, i, arr.Len, i)
 		g.ind++
-		g.rangeVar(s.Key, s.Define, i, tInt)
-		g.rangeVar(s.Value, s.Define, fmt.Sprintf("%s->a[%s]", ptr, i), arr.Elem)
+		g.rangeVars(s, i, tInt, fmt.Sprintf("%s->a[%s]", ptr, i), arr.Elem)
 		body()
 		g.ind--
 		g.line("}")
@@ -899,8 +938,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		g.line("sq_map *%s = %s;", m, g.expr(s.X))
 		g.line("for (int64_t %s = sq_map_next(%s, 0); %s >= 0; %s = sq_map_next(%s, %s + 1)) {", i, m, i, i, m, i)
 		g.ind++
-		g.rangeVar(s.Key, s.Define, fmt.Sprintf("*(%s*)sq_map_key(%s, %s)", g.ctype(u.Key), m, i), u.Key)
-		g.rangeVar(s.Value, s.Define, fmt.Sprintf("*(%s*)sq_map_val(%s, %s)", g.ctype(u.Value), m, i), u.Value)
+		g.rangeVars(s, fmt.Sprintf("*(%s*)sq_map_key(%s, %s)", g.ctype(u.Key), m, i), u.Key, fmt.Sprintf("*(%s*)sq_map_val(%s, %s)", g.ctype(u.Value), m, i), u.Value)
 		body()
 		g.ind--
 		g.line("}")

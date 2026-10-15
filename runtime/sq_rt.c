@@ -570,13 +570,15 @@ static SQ_NORETURN void die(const char *file, int line) {
 	} else {
 		err_write("0 [scheduler]");
 	}
-	err_write(":\n\t");
-	if (file) {
+	err_write(":\n");
+	if (file) { // a fault in C code has no source position
+		err_write("\t");
 		err_write(file);
 		err_write(":");
 		err_int(line);
+		err_write("\n");
 	}
-	err_write("\nexit status 2\n");
+	err_write("exit status 2\n");
 	_exit(2);
 }
 
@@ -660,6 +662,10 @@ void *sq_arena_grow(sq_arena *a, void *p, int64_t used_bytes, int64_t old_bytes,
 
 void sq_panic_divide(const char *file, int line) {
 	sq_panic_cstr("runtime error: integer divide by zero", file, line);
+}
+
+void sq_panic_nil(const char *file, int line) {
+	sq_panic_cstr("runtime error: invalid memory address or nil pointer dereference", file, line);
 }
 
 static uint8_t sq_sigstack[32768]; // not "sigstack": glibc declares a function of that name

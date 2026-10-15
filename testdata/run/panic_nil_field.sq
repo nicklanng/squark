@@ -1,0 +1,12 @@
+package main
+
+type Config struct{ Port int }
+
+// clang can see c is nil here; it must still panic rather than read garbage
+func port(c *Config) int { return c.Port }
+
+func main() {
+	println("before")
+	println(port(nil))
+	println("after")
+}

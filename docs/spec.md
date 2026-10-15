@@ -102,7 +102,7 @@ arena ...
 | `[N]T` | array (storage) |
 | `[]T` | slice (view) |
 | `[..N]T` | vector: inline storage for N elements plus a length (storage) |
-| `map[K]V cap N` | map storage with fixed capacity N. K is an integer, string, bool or pointer type |
+| `map[K]V cap N` | map storage with fixed capacity N (`cap(m)` is N, also through a view; 0 for a nil map). K is an integer, string, bool or pointer type |
 | `map[K]V` | map view |
 | `chan T cap N` | channel storage with an N-element buffer (`cap 0` = unbuffered) |
 | `chan T` | channel view (no direction types) |
@@ -349,6 +349,9 @@ read-only data.
 
 Integer arithmetic wraps on overflow, division by zero panics, shifts by at least the width
 yield 0 (or -1 for negative signed `>>`), and a negative shift count panics, as in Go.
+Converting a float to an integer type when the value doesn't fit saturates: the result is the
+type's minimum or maximum (Go leaves it implementation-defined), and NaN converts to 0.
+Dereferencing a nil pointer, or calling a nil func value, panics (§9), whatever the offset.
 
 **Order of evaluation.** Calls, method calls and channel receives run left to right as in Go, and
 `a, b = ...` evaluates every index and pointer operand on the left before storing anything. The

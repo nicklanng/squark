@@ -26,12 +26,18 @@ SQ_NORETURN void sq_panic_index(int64_t i, int64_t n, const char *file, int line
 SQ_NORETURN void sq_panic_slice(int64_t lo, int64_t hi, int64_t max, int64_t cap, const char *file, int line);
 SQ_NORETURN void sq_panic_append(int64_t need, int64_t cap, const char *file, int line);
 SQ_NORETURN void sq_panic_divide(const char *file, int line);
+SQ_NORETURN void sq_panic_nil(const char *file, int line);
 
 static inline int64_t sq_idx(int64_t i, int64_t n, const char *file, int line) {
 	if (__builtin_expect((uint64_t)i >= (uint64_t)n, 0)) sq_panic_index(i, n, file, line);
 	return i;
 }
 #define SQ_IDX(i, n) sq_idx((i), (n), __FILE__, __LINE__)
+
+// SQ_NN checks a pointer before it is dereferenced. A fault would catch most nil dereferences,
+// but not a large offset from nil, and C lets the compiler assume a dereferenced pointer is
+// non-null; the check also gives the panic a source position.
+#define SQ_NN(p) ({ __auto_type sq__nn = (p); if (__builtin_expect(!sq__nn, 0)) sq_panic_nil(__FILE__, __LINE__); sq__nn; })
 
 static inline void sq_slice_check(int64_t lo, int64_t hi, int64_t max, int64_t cap, const char *file, int line) {
 	if (__builtin_expect(!(0 <= lo && lo <= hi && hi <= max && (uint64_t)max <= (uint64_t)cap), 0))
@@ -66,6 +72,22 @@ static inline uint64_t sq_shl(uint64_t x, uint64_t n, int width) { return n >= (
 static inline uint64_t sq_shru(uint64_t x, uint64_t n, int width) { return n >= (uint64_t)width ? 0 : x >> n; }
 static inline int64_t sq_shrs(int64_t x, uint64_t n, int width) { return n >= (uint64_t)width ? (x < 0 ? -1 : 0) : x >> n; }
 
+// Float to integer conversions saturate at the target's range; NaN gives 0. bits is the
+// target's width; the caller casts the result to the target type.
+static inline int64_t sq_f2i(double x, int bits) {
+	double lim = bits == 64 ? 9223372036854775808.0 : (double)((int64_t)1 << (bits - 1));
+	if (x != x) return 0;
+	if (x >= lim) return bits == 64 ? INT64_MAX : (int64_t)lim - 1;
+	if (x <= -lim) return bits == 64 ? INT64_MIN : -(int64_t)lim;
+	return (int64_t)x;
+}
+static inline uint64_t sq_f2u(double x, int bits) {
+	double lim = bits == 64 ? 18446744073709551616.0 : (double)((uint64_t)1 << bits);
+	if (x != x || x <= -1.0) return 0;
+	if (x >= lim) return bits == 64 ? UINT64_MAX : (uint64_t)lim - 1;
+	return (uint64_t)x;
+}
+
 // ---- strings ----
 static inline bool sq_str_eq(sq_string a, sq_string b) {
 	return a.len == b.len && (a.p == b.p || a.len == 0 || memcmp(a.p, b.p, (size_t)a.len) == 0);
@@ -75,6 +97,11 @@ static inline int sq_str_cmp(sq_string a, sq_string b) {
 	int c = n > 0 ? memcmp(a.p, b.p, (size_t)n) : 0;
 	if (c != 0) return c;
 	return a.len < b.len ? -1 : a.len > b.len ? 1 : 0;
+}
+// sq_err_msg makes an error's message non-NULL: a NULL message pointer is what makes it nil.
+static inline sq_string sq_err_msg(sq_string s) {
+	if (!s.p) s.p = (const uint8_t *)"";
+	return s;
 }
 static inline bool sq_err_eq(sq_error a, sq_error b) {
 	return a.code == b.code && (a.msg.p == b.msg.p || (a.msg.p && b.msg.p && sq_str_eq(a.msg, b.msg)));
@@ -245,6 +272,7 @@ void *sq_map_put(sq_map *m, const void *key, const char *file, int line);
 void sq_map_delete(sq_map *m, const void *key);
 int64_t sq_map_next(sq_map *m, int64_t i);
 static inline int64_t sq_map_len(sq_map *m) { return m ? m->len : 0; }
+static inline int64_t sq_map_cap(sq_map *m) { return m ? m->maxlen : 0; } // entries it can hold
 static inline void *sq_map_key(sq_map *m, int64_t i) { return m->keys + i * m->keysize; }
 static inline void *sq_map_val(sq_map *m, int64_t i) { return m->vals + i * m->valsize; }
 

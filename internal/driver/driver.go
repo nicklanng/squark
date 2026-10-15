@@ -157,7 +157,16 @@ func Build(opt Options) (*Result, error) {
 	}
 
 	// one section per function and datum, so the linker drops what the program doesn't use
-	cflags := []string{opt.OptFlag, "-std=gnu11", "-pthread", "-fwrapv", "-fno-strict-aliasing", "-w", "-fstack-usage", "-ffunction-sections", "-fdata-sections", "-I", work}
+	cflags := []string{opt.OptFlag, "-std=gnu11", "-pthread", "-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks", "-fno-strict-float-cast-overflow", "-w", "-fstack-usage", "-ffunction-sections", "-fdata-sections", "-I", work}
+	if runtime.GOOS == "linux" {
+		// A C frame (or VLA) larger than a page must touch each page on the way down, or it can
+		// jump over a goroutine stack's one guard page into the next stack. gcc on arm64 assumes a
+		// 64 KiB guard unless told the page size. (macOS probes large frames already.)
+		cflags = append(cflags, "-fstack-clash-protection")
+		if runtime.GOARCH == "arm64" {
+			cflags = append(cflags, "--param=stack-clash-protection-guard-size=12")
+		}
+	}
 	if opt.Sanitize != "" {
 		cflags = append(cflags, "-fsanitize="+opt.Sanitize, "-g")
 	}

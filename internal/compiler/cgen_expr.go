@@ -117,7 +117,7 @@ func (g *gen) exprRaw(x Expr) string {
 	case *SliceExpr:
 		return g.sliceExpr(e)
 	case *StarExpr:
-		return "(*" + g.expr(e.X) + ")"
+		return "(*SQ_NN(" + g.expr(e.X) + "))"
 	case *UnaryExpr:
 		return g.unaryExpr(e)
 	case *BinaryExpr:
@@ -181,7 +181,7 @@ func (g *gen) selector(e *SelectorExpr) string {
 		f := st.(*Struct).Fields[e.Path[0]]
 		fn := fieldName(f.Name, e.Path[0])
 		if e.Implicit == "*" {
-			return "(" + g.expr(e.X) + ")->" + fn
+			return "SQ_NN(" + g.expr(e.X) + ")->" + fn
 		}
 		return "(" + g.expr(e.X) + ")." + fn
 	}
@@ -209,10 +209,15 @@ func (g *gen) indexExpr(e *IndexExpr) string {
 		return fmt.Sprintf("({ %s %s = %s; %s.a[%s]; })", g.ctype(e.X.info().T), t, g.expr(e.X), t, checked(fmt.Sprint(u.Len)))
 	case *Pointer:
 		a := u.Elem.Underlying().(*Array)
-		return fmt.Sprintf("(%s)->a[%s]", g.expr(e.X), checked(fmt.Sprint(a.Len)))
+		return fmt.Sprintf("SQ_NN(%s)->a[%s]", g.expr(e.X), checked(fmt.Sprint(a.Len)))
 	case *Slice:
 		if isSimpleC(e.X) {
 			s := g.expr(e.X)
+			if hasCall(e.Index) {
+				// the index's calls may change s: read its pointer and length together, afterwards
+				i := g.tmp()
+				return fmt.Sprintf("(*({ int64_t %s = %s; &(%s).p[SQ_IDX(%s, (%s).len)]; }))", i, idx, s, i, s)
+			}
 			return fmt.Sprintf("(%s).p[%s]", s, checked("("+s+").len"))
 		}
 		t := g.tmp()
@@ -220,6 +225,10 @@ func (g *gen) indexExpr(e *IndexExpr) string {
 	case *Basic:
 		if isSimpleC(e.X) {
 			s := g.expr(e.X)
+			if hasCall(e.Index) {
+				i := g.tmp()
+				return fmt.Sprintf("({ int64_t %s = %s; (%s).p[SQ_IDX(%s, (%s).len)]; })", i, idx, s, i, s)
+			}
 			return fmt.Sprintf("(%s).p[%s]", s, checked("("+s+").len"))
 		}
 		t := g.tmp()
@@ -261,7 +270,7 @@ func (g *gen) sliceExpr(e *SliceExpr) string {
 		fmt.Fprintf(&b, "SQ_SLICE_CHECK(%s, %s, %s, %s); (%s){%s + %s, %s - %s, %s - %s}; })", lo, hi, max, n, resT, t, lo, hi, lo, max, lo)
 	case *Pointer:
 		a := u.Elem.Underlying().(*Array)
-		fmt.Fprintf(&b, "({ %s *%s = (%s)->a; ", g.ctype(a.Elem), t, g.expr(e.X))
+		fmt.Fprintf(&b, "({ %s *%s = SQ_NN(%s)->a; ", g.ctype(a.Elem), t, g.expr(e.X))
 		n := fmt.Sprint(a.Len)
 		fmt.Fprintf(&b, "int64_t %s = %s, %s = %s, %s = %s; ", lo, bound(e.Lo, "0"), hi, bound(e.Hi, n), max, bound(e.Max, n))
 		fmt.Fprintf(&b, "SQ_SLICE_CHECK(%s, %s, %s, %s); (%s){%s + %s, %s - %s, %s - %s}; })", lo, hi, max, n, resT, t, lo, hi, lo, max, lo)
@@ -296,7 +305,11 @@ func (g *gen) unaryExpr(e *UnaryExpr) string {
 			return r[0]
 		}
 		v := g.tmp()
-		return fmt.Sprintf("({ %s %s; sq_chan_recv(%s, &%s); %s; })", g.ctype(e.T), v, g.expr(e.X), v, v)
+		t := e.T
+		if e.View != nil { // a received vector used as a view: receive the vector itself
+			t = e.View
+		}
+		return fmt.Sprintf("({ %s %s; sq_chan_recv(%s, &%s); %s; })", g.ctype(t), v, g.expr(e.X), v, v)
 	case SUB:
 		return g.wrapSmall(e.T, "-"+"("+g.expr(e.X)+")")
 	case ADD:
@@ -618,7 +631,7 @@ func (g *gen) callArgs(e *CallExpr, sig *Signature) []string {
 		case "&":
 			recv = "&" + recv
 		case "*":
-			recv = "*" + recv
+			recv = "*SQ_NN(" + recv + ")"
 		}
 		args = append(args, recv)
 	}
@@ -667,7 +680,7 @@ func (g *gen) callExpr(e *CallExpr) string {
 	if e.Callee != nil {
 		fn = e.Callee.CName
 	} else {
-		fn = "(" + g.expr(e.Fun) + ")"
+		fn = "SQ_NN(" + g.expr(e.Fun) + ")"
 	}
 	// Go evaluates arguments left to right; C does not promise that.
 	calls := 0
@@ -739,6 +752,14 @@ func (g *gen) conversion(e *CallExpr) string {
 	if fc == tc {
 		return s
 	}
+	if isFloat(from) && isInteger(to) {
+		// a value out of range saturates (spec §5) rather than being C undefined behaviour
+		bits := sizeofBasic(to.Underlying().(*Basic).Kind) * 8
+		if isUnsigned(to) {
+			return fmt.Sprintf("((%s)sq_f2u(%s, %d))", tc, s, bits)
+		}
+		return fmt.Sprintf("((%s)sq_f2i(%s, %d))", tc, s, bits)
+	}
 	switch to.Underlying().(type) {
 	case *Basic, *Pointer, *Signature:
 		return fmt.Sprintf("((%s)(%s))", tc, s)
@@ -772,6 +793,9 @@ func (g *gen) builtinCall(e *CallExpr) string {
 		}
 		switch t.(type) {
 		case *Map:
+			if e.Builtin == "cap" {
+				return "sq_map_cap(" + g.expr(x) + ")"
+			}
 			return "sq_map_len(" + g.expr(x) + ")"
 		case *Chan:
 			if e.Builtin == "cap" {
@@ -975,10 +999,18 @@ func (g *gen) builtinCall(e *CallExpr) string {
 		fmt.Fprintf(&b, "%s; })", r)
 		return b.String()
 	case "__error":
-		if len(args) == 1 {
-			return fmt.Sprintf("((sq_error){1, %s})", g.coerce(args[0], tString))
+		// a nil error is one whose message pointer is NULL, so a message that may be an empty
+		// string (with a NULL pointer) goes through sq_err_msg
+		msg := func(x Expr) string {
+			if x.info().Const != nil {
+				return g.coerce(x, tString)
+			}
+			return "sq_err_msg(" + g.coerce(x, tString) + ")"
 		}
-		return fmt.Sprintf("((sq_error){%s, %s})", g.coerce(args[0], tInt), g.coerce(args[1], tString))
+		if len(args) == 1 {
+			return fmt.Sprintf("((sq_error){1, %s})", msg(args[0]))
+		}
+		return fmt.Sprintf("((sq_error){%s, %s})", g.coerce(args[0], tInt), msg(args[1]))
 	case "error.Error":
 		se := unparen(e.Fun).(*SelectorExpr)
 		return "(" + g.expr(se.X) + ").msg"

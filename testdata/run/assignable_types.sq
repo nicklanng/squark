@@ -1,0 +1,39 @@
+package main
+
+// Values of an assignable (identical underlying, differently named) type: a returned tuple,
+// comma-ok forms and range assignment each convert to the target's C type.
+type Pair struct{ a, b int }
+type Ints []int
+
+var store [4]int
+
+func f() (Ints, error) { return store[:], nil }
+func g() ([]int, error) { return f() }
+
+func h() (struct{ a, b int }, bool) { return struct{ a, b int }{1, 2}, true }
+func k() (Pair, bool)              { return h() }
+
+func f4() (Ints, int, error, error) { return store[:], 2, nil, nil }
+func viaTry() ([]int, int, error)   { return try f4() }
+
+func main() {
+	x, _ := g()
+	p, ok := k()
+	y, n, _ := viaTry()
+	println(len(x), p.b, ok, len(y), n)
+
+	var m map[int]struct{ a, b int } cap 2
+	m[1] = Pair{3, 4}
+	p, ok = m[1]
+	println(p.b, ok)
+
+	var c chan struct{ a, b int } cap 1
+	c <- Pair{5, 6}
+	p, ok = <-c
+	println(p.a, ok)
+
+	ps := [1]struct{ a, b int }{{7, 8}}
+	for _, p = range ps {
+	}
+	println(p.b)
+}

@@ -1,0 +1,16 @@
+package main
+
+// A nil pointer to a huge array: the offset of p[i] is far past any unmapped page, so only an
+// explicit check stops the write from landing in h.
+var h [8]int
+var gp *[1 << 36]int
+
+type Config struct{ Port int }
+
+func port(c *Config) int { return c.Port }
+
+func main() {
+	var gt *Config
+	println(&gt.Port == nil) // never printed: taking the address of a nil pointer's field panics
+	_ = port
+}

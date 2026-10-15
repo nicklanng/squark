@@ -1,0 +1,11 @@
+package main
+
+var h [8]int
+var gp *[1 << 36]int
+
+func main() {
+	p := gp
+	idx := int(uintptr(rawptr(&h[0])) / 8)
+	p[idx] = 42
+	println("h[0] =", h[0])
+}
