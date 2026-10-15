@@ -12,7 +12,9 @@ note (what changed, which test covers it) when an item is done.
    - missing/wrong diagnostic → `testdata/errors/<name>.sq` with `// ERROR "substring"` on the line;
    - driver/CLI/harness → a Go test in `internal/driver/driver_test.go`;
    - stdlib networking (http/net) → a run test is hard; a Go test that starts the binary is fine.
-2. Fix, then `go build -o bin/squark ./cmd/squark && go test ./internal/...`.
+2. Fix, then `go build -o bin/squark ./cmd/squark && go test ./internal/...`. For checker or
+   codegen changes, also fuzz (`SQUARK_FUZZ=5000 go test ./internal/driver -run TestFuzzSoundness
+   -v -timeout 1h`); a fuzz finding becomes a new item with its mutant as the repro.
 3. Tick the box, write `— fixed: <what>; test: <file>` after the title.
 4. If a fix changes documented behaviour, update `docs/spec.md` (and `docs/gen.sh` for stdlib docs).
 
@@ -865,6 +867,14 @@ HTTP throughput about 3–5% lower, nbody 3.5% slower, the notes binary 109 → 
   that's the difference, keeping F47's handling of failed changes (`EV_ERROR` per change).
   Also re-measure the HTTP rewrite alone with longer runs (`DURATION=30s`): per-commit numbers
   were too noisy (±5%) to attribute anything to it.
+
+## Z: found by fuzzing (`TestFuzzSoundness`)
+
+- [x] **Z1. Sizing a type that contains itself by value overflows the compiler's stack** (bug,
+  compiler crash; introduced by F38's `sizeBound`) — fixed: `sizeBoundSeen` stops at a named type it
+  is already inside; test: `testdata/errors/type_cycle_size.sq`
+  `type V struct{ x int; v [..2]V }` with `var g [..2]V`: the cycle is reported, then sizing
+  `[..2]V` recursed forever. Found within the first 5000 mutants.
 
 ## Progress log
 

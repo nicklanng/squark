@@ -246,7 +246,8 @@ func Build(opt Options) (*Result, error) {
 	}
 
 	// stack proving
-	frames, rtFrames, err := readStackUsage(filepath.Join(work, "prog.su"))
+	asan := opt.Sanitize == "address"
+	frames, rtFrames, err := readStackUsage(filepath.Join(work, "prog.su"), asan)
 	if err != nil {
 		return nil, err
 	}
@@ -305,6 +306,11 @@ func Build(opt Options) (*Result, error) {
 	}
 	for i, p := range out.Pools {
 		need := sizes[p] + margin
+		if asan {
+			// AddressSanitizer pads every frame with redzones (and makes some frames dynamic):
+			// the proof doesn't hold, so give its builds ample stacks instead
+			need = need*4 + 256<<10
+		}
 		usable := (need + page - 1) / page * page
 		slot := usable + page // guard page
 		p.StackSize = need
@@ -399,7 +405,7 @@ func Build(opt Options) (*Result, error) {
 		mem.CLibs = append(mem.CLibs, p.Links...)
 	}
 	res.Memory = mem
-	if prog.Budget > 0 && mem.Worst() > prog.Budget {
+	if prog.Budget > 0 && mem.Worst() > prog.Budget && !asan { // ASan stacks are padded, not proven
 		return res, fmt.Errorf("memory budget exceeded: worst case %s > budget %s\n%sto fit: lower task pool sizes (task f() pool N), shrink package arenas, arrays and channel capacities, use fewer threads or workers, or raise the budget", human(mem.Worst()), human(prog.Budget), FormatMemory(mem))
 	}
 	return res, nil
@@ -495,9 +501,10 @@ func absDir(d string) string {
 }
 
 // readStackUsage parses clang -fstack-usage output: "file:line:col:func<TAB>bytes<TAB>qualifiers".
-// It returns every function's frame, and separately the runtime's (defined in sq_rt.c or its
+// With allowDynamic (sanitizer builds) a dynamic frame counts its static part. It returns every
+// function's frame, and separately the runtime's (defined in sq_rt.c or its
 // headers; the program's functions carry #line directives naming their .sq files).
-func readStackUsage(path string) (frames, rt map[string]int64, err error) {
+func readStackUsage(path string, allowDynamic bool) (frames, rt map[string]int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading stack usage: %v", err)
@@ -516,7 +523,7 @@ func readStackUsage(path string) (frames, rt map[string]int64, err error) {
 		if err != nil {
 			continue
 		}
-		if strings.Contains(parts[2], "dynamic") && !strings.Contains(parts[2], "bounded") {
+		if strings.Contains(parts[2], "dynamic") && !strings.Contains(parts[2], "bounded") && !allowDynamic {
 			return nil, nil, fmt.Errorf("function %s has a dynamically sized stack frame; cannot prove its stack size", name)
 		}
 		if n > frames[name] {

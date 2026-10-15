@@ -12,4 +12,9 @@ the compiler with `go build -o bin/squark ./cmd/squark`. Compiler errors name th
 error table maps each one to the usual rewrite.
 
 Working on the compiler itself: `go test ./internal/...` runs the error-annotation tests
-(`testdata/errors`) and the run tests (`testdata/run`, `.sq` + expected `.out`).
+(`testdata/errors`) and the run tests (`testdata/run`, `.sq` + expected `.out`), and the run tests
+again under AddressSanitizer (`TestRunASan`: a report means the lifetime checker let a reference
+outlive its memory; `-short` skips it). After changing the checker or codegen, fuzz:
+`SQUARK_FUZZ=5000 go test ./internal/driver -run TestFuzzSoundness -v -timeout 1h` mutates the test
+programs and runs the accepted ones under ASan, reporting ASan errors, compiler crashes and C the
+compiler generates but clang rejects (findings land in a temp dir the log names).

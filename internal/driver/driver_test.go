@@ -97,7 +97,11 @@ func TestErrors(t *testing.T) {
 // TestRun builds each testdata/run program (and each example with an expected.out) and compares
 // its stdout with the .out file.
 // Programs whose name starts with "panic_" must exit with status 2.
-func TestRun(t *testing.T) {
+func TestRun(t *testing.T) { runPrograms(t, "") }
+
+// runPrograms is TestRun, optionally with a sanitizer: under "address" a program must also run
+// without an AddressSanitizer report.
+func runPrograms(t *testing.T, sanitize string) {
 	files, _ := filepath.Glob("../../testdata/run/*.sq")
 	// examples with an expected.out run too (servers run a scripted client against themselves)
 	outs, _ := filepath.Glob("../../examples/*/expected.out")
@@ -118,13 +122,19 @@ func TestRun(t *testing.T) {
 				os.WriteFile(filepath.Join(dir, "main.sq"), src, 0o644)
 			}
 			bin := filepath.Join(t.TempDir(), name)
-			if _, err := Build(Options{Dir: dir, Output: bin}); err != nil {
+			if _, err := Build(Options{Dir: dir, Output: bin, Sanitize: sanitize}); err != nil {
 				t.Fatal(err)
 			}
 			cmd := exec.Command(bin)
+			if sanitize == "address" {
+				cmd.Env = append(os.Environ(), "ASAN_OPTIONS="+asanOptions)
+			}
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			err := cmd.Run()
+			if strings.Contains(stderr.String(), "AddressSanitizer") {
+				t.Fatalf("AddressSanitizer report (the lifetime checker let an unsafe reference through?):\n%s", stderr.String())
+			}
 			if strings.HasPrefix(name, "panic_") {
 				ee, ok := err.(*exec.ExitError)
 				if !ok || ee.ExitCode() != 2 || !strings.Contains(stderr.String(), "panic:") {

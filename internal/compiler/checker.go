@@ -457,7 +457,11 @@ func (c *Checker) checkPool(x Expr, n int64) {
 
 // sizeBound is an upper bound on the bytes a value of type t occupies, saturating at
 // MaxSize+1 (padding is approximated generously).
-func sizeBound(t Type) int64 {
+func sizeBound(t Type) int64 { return sizeBoundSeen(t, map[*Named]bool{}) }
+
+// sizeBoundSeen stops at a named type it is already inside: a type containing itself by value is
+// reported by checkValueCycle, and counts as 0 here.
+func sizeBoundSeen(t Type, seen map[*Named]bool) int64 {
 	const over = MaxSize + 1
 	mul := func(n, m int64) int64 {
 		if n != 0 && m > over/n {
@@ -469,25 +473,27 @@ func sizeBound(t Type) int64 {
 	case nil:
 		return 0
 	case *Named:
-		if u.underlying == nil {
+		if u.underlying == nil || seen[u] {
 			return 0
 		}
-		return sizeBound(u.underlying)
+		seen[u] = true
+		defer delete(seen, u)
+		return sizeBoundSeen(u.underlying, seen)
 	case *Basic:
 		return sizeofBasic(u.Kind)
 	case *Array:
-		return mul(u.Len, sizeBound(u.Elem))
+		return mul(u.Len, sizeBoundSeen(u.Elem, seen))
 	case *VecType:
-		return min(8+mul(u.Len, sizeBound(u.Elem)), over)
+		return min(8+mul(u.Len, sizeBoundSeen(u.Elem, seen)), over)
 	case *MapStore:
 		// the table has about twice cap slots, each a key, a value and a control byte
-		return min(64+mul(2*u.Cap+16, sizeBound(u.Key)+sizeBound(u.Value)+1), over)
+		return min(64+mul(2*u.Cap+16, sizeBoundSeen(u.Key, seen)+sizeBoundSeen(u.Value, seen)+1), over)
 	case *ChanStore:
-		return min(128+mul(max(u.Cap, 1), sizeBound(u.Elem)), over)
+		return min(128+mul(max(u.Cap, 1), sizeBoundSeen(u.Elem, seen)), over)
 	case *Struct:
 		var n int64
 		for _, f := range u.Fields {
-			n = min(n+sizeBound(f.Type)+8, over)
+			n = min(n+sizeBoundSeen(f.Type, seen)+8, over)
 		}
 		return n
 	}
