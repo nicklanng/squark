@@ -292,6 +292,11 @@ type Var struct {
 	Shared    bool // shared var: one copy for every scheduler thread, read-only after initialization
 	Thread    bool // thread var: one copy per scheduler thread, like var, declared so on purpose
 
+	// for eliding nil checks: a local declared with &x, &T{} or new(T) in a is never nil unless
+	// it is assigned again or its address is taken (Changed)
+	NonNilInit bool
+	Changed    bool
+
 	ArenaSize     int64 // for arenas
 	ArenaSizeExpr Expr
 	Spec          *ValueSpec // a package variable's declaration

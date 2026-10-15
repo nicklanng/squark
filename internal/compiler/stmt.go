@@ -158,6 +158,7 @@ func (c *Checker) checkAssignTarget(x Expr) bool {
 		c.errorf(x.Pos(), "cannot assign to %s (%s)", exprString(x), constWhat(x, root))
 		return false
 	}
+	changed(x)
 	if xi.Mode == ModeVar || xi.Mode == ModeMapIndex {
 		if id, ok := unparen(x).(*Ident); ok && id.Obj != nil && id.Obj.Var != nil && id.Obj.Var.Param && c.fn != nil {
 			// params are assignable locals
@@ -278,6 +279,7 @@ func (c *Checker) assign(s *AssignStmt) {
 				continue
 			}
 			if o := c.scope.LookupLocal(id.Name); o != nil && o.Kind == ObjVar {
+				o.Var.Changed = true // redeclared by :=, so assigned
 				id.Obj = o
 				id.T, id.Mode = o.Var.Type, ModeVar
 				if ts != nil && len(s.Rhs) == len(s.Lhs) {
@@ -297,7 +299,8 @@ func (c *Checker) assign(s *AssignStmt) {
 			if _, isTuple := t.(*Tuple); isTuple {
 				t = tInvalid
 			}
-			c.declareVar(id, t)
+			v := c.declareVar(id, t)
+			v.NonNilInit = len(s.Rhs) == len(s.Lhs) && nonNilExpr(s.Rhs[i])
 		}
 		if !anyNew {
 			c.errorf(s.P, "no new variables on left side of :=")
@@ -820,9 +823,30 @@ func (c *Checker) declStmt(d *GenDecl) {
 						t = ts[i]
 					}
 				}
-				c.declareVar(name, t)
+				v := c.declareVar(name, t)
+				v.NonNilInit = len(vs.Values) == len(vs.Names) && nonNilExpr(vs.Values[i])
 			}
 		}
+	}
+}
+
+// nonNilExpr reports an expression whose pointer value can't be nil: &x, &T{...}, new(T) in a.
+func nonNilExpr(x Expr) bool {
+	switch e := unparen(x).(type) {
+	case *UnaryExpr:
+		return e.Op == AND
+	case *InExpr:
+		return nonNilExpr(e.X)
+	case *CallExpr:
+		return e.Builtin == "new"
+	}
+	return false
+}
+
+// changed records that x, if it names a variable, gets a new value (or may, through its address).
+func changed(x Expr) {
+	if id, ok := unparen(x).(*Ident); ok && id.Obj != nil && id.Obj.Var != nil {
+		id.Obj.Var.Changed = true
 	}
 }
 

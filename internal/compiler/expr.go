@@ -1223,6 +1223,7 @@ func (c *Checker) unary(e *UnaryExpr, hint Type) {
 			c.invalid(e)
 			return
 		}
+		changed(e.X) // through &p, p itself may change
 		e.T, e.Mode = &Pointer{Elem: e.X.info().T}, ModeValue
 		return
 	}

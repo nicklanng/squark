@@ -1,0 +1,15 @@
+package main
+
+// changed through its address only: the nil check must stay
+type P struct{ v int }
+
+//squark:noinline
+func viaAddr(pp **P) { *pp = nil }
+
+func main() {
+	x := P{1}
+	q := &x
+	viaAddr(&q)
+	println("before")
+	println(q.v)
+}

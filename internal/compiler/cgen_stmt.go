@@ -917,7 +917,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		var src string
 		if p, ok := u.(*Pointer); ok {
 			a = p.Elem.Underlying()
-			src = "SQ_NN(" + g.expr(s.X) + ")"
+			src = g.nn(s.X)
 		} else if s.X.info().Mode == ModeVar {
 			src = "&" + g.expr(s.X)
 		} else {

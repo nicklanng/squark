@@ -97,6 +97,26 @@ func (g *gen) view(x Expr) string {
 	return raw
 }
 
+// nn emits pointer x for a dereference: through SQ_NN, a nil check, unless x can't be nil (&v,
+// &T{}, new(T), or a local declared with one of those and never changed).
+func (g *gen) nn(x Expr) string {
+	if knownNonNil(x) {
+		return "(" + g.expr(x) + ")"
+	}
+	return "SQ_NN(" + g.expr(x) + ")"
+}
+
+func knownNonNil(x Expr) bool {
+	if nonNilExpr(x) {
+		return true
+	}
+	if id, ok := unparen(x).(*Ident); ok && id.Obj != nil && id.Obj.Kind == ObjVar {
+		v := id.Obj.Var
+		return v.NonNilInit && !v.Changed && !v.Global && !v.Param
+	}
+	return false
+}
+
 func (g *gen) exprRaw(x Expr) string {
 	xi := x.info()
 	if xi.Const != nil {
@@ -117,7 +137,7 @@ func (g *gen) exprRaw(x Expr) string {
 	case *SliceExpr:
 		return g.sliceExpr(e)
 	case *StarExpr:
-		return "(*SQ_NN(" + g.expr(e.X) + "))"
+		return "(*" + g.nn(e.X) + ")"
 	case *UnaryExpr:
 		return g.unaryExpr(e)
 	case *BinaryExpr:
@@ -181,7 +201,7 @@ func (g *gen) selector(e *SelectorExpr) string {
 		f := st.(*Struct).Fields[e.Path[0]]
 		fn := fieldName(f.Name, e.Path[0])
 		if e.Implicit == "*" {
-			return "SQ_NN(" + g.expr(e.X) + ")->" + fn
+			return g.nn(e.X) + "->" + fn
 		}
 		return "(" + g.expr(e.X) + ")." + fn
 	}
@@ -209,7 +229,7 @@ func (g *gen) indexExpr(e *IndexExpr) string {
 		return fmt.Sprintf("({ %s %s = %s; %s.a[%s]; })", g.ctype(e.X.info().T), t, g.expr(e.X), t, checked(fmt.Sprint(u.Len)))
 	case *Pointer:
 		a := u.Elem.Underlying().(*Array)
-		return fmt.Sprintf("SQ_NN(%s)->a[%s]", g.expr(e.X), checked(fmt.Sprint(a.Len)))
+		return fmt.Sprintf("%s->a[%s]", g.nn(e.X), checked(fmt.Sprint(a.Len)))
 	case *Slice:
 		if isSimpleC(e.X) {
 			s := g.expr(e.X)
@@ -270,7 +290,7 @@ func (g *gen) sliceExpr(e *SliceExpr) string {
 		fmt.Fprintf(&b, "SQ_SLICE_CHECK(%s, %s, %s, %s); (%s){%s + %s, %s - %s, %s - %s}; })", lo, hi, max, n, resT, t, lo, hi, lo, max, lo)
 	case *Pointer:
 		a := u.Elem.Underlying().(*Array)
-		fmt.Fprintf(&b, "({ %s *%s = SQ_NN(%s)->a; ", g.ctype(a.Elem), t, g.expr(e.X))
+		fmt.Fprintf(&b, "({ %s *%s = %s->a; ", g.ctype(a.Elem), t, g.nn(e.X))
 		n := fmt.Sprint(a.Len)
 		fmt.Fprintf(&b, "int64_t %s = %s, %s = %s, %s = %s; ", lo, bound(e.Lo, "0"), hi, bound(e.Hi, n), max, bound(e.Max, n))
 		fmt.Fprintf(&b, "SQ_SLICE_CHECK(%s, %s, %s, %s); (%s){%s + %s, %s - %s, %s - %s}; })", lo, hi, max, n, resT, t, lo, hi, lo, max, lo)
@@ -626,12 +646,14 @@ func hasCall(x Expr) bool {
 func (g *gen) callArgs(e *CallExpr, sig *Signature) []string {
 	var args []string
 	if se, ok := unparen(e.Fun).(*SelectorExpr); ok && se.Kind == SelMethod {
-		recv := g.expr(se.X)
+		var recv string
 		switch se.Implicit {
 		case "&":
-			recv = "&" + recv
+			recv = "&" + g.expr(se.X)
 		case "*":
-			recv = "*SQ_NN(" + recv + ")"
+			recv = "*" + g.nn(se.X)
+		default:
+			recv = g.expr(se.X)
 		}
 		args = append(args, recv)
 	}
