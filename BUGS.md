@@ -491,6 +491,359 @@ language as a user would. Repros below are minimal; the examples carry workaroun
   helper stacks are at least 64 KiB; ~350 KiB of runtime data per thread; a `net.Conn` (an fd) may
   cross threads; using one fd from two goroutines; `stdlib.md` drops the doc comments in `std/`.
 
+## F: second whole-project review (2026-10-15)
+
+Five reviewers in parallel (lifetime checker, front end, codegen, C runtime, stdlib + driver)
+against `88e95da`. Every item was reproduced with `bin/squark` unless marked *(by inspection)*.
+Where two reviewers found the same thing, it is listed once. "+clobber" means the repro adds:
+```go
+//squark:noinline
+func clobber() { var junk [1024]int; for i := range 1024 { junk[i] = -1 }; println(junk[7]) }
+```
+
+### P0: memory safety, security, silent miscompiles
+
+- [x] **F1. `&x` of a 4-level value drops the deepest region level** (bug, memory-unsafe; any
+  linked list is 4 levels) — fixed: `prepend` collapses the vector's last two levels into the new last one instead of dropping the deepest; test: `testdata/errors/escape_deep.sq`
+  `lifetime.go:379-390` (`prepend`): `copy(out[1:], v[:levels-1])` discards `v[levels-1]`. Same
+  path serves `&x`, array slicing, storage views and implicit `&` receivers.
+  ```go
+  type Node struct{ next *Node; val *int }
+  var tail Node
+  func (n *Node) setThird(p *int) { n.next.next.next.val = p }
+  //squark:noinline
+  func f() { x := 1234; var b, a, n Node; b.next = &tail; a.next = &b; n.next = &a; n.setThird(&x) }
+  func main() { f(); clobber(); println(*tail.val) }   // +clobber; check passes, prints garbage
+  ```
+  Writing `n.next.next.next.val = &x` directly is rejected. Fix: collapse the last two levels
+  (`l.equal(v[levels-2], v[levels-1])`) instead of dropping one.
+
+- [x] **F2. A deferred call can set a named result to a dangling pointer** (bug, memory-unsafe) — fixed: with deferred calls, named results are tied to the results at function entry; test: `testdata/errors/escape_defer_result.sq`
+  `lifetime.go:1423-1449` (`returnStmt`) ties named results to the results only on a bare return,
+  but since C1 the named variables are what gets returned after defers run.
+  ```go
+  var g int = 5
+  func set(pp **int, q *int) { *pp = q }
+  //squark:noinline
+  func f() (res *int) { var local int = 1234; defer set(&res, &local); return &g }
+  func main() { p := f(); clobber(); println(*p) }   // +clobber
+  ```
+  Fix: with defers and named results, always `assign(l.results[i], l.varVec(r))`.
+
+- [x] **F3. `try` / `in a` around a multi-value call constrains only the first result** (bug,
+  memory-unsafe) — fixed: `callResults` unwraps `TryExpr` and `InExpr`; test: `testdata/errors/escape_multi.sq`
+  `lifetime.go:904-909` `callResults` unwraps neither `TryExpr` nor `InExpr` (used by `DeclStmt`
+  `:1319` and `returnStmt` `:1436`; `assignStmt` `:1372` misses `InExpr`).
+  ```go
+  var g *int
+  func two(a *int) (*int, *int, error) { return a, a, nil }
+  //squark:noinline
+  func f() error { x := 1234; var p, q = try two(&x); _ = p; g = q; return nil }
+  // also: _, q := two(&x) in pa; g = q      and   return try three(&x)
+  ```
+  Fix: strip `InExpr`/`TryExpr` in `callResults`.
+
+- [x] **F4. Map/chan storage copied by `copy`, `append(s, xs...)`, `vec.Append`/`TryAppend`**
+  (bug, memory-unsafe; L2 incomplete) — fixed: `checkElemsCopy` on `copy`, `append(s, xs...)`, `append … in a` (growth copies) and vector `Append`/`TryAppend`; test: `testdata/errors/storage_copy_more.sq`
+  `call.go:448-506` (append/copy), `call.go:75-84` (vec.Append): element type never checked.
+  ```go
+  type R struct{ m map[int]int cap 4 }
+  //squark:noinline
+  func fill(dst []R) { var a [1]R; a[0].m[1] = 111; copy(dst, a[:]) }
+  func main() { var b [1]R; fill(b[:]); clobber(); println(b[0].m[1], len(b[0].m)) }  // 0 1
+  ```
+  In one frame, `copy(b[:], a[:])` then writes through `b` corrupt `a`'s map (len 1, two keys).
+  Fix: reject when `storageIn(elem) != nil`.
+
+- [x] **F5. Value receivers copy map/chan storage** (bug, map corruption; L2 incomplete) — fixed: calling a value-receiver method on a non-fresh value whose type holds storage is an error; test: `testdata/errors/storage_copy_more.sq`
+  `expr.go:926-940`: no `checkNestedStorageCopy` for value receivers (also `defer a.Put(..)`).
+  ```go
+  type Reg struct{ m map[int]int cap 4 }
+  func (r Reg) Put(k, v int) { r.m[k] = v }
+  func main() { var a Reg; a.m[0] = 1; for i := 1; i <= 12; i++ { a.Put(i, i) }
+  	println("len", len(a.m)); println("lookup", a.m[100]) }   // len 1, lookup 12
+  ```
+  `type Store map[string]int cap 8` with `func (s Store) Put` loses every write. Fix: apply the
+  storage-copy check to value receivers.
+
+- [x] **F6. Named results holding used map storage are returned by copy** (bug, memory-unsafe) — fixed: named results holding storage are an error (spec §3 + error table); test: `testdata/errors/storage_copy_more.sq`
+  `freshValue` (`expr.go:263`) assumes a call result's storage is unused; the bare return
+  (`stmt.go:430-433`) isn't copy-checked; tuple returns copy the header.
+  ```go
+  type Reg struct{ m map[int]int cap 4 }
+  //squark:noinline
+  func mk() (r Reg, n int) { r.m[1] = 111; return }
+  func main() { r, _ := mk(); clobber(); println(r.m[1], len(r.m)) }   // 0 1
+  ```
+  Fix: reject named results whose type contains storage, or don't treat such results as fresh.
+
+- [x] **F7. Nil dereference: clang deletes or traps it; large offsets write arbitrary memory**
+  (bug, memory-unsafe) — fixed: every dereference in generated code goes through `SQ_NN` (explicit nil check with a source position: `*p`, `p.f`, `p[i]`, `p[:]`, range over `*[N]T`, value method through a pointer, calls of func values incl. deferred), plus `-fno-delete-null-pointer-checks`; tests: `testdata/run/panic_nil_{field,index,offset,func}.sq`
+  Nil checks rely on the fault at address 0, but clang treats a provable null dereference as UB.
+  ```go
+  type Config struct{ Port int }
+  func port(c *Config) int { return c.Port }
+  func main() { println(port(nil)); println("after") }   // prints 00, after; exit 0
+  ```
+  `var f func(); f()` and `range` over a nil `*[4]int` die with SIGTRAP and no message. Through a
+  nil `*[1<<40]int`, `p[i] = 42` writes into a global (`on_fault`, `sq_rt.c:644`, treats only
+  addresses < 64 KiB as nil). A field 1 MiB in reports `unexpected signal 11` with no position.
+  Slicing a nil `*[16]int` gives a non-nil slice; `&p.f` on nil `p` gives a non-nil pointer.
+  Fix: `-fno-delete-null-pointer-checks` (`driver.go:160`; verified to restore the panic), plus an
+  explicit nil check in codegen (`cgen_expr.go:210-212`, `262-267`, `&p.f`) when the offset can
+  pass the guard region, and always when slicing.
+
+- [x] **F8. Out-of-range float→int conversion is C UB and skips bounds checks** (bug,
+  memory-unsafe) — fixed: `sq_f2i`/`sq_f2u` saturate (NaN → 0) on every platform, plus `-fno-strict-float-cast-overflow`; spec §5; test: `testdata/run/float_int_conv.sq`
+  `cgen_expr.go:742-744` emits a plain cast.
+  ```go
+  var tbl [256]int
+  var g3 = 300.5
+  func main() { i := uint8(g3); tbl[i] = 7 }   // signal 11; println(uint8(g3)) prints 300
+  ```
+  `int64(1e20)` prints `-` (both `x > 0` and `x < 0` are true). Fix:
+  `-fno-strict-float-cast-overflow` (verified: saturated, in range) or Go-like conversion helpers;
+  document the result in spec §5.
+
+- [x] **F9. `s[f()]` reads the slice pointer before `f()` and its length after** (bug,
+  memory-unsafe, out-of-bounds write) — fixed: with a call in the index, the index is computed first and the slice/string read once after it (matches Go); test: `testdata/run/index_call_order.sq`
+  `cgen_expr.go:214-216`, `221-223` (`isSimpleC` fast path `(s).p[SQ_IDX(idx, (s).len)]`).
+  ```go
+  var small [1]int
+  var big [100]int
+  var s []int
+  func f() int { s = big[:]; return 50 }
+  func main() { s = small[:]; s[f()] = 7; println(big[50], "big[49] =", big[49]) }  // 0 big[49] = 7
+  ```
+  String variant reads out of bounds. Fix: use the temporary path when `hasCall(e.Index)`.
+
+- [x] **F10. Mutable package memory counts as "static" for shared vars and error messages** (bug:
+  cross-thread data race; contradicts spec §4 "read-only" and rule 8 "static message") — fixed: a "constant data" region (literals, constants, error messages, shared vars, C extern results, strings copied into a package arena) below static memory; error messages and shared-var initializers must be constant data; summaries carry `Constant` params and `ResStatic` results; spec §4/§5 + error table; test: `testdata/errors/constant_data.sq`
+  `lifetime.go:495-512` (`globals`), `:1101-1108` (`__error`); `checker.go:311-333`.
+  ```go
+  threads 2
+  var buf [8]byte
+  func name() string { n := copy(buf[:], "hello"); return string(buf[:n]) }
+  shared var s = name()   // shard 0 writes buf[0] = 'J'; shard 1 prints "Jello"
+  ```
+  An `error(1, string(buf[:n]))` sent on a shared channel changes text after the sender reuses
+  `buf`; single-threaded, `error(404, string(b))` changes text later and `e1 == e2` is true for
+  different texts. Fix: require constant data (or copy into shared read-only storage).
+
+- [x] **F11. `std/http`: response splitting** (bug, security) — fixed: a CR or LF outside CRLF, or a control character, in the request head → 400; `SetHeader` turns CR/LF/NUL into spaces and drops non-token names; test: `TestHTTPProtocol` (`internal/driver/http_test.go`)
+  `std/http/http.sq:100` (`SetHeader` writes raw), `:426`, `:448` (parser accepts a bare CR/LF in
+  the request line and header values). Echoing `X-Request-Id: 1\nSet-Cookie: session=evil` from
+  request to response emits a real `Set-Cookie`. Fix: 400 on a lone CR/LF; strip or replace CR/LF
+  in `SetHeader` names and values.
+
+- [x] **F12. `std/http`: request smuggling through Content-Length** (bug, security) — fixed: header names and methods must be tokens; Content-Length digits only (overflow-checked); differing duplicates → 400; `HTTP/1.x` only (505 otherwise); test: `TestHTTPProtocol`
+  `http.sq:448-463`. `Content-Length : 5` (space before the colon) is ignored, so the body is
+  parsed as a second request. Duplicate differing CLs: the last wins. `+5` accepted (Atoi).
+  Fix: header names must be tokens; CL digits only; reject a second, different CL.
+
+- [x] **F13. `std/http`: slowloris, no read deadline** (bug, security/hang) — fixed: `http.ReadHeaderTimeout` (5s) and `http.ReadTimeout` (10s) → 408 and close; new `net.Conn.ReadTimeout` + `net.ErrTimeout` (runtime `sq_read_timeout`); error responses half-close and drain briefly; test: `TestHTTPProtocol/slowloris`
+  `http.sq:377`, `:396`. With `pool http.serveConn 4`, 4 connections that send half a header
+  block every other client until they close; partial bodies hold a slot forever. Fix: a header
+  and body read deadline (e.g. `WaitReadable` with a grace period), then close.
+
+- [x] **F14. `fd_event` acts on stale kqueue events → false deadlock** (bug, crash) — fixed: `fd_event` drops stale events before touching `armed`/`fd_waiters`; a kqueue `WaitReadable` timeout clears the reader, uncounts the wait and deletes the registration; tests: `testdata/run/stale_fd_event.sq`, `TestWaitReadableDeadlock`
+  `sq_rt.c:1590-1606` clears `g->armed` and decrements `fd_waiters` before checking
+  `g->wait_fd == fd`. A stale event (an `EV_ADD` queued in `changes[]` that fails EBADF because
+  another goroutine closed the fd first, or a late event after a `WaitReadable` timeout, whose
+  kqueue path (`:1724-1737`) leaves the registration and `armed` set) uncounts the goroutine's
+  current wait; at 0 the scheduler stops polling.
+  Repro: a reader does `c1.Read` then `c2.Read`; main does `runtime.Gosched(); c1.Close();
+  time.Sleep(50ms)`; then writes to c2's peer → `fatal error: all goroutines are asleep`.
+  Fix: return early on a stale event before touching `armed`; on kqueue timeout, clear `armed`,
+  decrement and `EV_DELETE`.
+
+- [x] **F15. Linux: a C frame larger than a page can skip a goroutine's guard page** *(by
+  inspection)* (bug, memory-unsafe; spec §9 says it "hits the guard") — fixed: Linux builds add `-fstack-clash-protection` (arm64 also `--param=stack-clash-protection-guard-size=12`, as gcc assumes a 64 KiB guard); checked with gcc 14 and clang 19 in Docker
+  Stacks are adjacent with one guard page (`pool_init`, `sq_rt.c:284-298`); builds lack
+  `-fstack-clash-protection` (`driver.go:160`). macOS probes large frames and was caught.
+  Fix: add `-fstack-clash-protection` on Linux.
+
+- [x] **F16. A void call, builtin or package can be used as a value** (bug: wrong value or C
+  compile failure) — fixed: `assignable` runs `c.value(x)` before giving up on a typeless operand, so no-value calls, builtins and packages are reported; test: `testdata/errors/no_value.sq`
+  `expr.go:432`: `assignable` returns false silently on `T == tInvalid`, but no-value calls,
+  packages and builtins carry `tInvalid` with no error reported (breaks fddcd17's assumption; the
+  filter at `checker.go:127` drops their messages too).
+  ```go
+  import "strings"
+  func g(x int) { println("got", x) }
+  func main() { g(len); g(strings); g(println) }   // compiles; prints "got 0" three times
+  ```
+  `func r() int { return f() }` with `func f() {}` fails in C; same leak through `c <- f()`,
+  literals, `Push`, `append`, `go`, `defer`, select send. Fix: test `Mode == ModeInvalid` (or
+  call `c.value(x)` first) in `assignable`.
+
+### P1: compiler crashes and hangs, wrong values, C compile failures, broken stdlib
+
+- [x] **F17. Polymorphic recursion through `anytype` hangs the compiler** (bug) — fixed: `instantiate` reports recursion when the template is already in the instantiation chain (`Func.InstFrom`); test: `testdata/errors/anytype_recursion.sq`
+  `generic.go:31-104` makes `*int`, `**int`, … instances without end.
+  `func f(x anytype) int { return f(&x) }`. Fix: report recursion when a template is
+  instantiated inside its own pending instance chain.
+- [x] **F18. Recursive func/slice/pointer types crash code generation** (bug, compiler panic) — fixed: `checkRefCycle` rejects named types that reach themselves only through pointers, slices, arrays, vectors and func types (a struct, map or channel breaks the cycle); spec §3; test: `testdata/errors/type_cycle.sq`
+  `type F func() F`, `type F func(F)`, `type L []L`, `type P *P`: check passes, then Go stack
+  overflow in `gen.typeKey` (`cgen.go:309`) / `gen.ctype` (`:360-374`, `:460`, via `resultC`
+  `:544`). Fix: forward-declared typedefs, or reject in the front end and document.
+- [x] **F19. Index/len/range on a call returning a vector crashes the compiler** (bug, compiler
+  panic; E5 incomplete) — fixed: `storage`'s default case uses `vecOf1`; also a received vector used as a view is received at its own type (was a C compile failure); test: `testdata/run/vec_call_temp.sq`
+  `func mk() [..4]int {…}; println(mk()[0])`; also `len(mk())`, `range mk()`, `len(<-c)`.
+  `lifetime.go:714-718` + `:852`: `vecOf` and `storage` recurse forever. Fix: `vecOf1` (or the temp
+  constant) in `storage`'s default case.
+- [x] **F20. `return f()` with assignable but not identical result types fails in C** (bug) — fixed: `return f()` converts each tuple element when the C types differ; test: `testdata/run/assignable_types.sq`
+  `func f() (Ints, error)`; `func g() ([]int, error) { return f() }` → "returning 'sq_tu0' from a
+  function with incompatible result type". `cgen_stmt.go:542-544`. Fix: convert element-wise as
+  `multiAssign` does (`:312-313`).
+- [x] **F21. Comma-ok and range assignment to an assignable named struct fail in C** (bug) — fixed: `reinterp` helper used by comma-ok map/chan/select receives and range assignment; test: `testdata/run/assignable_types.sq`
+  `p, ok = m[1]` / `p, ok = <-c` / `for _, p = range [1]struct{a, b int}{}` with `p Pair`.
+  `cgen_stmt.go:277,285,295` (no conversion), `:820-821` (scalar cast on a struct). Fix: the
+  `*(T*)&tmp` reinterpretation used in `coerce`.
+- [x] **F22. `error(code, msg)` with an empty non-constant msg equals nil; `try` ignores it** (bug) — fixed: a non-constant message goes through `sq_err_msg`, which makes a NULL pointer point at ""; test: `testdata/run/error_empty_msg.sq`
+  `var reason string; err := error(400, reason); println(err == nil)` → `true`. Nil-ness is
+  `msg.p == NULL` (`cgen_expr.go:451-452`, `1116`). Fix: substitute a static non-NULL empty
+  pointer in the constructor (`:977-981`).
+- [x] **F23. `for i, arr[i] = range …` stores the key before evaluating the value's index** (bug:
+  contradicts spec §5) — gives `[x y z]`, Go `[y z ""]`. `cgen_stmt.go:811-824`. Fix: capture
+  targets with `lhsTargets` first.
+- [x] **F24. A user `Push`/`TryPush`/`Pop`/`Clear`/`Append`/`TryAppend` method on a named vector — fixed: `rangeVars` captures both targets with `lhsTargets` before storing; test: `testdata/run/range_assign_order.sq`
+  type is silently ignored** (bug) — `expr.go:850` looks up builtins first. Fix: reject those
+  names at declaration (or let the user method win).
+- [x] **F25. `cap(m)` on a map returns `len(m)`** (bug) — `call.go:431-434` stub; — fixed: declaring Push/TryPush/Append/TryAppend/Pop/Clear on a vector type is an error; test: `testdata/errors/vec_method_names.sq`
+  `cgen_expr.go:774` emits `sq_map_len` for both. Fix: return the declared capacity, or reject.
+- [x] **F26. A non-constant shift inside a conversion uses `int`, not the target type** (bug) — fixed: `cap(m)` is the entries the storage holds (`sq_map_cap`, 0 for nil); spec §3; test: `testdata/run/map_cap.sq`
+  `var s uint = 63; println(uint16(1<<s>>s))` → 65535 (Go 0); `int32(1<<31>>31)` → 1 (Go −1).
+  `call.go:281`. Fix: convert the untyped shift to the target integer type (error for float).
+- [x] **F27. Constant `string(x)` outside the rune range gives the wrong rune** (bug) — fixed: an untyped non-constant number in a conversion takes the target type (float targets report the shift error); test: `testdata/run/shift_conversion.sq`, `testdata/errors/shift_const.sq`
+  `string(int64(1<<40 + 66))` → "B" (Go U+FFFD); uint64 > MaxInt64 → "\x00". `call.go:241`
+  truncates with `rune(r)`.
+- [x] **F28. `strconv.ParseFloat` is wrong for more than 800 integer digits** (bug) — fixed: `decimal.set` counts dropped significant digits when placing the point; test: `testdata/run/parsefloat_long.sq` — fixed: values outside 0..0x10FFFF (or not exact in int64) fold to U+FFFD; test: `testdata/run/const_string_rune.sq`
+  `"1" + 800×"0" + "e-800"` → 0.1 (want 1); also via `json.Decoder.Float`.
+  `std/strconv/decimal.sq:457,479`: `b.dp = b.nd` with `nd` capped. Fix: `dp++` for every digit
+  dropped before the point.
+- [x] **F29. `json.Decoder.Skip` accepts invalid JSON** (bug; E9 incomplete) — fixed: `Skip` follows the JSON grammar with a fixed bracket stack (`json.MaxDepth = 1024`); test: `testdata/run/json_skip.sq`
+  `[1,]`, `[,1]`, `[1 2]`, `{"a":1,}`, `{"a" 1}`, `[}`, `]`, `"a\qb"`, `"a\u12"`, raw tab in a
+  string, `["a":1]`… all pass `Skip() && End()`. A lone `]`/`}` counts as a value, so Skip can eat
+  the enclosing closer. `std/json/json.sq:480-530`. Fix: a bracket stack and separator state;
+  validate escapes in skipped strings.
+- [x] **F30. `json.Decoder.Offset()` can exceed `len(data)`** (bug) — Skip on `"abc` → Offset 5
+  for 4 bytes, so `data[d.Offset():]` panics. `json.sq:488-495`. Fix: clamp before failing.
+- [x] **F31. `strings.Split(s, "", out)` panics when `out` is empty** (bug) —
+  `strings.sq:148`. Fix: `if len(out) == 0 { return out[:0] }` at the top. — fixed: Skip stops at the end of the data, `Offset()` is clamped; test: `testdata/run/json_skip.sq`
+- [x] **F32. A huge `time.Sleep`/`After`/`WaitReadable` duration stops every timer on the
+  thread** (bug, hang) — fixed: empty `out` returns `out[:0]`; test: `testdata/run/strings_split_empty.sq`
+  `go forever()` with `time.Sleep(time.Duration(math.MaxInt64))` → main's 100ms sleep never
+  wakes. `wake_at = now + ns` wraps (`sq_rt.c:1508,1220,1719`). Linux *(by inspection)*: `netpoll` — fixed: `deadline()` saturates `wake_at`; the scheduler blocks at most 1h at a time (no epoll ms overflow); test: `TestHugeDurations`
+  casts ms to `int` (`:1665`), so > 24.8 days blocks forever. Fix: saturate `wake_at`; clamp ms.
+- [x] **F33. Under `threads`/`workers`, a closed listener keeps listening** (bug) — fixed: the listening-socket dup exists only on kqueue with several threads and is closed with the last shard's listener; test: `TestListenerCloseThreads`
+  `sq_listen_tcp` keeps `shared_fd = dup(fd)` (`sq_rt.c:2087`) and never closes it;
+  `listener_closed` (`:2102`) only clears the shard bit. After `l.Close()`, `net.Dial` still
+  succeeds; on Linux *(by inspection)* the dup stays in the reuseport group and gets connections
+  nobody accepts. Fix: dup only under kqueue; close it when no shard listens.
+- [x] **F34. A single-threaded program blocked on a shared channel hangs instead of reporting
+  deadlock** (bug: contradicts spec §9) — fixed: with one thread, shared-channel waits count as parked goroutines (also in select); spec §9; test: `TestSharedChanDeadlock`
+  `shared var c chan int cap 0; func main() { <-c }`. `park_shared` counts into `shared_parked`,
+  which blocks the check (`sq_rt.c:2315`). Fix: with one shard, treat shared waits as local.
+- [x] **F35. Other shards' buffered output is lost at `os.Exit`, panic or the last `main`
+  returning** (bug) — `sq_exit`, `die`, `_exit(0)` (`sq_rt.c:2295`) flush only
+  `sq_self->outbuf`. Fix: flush every shard (best effort), or don't buffer partial lines with
+  several shards. — fixed: per-shard output buffers are locked with several shards, and `exit_flush` writes every shard's partial line at exit, panic, fault and deadlock; spec §5; tests: `testdata/run/shard_output.sq`, `panic_shard_output.sq`
+- [x] **F36. epoll: a `WaitReadable` timeout disarms another goroutine's write wait** *(by
+  inspection, Linux)* (bug, hang) — `sq_wait_idle` does `epoll_ctl(MOD, 0)` on timeout
+  (`sq_rt.c:1730-1731`), dropping `s->wr`'s `EPOLLOUT` and leaving `s->rd` stale. Fix: clear
+  `s->rd`, then `epoll_arm` if `s->wr` is set. — fixed: an epoll `WaitReadable` timeout clears only its own read side and re-arms for a waiting writer; test: `testdata/run/wait_readable_writer.sq` (Linux run in Docker)
+- [x] **F37. `std/http` protocol errors** (bug) — fixed: 1.0 keep-alive echoes `Connection: keep-alive`; 1.0 never chunked (close-delimited); no body for 1xx/204/304; `100-continue` answered (other Expect → 417); LF-only → 400; codes outside 100..999 → 500 (documented); test: `TestHTTPProtocol`
+  - HTTP/1.0 keep-alive clients hang (`ab -k`): the server keeps the conn but never sends
+    `Connection: keep-alive` (`http.sq:177`, `:440`).
+  - Chunked bodies go to HTTP/1.0 requests and with 204 (`http.sq:202`).
+  - `Expect: 100-continue` is never answered (curl waits 1s per POST).
+  - LF-only request lines hang instead of getting a 400.
+  - `WriteHeader(0)` / `WriteHeader(99999)` are sent as is.
+- [x] **F38. Type, arena and pool sizes are unbounded; the budget product overflows** (bug) — fixed: every declared size is at most 1T (`MaxSize`), pools at most 2^24, types checked with `sizeBound`, literal indexes bounded; the budget sum saturates (`satAdd`/`satMul`); tests: `testdata/errors/too_large{,_local}.sq`, `TestWorstSaturates`
+  `var big [1<<61]int64`, `map[int]int cap 1<<60`, `arena pa 1<<62`, `pool t 1<<58` → C "array
+  too large" blamed on squark. `budget 64M` + `pool t 1<<52` passes: 2^52 × 16 KiB wraps to 0.
+  `checker.go:443,554,642`. Fix: cap sizes in `constSize`/pool; checked multiplication in budget.
+- [x] **F39. `squark run` leaks temp dirs and orphans the program** (bug; D4 incomplete) — fixed: signals handled from before the build; the build's TMPDIR lives in the `squark-run-*` dir; INT/TERM/HUP/QUIT/ALRM/USR1/USR2 forwarded to the program; spec §10; tests: `TestRunSignals`, `TestRunSignalDuringBuild`
+  SIGTERM during the build leaves `squark-run-*`/`squark-build-*`; SIGHUP/SIGALRM while running
+  exit squark and leave the child running. `cmd/squark/main.go:55-90` handles only
+  Interrupt/SIGTERM and only after `Start`. Fix: install before `driver.Build`; add SIGHUP/SIGQUIT.
+- [x] **F40. A NUL byte in a path silently truncates it** (bug, security low) — fixed: `sq_open` returns EINVAL for a NUL byte; `sqlite.Open` returns `os.Errno(22)` and the shim refuses too; tests: `testdata/run/nul_path.sq`, `TestSQLiteNULPath`
+  `os.Create(dir + "/a\x00.evil")` creates `a`; same in `sqlite.Open`. `sq_rt.c:1985`,
+  `std/sqlite/shim.c:92`. Fix: EINVAL on `\0`.
+
+### P2: rejects-valid, lesser bugs
+
+- [x] **F41. "No storage" check (88e95da) false positives** (bug, rejects valid) — fixed: a pointer-method call gives storage; `delete` and select-case sends/receives are not uses; the message names the file when the use is in another one; test: `testdata/run/no_storage_ok.sq`
+  - Storage given by a pointer-receiver method (`func (m *M) Init(a arena) { *m = make(…) in a }`,
+    `gm.Init(pa)`) isn't counted: `perthread.go:247-249` records the implicit `&` as a use.
+  - `delete(m, k)` on a never-stored map is rejected as a write (`perthread.go:230`).
+  - `<-never` in a `select` with `default` is rejected as "would block forever".
+  - When the use is in another file, "(line N)" doesn't name the file.
+- [x] **F42. The per-thread variable list misses some written globals** (bug: spec contradiction,
+  low) — `fill(vec[:])` on a global vector, and `var mv map[string]int = m2; mv["x"] = 1`.
+  `perthread.go`: `SliceExpr` checks only `*Array`; `DeclStmt` never calls `referenced`.
+- [x] **F43. Non-canonical std import paths load a package twice** (bug; I1 incomplete) — fixed: slicing a vector (through its view) and `var x = g` declarations are recorded; test: `TestPerThreadNote` (`testdata/perthread`) — fixed: a std import path must be canonical (`path.Clean`, no `.`/`..`/leading `/`); test: `testdata/errors/import_path.sq`
+  `"sqlite"` + `"sqlite/."` → duplicate symbol at link; `"bytes"` + `"bytes/."` → "cannot use
+  bytes.Buffer as bytes.Buffer"; `import "."` → "no squark files in std". `package.go:236`.
+  Fix: `path.Clean` and reject `.`/`..`.
+- [x] **F44. `anytype` function with a variadic parameter rejects normal calls** (bug) — fixed: argument count allows variadic trailing arguments; test: `testdata/run/anytype_variadic.sq`
+  `func f(x anytype, ys ...int)`: `f(1, 2, 3)` → "wrong argument count". `generic.go:35` ignores
+  `Variadic`.
+- [x] **F45. `[]anytype`, `*anytype`, `func(anytype)` are accepted as parameter types** (bug:
+  contradicts spec §4; the C type becomes `int`). `checker.go:877-879`, `:982`. Fix: allow only
+  the bare identifier.
+- [x] **F46. Valid programs rejected** (go-diff unless noted; fix or document in the spec) — fixed: anytype only as a bare parameter type; test: `testdata/errors/anytype_decl.sq`
+  - `var i int8; for i = range 10 {}` (`stmt.go:671` defaults to `int` first).
+  - `defer delete(m, k)`, `defer copy(a, b)`, `defer v.Push(x)` → "defer discards result of …"
+    (bug: wrong message, and the restriction isn't in the spec; `stmt.go:410`). — fixed: untyped range bound takes the existing key's type; const specs classified per name; nil allowed in constant composites; `cap` after a func type closes it; deferred builtins get an accurate message (documented §6); slice→array conversions, `f(g())` and elided `&T` documented as unsupported (§5); tests: `testdata/run/valid_forms.sq`, `testdata/errors/defer_builtin.sq`
+  - `const ErrA, X = error(1, "a"), 5` makes `X` an int variable (`isErrorConst` checks only
+    `Values[0]`).
+  - `[2]error{ErrA, nil}` → "nil is not constant", while `[2]error{ErrA}` is accepted.
+  - `var c chan func() cap 1` / `map[int]func() cap 1` don't parse; `chan (func()) cap 1` does.
+  - Slice→array conversions, `f(g())` with multi-value `g`, elided `{…}` in `[]*T{{…}}`.
+- [x] **F47. Rare runtime races** *(by inspection)*
+  - Workers supervisor checks `stop_signal`, then calls `waitpid`
+    (`sq_rt.c:2422-2429`). A SIGTERM between the two is lost until a worker exits. Fix: a
+    self-pipe or `sigsuspend`. — fixed: the workers supervisor waits with `sigsuspend` (signals blocked between checks); kqueue changes flush in chunks with `EV_RECEIPT` and failed changes are delivered as events; test: `testdata/run/idle_flush.sq` (the signal race isn't reliably reproducible)
+  - A full `changes[]` is flushed with `kevent(…, NULL, 0, …)` (`sq_rt.c:1561`, `:1768`). One
+    failing change can drop the registrations after it. Fix: pass an event list and handle
+    `EV_ERROR`.
+- [x] **F48. `bufio.Reader`'s longest line is cap−1, not cap; a final `abc\r` at EOF keeps its
+  `\r`** (doc contradiction, low) — `std/bufio/bufio.sq:65`.
+- [x] **F49. `json.Decoder.String` passes invalid UTF-8 through** (go-diff: Go gives U+FFFD,
+  and `AppendString` replaces it) — document or replace. — fixed: a line that exactly fills the buffer is returned (peeks for the line end); a final `\r` at EOF is dropped; test: `testdata/run/bufio_full_line.sq`
+
+### P3: docs, messages, polish — fixed: invalid UTF-8 becomes U+FFFD per bad byte, as in Go; test: `testdata/run/json_skip.sq`
+
+- [x] **F50. `squark doc` output** — `doc.go:158-160` truncates long string constants without a
+  closing quote, shows `const F32 float32 = 0.1` as `0.10000000149011612` and `'x'` as `120`.
+  Package doc comments and struct-field doc comments are never printed (missing from
+  `docs/stdlib.md`). — fixed: full quoted strings, float32 precision, rune literals; package and struct-field doc comments (`File.Doc`, `Field.Doc`); test: `internal/driver/doc_test.go`
+- [x] **F51. Stdlib doc contradictions** — fixed: comments moved/merged, `Fields` and `ParseFloat` limits documented; `docs/stdlib.md` regenerated
+  - `strconv.sq:34`: the orphaned FormatInt comment attaches to `AppendIntBase`.
+  - `os.ReadFull` has two conflicting doc paragraphs (`os.sq:117`).
+  - `strings.Fields` drops fields once `out` is full, undocumented (E14 claims it's documented).
+  - `ParseFloat` says "as Go's" but rejects `0x1p4` and `1_000`.
+- [x] **F52. Messages** — fixed: nil dereferences carry a position (F7), and a fault in C code no longer prints an empty position line; `s += x in a` says to write `s = s + x in a`; `exprString` handles `try`; a bad literal is one error; size suffixes need a plain decimal; tests: `testdata/errors/literal_errors.sq`
+  - The nil-dereference panic prints an empty position line.
+  - `s += "b" in a` suggests `… in a in a` and is reported twice. Some lifetime and "defer with a
+    variadic call" errors print twice.
+  - `exprString` has no `TryExpr` case ("expr (no value) used as value").
+  - Invalid integer literals (`08`, `0x`, `0b2`) add "constant unknown overflows int".
+  - `010K` and `1_0K` are accepted though the spec says size literals are decimal.
+
+### G: Go divergences found (fix or document)
+
+- [x] **F53. Deferred calls don't run on panic.** Go runs them while panicking (`defer
+  f.Close()`). Not in spec §9.
+- [x] **F54. `err.Error()` / `err.Code()` on a nil error return `""` / `0`** (Go panics).
+- [x] **F55. Initialization cycles through functions are accepted:** `var x = f(); func f() int — documented: spec §6 (a panic ends the program; no recover, so deferred calls don't run) — documented: spec §3 (`nil` error's `Error()` is "" and `Code()` 0; errors are values, not interfaces) — documented: spec §2 (declaration order; a not-yet-initialized variable reads as zero)
+  { return x + 1 }`.
+- [x] **F56. A vector passed as an `anytype` argument becomes a slice view** (so `x.Push` fails);
+  spec §4 says only map and channel storage does.
+
+ — documented: spec §4 (a vector becomes its `[]T` view; pass `&v` to Push)
 ## Progress log
 
 Append one line per work session: date, items closed, anything left half-done.
@@ -520,3 +873,5 @@ Append one line per work session: date, items closed, anything left half-done.
 - 2026-10-15: section E closed (E1–E16). Left out on purpose: shortest-float formatting and ParseFloat (need a correctly rounding algorithm), decoder recovery after an error, compile-time detection of a map without storage.
 - 2026-10-15: shortest float formatting (`AppendFloat(dst, v, -1)`), `strconv.ParseFloat` and `json.Decoder.Float` added (exact decimal arithmetic adapted from Go's strconv); `TestFloatConversions` checks 20000 values against Go.
 - 2026-10-15: a package map or channel view that nothing gives storage but the program uses is now a compile error (`NoStorageErrors`); maps reached only through views are still checked at run time.
+- 2026-10-15: second whole-project review logged as section F (F1–F56, all open). Start with P0: F1–F16.
+- 2026-10-15: section F closed (F1–F56): compiler items fixed directly; stdlib/HTTP and runtime/CLI items fixed in parallel worktrees and merged. Go divergences F53–F56 and parts of F46 documented in the spec rather than changed. Whole suite passes on macOS and on Linux (Docker, arm64). Nothing committed.
