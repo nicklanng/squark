@@ -1,0 +1,35 @@
+{
+  "name": "squark",
+  "displayName": "squark",
+  "description": "Syntax highlighting for squark, a Go-shaped language without a heap",
+  "version": "0.1.0",
+  "publisher": "nicklanng",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/nicklanng/squark" },
+  "engines": { "vscode": "^1.70.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "squark",
+        "aliases": ["squark", "Squark"],
+        "extensions": [".sq"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "squark",
+        "scopeName": "source.squark",
+        "path": "./syntaxes/squark.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node test/grammar.test.mjs"
+  },
+  "devDependencies": {
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.2.0"
+  }
+}

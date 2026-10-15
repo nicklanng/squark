@@ -47,6 +47,9 @@ bin/squark doc examples/notes strings             # functions with their referen
 Requires Go 1.27+ and clang. The `sqlite` package links Homebrew's libsqlite3; edit the `link`,
 `cflags` and `ldflags` lines in `std/sqlite/sqlite.sq` for other setups.
 
+Editor support: `editors/vscode` is a VS Code extension with syntax highlighting (see its README to
+install).
+
 ## Where memory lives
 
 There are four kinds of memory, and every value lives in one of them:
@@ -266,6 +269,8 @@ runtime/            scheduler, context switch (arm64/x86-64), netpoll, channels,
 std/                standard library (squark + C shims), embedded in the compiler
 testdata/           compile-error tests (// ERROR "...") and run tests (.sq + .out)
 bench/              Go baselines, load generator, process sampler, harness
+scripts/            test-linux.sh: the test suite on Linux in Docker
+editors/vscode/     VS Code syntax highlighting (TextMate grammar, tested with VS Code's tokenizer)
 docs/design.md      the language design and its rationale
 ```
 
