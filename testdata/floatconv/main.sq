@@ -1,0 +1,46 @@
+package main
+
+// Test program for TestFloatConversions (internal/driver): for each input line "<bits> <text>",
+// prints the shortest form of the float64 with those bits, and the bits ParseFloat gives for text.
+
+import (
+	"bufio"
+	"io"
+	"math"
+	"os"
+	"strconv"
+	"strings"
+)
+
+func parseUint(s string) uint64 {
+	var v uint64
+	for i := 0; i < len(s); i++ {
+		v = v*10 + uint64(s[i]-'0')
+	}
+	return v
+}
+
+func main() {
+	var store [256]byte
+	r := bufio.NewReader(store[:])
+	var out [128]byte
+	w := os.Stdout
+	for {
+		line, err := r.ReadLine(os.Stdin)
+		if err == io.EOF {
+			return
+		}
+		bitsText, text, _ := strings.Cut(line, " ")
+		v := math.Float64frombits(parseUint(bitsText))
+		o := strconv.AppendFloat(out[:0], v, -1)
+		o = append(o, ' ')
+		f, perr := strconv.ParseFloat(text)
+		if perr != nil && perr != strconv.ErrRange {
+			o = append(o, "error"...)
+		} else {
+			o = strconv.AppendUint(o, math.Float64bits(f))
+		}
+		o = append(o, '\n')
+		w.Write(o)
+	}
+}

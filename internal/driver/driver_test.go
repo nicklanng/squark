@@ -2,8 +2,11 @@ package driver
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -1488,5 +1491,97 @@ func TestDocVarKinds(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("doc lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// sigDigits returns the significant digits of a formatted number ("-0.00150e+3" -> "15").
+func sigDigits(s string) string {
+	if e := strings.IndexAny(s, "eE"); e >= 0 {
+		s = s[:e]
+	}
+	s = strings.Replace(strings.TrimLeft(s, "+-"), ".", "", 1)
+	return strings.Trim(s, "0")
+}
+
+// TestFloatConversions checks strconv's shortest formatting and ParseFloat against Go's: random
+// float64s across the whole range (and edge cases) must print with as few digits as Go's shortest
+// form and read back exactly, and decimal strings (shortest, 17-digit, and long ones that take the
+// slow path) must parse to the same bits as Go's ParseFloat.
+func TestFloatConversions(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "floatconv")
+	if _, err := Build(Options{Dir: "../../testdata/floatconv", Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	rnd := rand.New(rand.NewSource(1))
+	var vals []float64
+	for _, v := range []float64{0, 1, -1, 0.1, 0.5, 1e21, 1e20, 1e-6, 1e-7, 5e-324, 2.2250738585072014e-308,
+		2.225073858507201e-308, math.MaxFloat64, math.SmallestNonzeroFloat64, 123456789, 1 << 53, 9007199254740993} {
+		vals = append(vals, v)
+	}
+	for i := -330; i <= 310; i++ {
+		vals = append(vals, math.Pow(10, float64(i)))
+	}
+	for len(vals) < 20000 {
+		b := rnd.Uint64()
+		if f := math.Float64frombits(b); !math.IsNaN(f) && !math.IsInf(f, 0) {
+			vals = append(vals, f)
+		}
+	}
+	var in bytes.Buffer
+	var texts []string
+	for i, v := range vals {
+		var text string
+		switch i % 3 {
+		case 0:
+			text = strconv.FormatFloat(v, 'g', -1, 64)
+		case 1:
+			text = strconv.FormatFloat(v, 'e', 16, 64)
+		default: // a long decimal string: the slow path
+			digits := make([]byte, 17+rnd.Intn(14))
+			for j := range digits {
+				digits[j] = byte('0' + rnd.Intn(10))
+			}
+			digits[0] = byte('1' + rnd.Intn(9))
+			text = string(digits[:1]) + "." + string(digits[1:]) + "e" + strconv.Itoa(rnd.Intn(640)-330)
+		}
+		texts = append(texts, text)
+		fmt.Fprintf(&in, "%d %s\n", math.Float64bits(v), text)
+	}
+	cmd := exec.Command(bin)
+	cmd.Stdin = &in
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(lines) != len(vals) {
+		t.Fatalf("%d lines for %d inputs", len(lines), len(vals))
+	}
+	bad := 0
+	for i, l := range lines {
+		short, parsed, _ := strings.Cut(l, " ")
+		v := vals[i]
+		got, err := strconv.ParseFloat(short, 64)
+		goShort := strconv.FormatFloat(v, 'e', -1, 64)
+		if err != nil || got != v || sigDigits(short) != sigDigits(goShort) {
+			bad++
+			if bad <= 5 {
+				t.Errorf("format %v (bits %d): got %q (Go %q)", v, math.Float64bits(v), short, goShort)
+			}
+		}
+		want, err := strconv.ParseFloat(texts[i], 64)
+		if err != nil && !errors.Is(err, strconv.ErrRange) {
+			t.Fatalf("Go can't parse %q: %v", texts[i], err)
+		}
+		if parsed != strconv.FormatUint(math.Float64bits(want), 10) {
+			bad++
+			if bad <= 10 {
+				t.Errorf("ParseFloat(%q): got bits %s, want %d (%v)", texts[i], parsed, math.Float64bits(want), want)
+			}
+		}
+	}
+	if bad > 0 {
+		t.Fatalf("%d mismatches", bad)
 	}
 }

@@ -117,6 +117,10 @@ const ErrSyntax = error(22, "invalid syntax")
 const ErrRange = error(34, "value out of range")
 const ErrBase = error(22, "invalid base")
 
+// ParseFloat converts s ("1.5", "-2e-10", "Inf", "NaN") to the nearest float64 (half to even),
+// as Go's strconv.ParseFloat(s, 64). ErrSyntax if s isn't a number; ErrRange (with ±Inf) if it is
+// too large.
+func ParseFloat(s string) (float64, error)
 // AppendInt appends the decimal form of v to dst.
 func AppendInt(dst []byte, v int) []byte from dst
 // AppendUint appends the decimal form of v to dst.
@@ -132,8 +136,10 @@ func AppendUintBase(dst []byte, v uint64, base int) []byte from dst
 func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst
 func FormatInt(buf []byte, v int) string from buf
 // AppendFloat appends v with prec digits after the decimal point, like Go's
-// strconv.AppendFloat(dst, v, 'f', prec, 64): the exact binary value rounded half to even. A negative
-// prec counts as 0. The result can be long (1e300 has 301 digits), so size dst for it.
+// strconv.AppendFloat(dst, v, 'f', prec, 64): the exact binary value rounded half to even. The
+// result can be long (1e300 has 301 digits), so size dst for it. prec -1 gives the shortest digits
+// that read back to v, in plain notation for 1e-6 <= |v| < 1e21 and exponent notation outside
+// (1.5e+300), as JSON and JavaScript write numbers; other negative precs count as 0.
 func AppendFloat(dst []byte, v float64, prec int) []byte from dst
 // Atoi parses a base-10 integer.
 func Atoi(s string) (int, error)
@@ -410,6 +416,9 @@ func (d *json.Decoder) Field(keybuf []byte) (string, bool) from keybuf
 func (d *json.Decoder) String(buf []byte) (string, bool) from buf
 // Int decodes an integer. A number with a fraction or exponent is ErrType (it is consumed).
 func (d *json.Decoder) Int() (int, bool)
+// Float decodes a number as the nearest float64 (an integer too). Too large for a float64 is
+// ErrType.
+func (d *json.Decoder) Float() (float64, bool)
 // Bool decodes true or false.
 func (d *json.Decoder) Bool() (bool, bool)
 // Null consumes a null if it is the next value and reports whether it was (a missing or optional

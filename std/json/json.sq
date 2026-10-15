@@ -423,6 +423,34 @@ func (d *Decoder) Int() (int, bool) {
 	return v, true
 }
 
+// Float decodes a number as the nearest float64 (an integer too). Too large for a float64 is
+// ErrType.
+func (d *Decoder) Float() (float64, bool) {
+	if d.Err != nil {
+		return 0, false
+	}
+	c := d.peek()
+	if c != '-' && (c < '0' || c > '9') {
+		d.fail(ErrType)
+		return 0, false
+	}
+	start := d.pos
+	end, _ := d.number()
+	if d.Err != nil {
+		return 0, false
+	}
+	d.pos = end
+	if !d.delim() {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(string(d.data[start:end]))
+	if err != nil {
+		d.fail(ErrType)
+		return 0, false
+	}
+	return f, true
+}
+
 // Bool decodes true or false.
 func (d *Decoder) Bool() (bool, bool) {
 	if d.Err != nil {

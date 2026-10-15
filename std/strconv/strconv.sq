@@ -82,9 +82,14 @@ func FormatInt(buf []byte, v int) string {
 }
 
 // AppendFloat appends v with prec digits after the decimal point, like Go's
-// strconv.AppendFloat(dst, v, 'f', prec, 64): the exact binary value rounded half to even. A negative
-// prec counts as 0. The result can be long (1e300 has 301 digits), so size dst for it.
+// strconv.AppendFloat(dst, v, 'f', prec, 64): the exact binary value rounded half to even. The
+// result can be long (1e300 has 301 digits), so size dst for it. prec -1 gives the shortest digits
+// that read back to v, in plain notation for 1e-6 <= |v| < 1e21 and exponent notation outside
+// (1.5e+300), as JSON and JavaScript write numbers; other negative precs count as 0.
 func AppendFloat(dst []byte, v float64, prec int) []byte {
+	if prec == -1 {
+		return appendShortest(dst, v)
+	}
 	bits := math.Float64bits(v)
 	exp := int(bits>>52) & 0x7ff
 	mant := bits & (1<<52 - 1)

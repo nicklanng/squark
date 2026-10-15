@@ -518,3 +518,4 @@ Append one line per work session: date, items closed, anything left half-done.
 - 2026-10-15: five examples written by separate agents found E1–E16 (section E). Examples
   committed with workarounds.
 - 2026-10-15: section E closed (E1–E16). Left out on purpose: shortest-float formatting and ParseFloat (need a correctly rounding algorithm), decoder recovery after an error, compile-time detection of a map without storage.
+- 2026-10-15: shortest float formatting (`AppendFloat(dst, v, -1)`), `strconv.ParseFloat` and `json.Decoder.Float` added (exact decimal arithmetic adapted from Go's strconv); `TestFloatConversions` checks 20000 values against Go.

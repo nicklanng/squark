@@ -1,0 +1,46 @@
+package main
+
+// Floats as text: shortest form with AppendFloat(dst, v, -1), ParseFloat, and json.Decoder.Float.
+// (TestFloatConversions checks both against Go on 20000 values.)
+
+import (
+	"json"
+	"strconv"
+)
+
+func show(v float64) {
+	var b [64]byte
+	print(string(strconv.AppendFloat(b[:0], v, -1)), " ")
+}
+
+func main() {
+	show(0.1)
+	show(1.0 / 3)
+	show(100)
+	show(1e21)
+	show(1e-7)
+	show(-0.0)
+	println()
+	for _, s := range [6]string{"3.5", "1e-3", "  ", "0x10", "1e999", "-Infinity"} {
+		f, err := strconv.ParseFloat(s)
+		show(f)
+		println(err == nil)
+	}
+	var doc [64]byte
+	n := copy(doc[:], `{"price": 3.25, "qty": 2, "big": 1e400}`)
+	d := json.NewDecoder(doc[:n])
+	var key [8]byte
+	d.BeginObject()
+	sum := 0.0
+	for {
+		k, ok := d.Field(key[:])
+		if !ok {
+			break
+		}
+		f, ok := d.Float()
+		println(k, ok)
+		sum += f
+	}
+	show(sum)
+	println(d.Err != nil)
+}

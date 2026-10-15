@@ -1,0 +1,11 @@
+0.1 0.3333333333333333 100 1e+21 1e-7 0 
+3.5 true
+0.001 true
+0 false
+0 false
++Inf false
+-Inf true
+price true
+qty true
+big false
+5.25 true
