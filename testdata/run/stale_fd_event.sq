@@ -1,0 +1,94 @@
+package main
+
+// Stale poller events must not uncount a goroutine's current wait (the scheduler stops polling
+// when it counts no waiters, and reports a false deadlock):
+//   - a read registration still queued when another goroutine closes the descriptor fails (kqueue
+//     reports EBADF for it) after the reader has moved on to another connection;
+//   - a WaitReadable that timed out is followed by data on that connection while its goroutine
+//     waits on another one.
+
+import (
+	"net"
+	"runtime"
+	"strconv"
+	"time"
+)
+
+var c1, c2, p1, p2 net.Conn
+var done chan string cap 4
+
+task closedReader() pool 1 {
+	var buf [16]byte
+	if _, err := c1.Read(buf[:]); err == nil {
+		done <- "c1: data"
+		return
+	}
+	n, err := c2.Read(buf[:])
+	if err != nil {
+		done <- "c2: error"
+		return
+	}
+	done <- string(buf[:n]) in str
+}
+
+task graceReader() pool 1 {
+	if c1.WaitReadable(10 * time.Millisecond) {
+		done <- "c1: readable"
+		return
+	}
+	var buf [16]byte
+	n, err := c2.Read(buf[:])
+	if err != nil {
+		done <- "c2: error"
+		return
+	}
+	done <- string(buf[:n]) in str
+}
+
+arena str 64
+
+func addr(port int) string {
+	var b [32]byte
+	return string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), port)) in str
+}
+
+func pair(l net.Listener, a string) (net.Conn, net.Conn) {
+	c, err := net.Dial(a)
+	if err != nil {
+		panic(err)
+	}
+	p, err := l.Accept()
+	if err != nil {
+		panic(err)
+	}
+	return c, p
+}
+
+func main() {
+	l, err := net.Listen("127.0.0.1:0")
+	if err != nil {
+		panic(err)
+	}
+	a := addr(l.Port())
+
+	c1, p1 = pair(l, a)
+	c2, p2 = pair(l, a)
+	go closedReader()
+	runtime.Gosched() // the reader is parked on c1, its registration not yet sent to the poller
+	c1.Close()
+	time.Sleep(50 * time.Millisecond)
+	p2.WriteString("after close")
+	println(<-done)
+	p1.Close()
+	c2.Close()
+	p2.Close()
+
+	c1, p1 = pair(l, a)
+	c2, p2 = pair(l, a)
+	go graceReader()
+	time.Sleep(50 * time.Millisecond) // WaitReadable has timed out; the reader waits on c2
+	p1.WriteString("late")
+	time.Sleep(50 * time.Millisecond)
+	p2.WriteString("after timeout")
+	println(<-done)
+}

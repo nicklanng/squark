@@ -140,8 +140,9 @@ typedef struct sq_shard {
 	int64_t next_gid;
 	int64_t total_parked; // goroutines blocked on channels/slots (not fds/timers)
 	int64_t fd_waiters;   // outstanding netpoll registrations
-	uint8_t outbuf[8192]; // println output, flushed at exit and before writes to fd 1
+	uint8_t outbuf[8192]; // println output, flushed at newlines, exit and before writes to fd 1
 	size_t outlen;
+	atomic_flag outlock;  // with several shards: lets an exiting thread write this one's buffer
 	int pollfd; // kqueue or epoll
 	sq_pool *const *pools; // this shard's copy of every pool, by sq_pool.index
 	sq_g **timer_heap;
@@ -200,6 +201,7 @@ static atomic_int_fast64_t live_shards;
 
 static void heap_remove(sq_g *g);
 static void heap_up(int64_t i);
+static int64_t deadline(int64_t ns);
 static void err_write(const char *s);
 static void stack_report(void);
 static bool stackcheck;
@@ -382,20 +384,62 @@ static void write_all(int fd, const void *p, size_t n) {
 	}
 }
 
+// A shard's output buffer is its own, but a thread that ends the process (os.Exit, a panic, the
+// last main returning) writes every shard's buffered partial line first. With several shards the
+// buffer is therefore guarded by a spin lock that only the exiting thread ever contends for.
+static void out_lock(sq_shard *s) {
+	if (sq_shard_count > 1)
+		while (atomic_flag_test_and_set_explicit(&s->outlock, memory_order_acquire)) {}
+}
+
+static void out_unlock(sq_shard *s) {
+	if (sq_shard_count > 1) atomic_flag_clear_explicit(&s->outlock, memory_order_release);
+}
+
+static void flush_locked(sq_shard *s) {
+	if (s->outlen) write_all(1, s->outbuf, s->outlen);
+	s->outlen = 0;
+}
+
 void sq_flush(void) {
 	if (!sq_self) return; // a helper thread: nothing buffered
-	if (sq_self->outlen) write_all(1, sq_self->outbuf, sq_self->outlen);
-	sq_self->outlen = 0;
+	out_lock(sq_self);
+	flush_locked(sq_self);
+	out_unlock(sq_self);
 }
 
 static void out(const void *p, size_t n) {
-	if (sq_self->outlen + n > sizeof sq_self->outbuf) sq_flush();
+	out_lock(sq_self);
+	if (sq_self->outlen + n > sizeof sq_self->outbuf) flush_locked(sq_self);
 	if (n > sizeof sq_self->outbuf) {
 		write_all(1, p, n);
-		return;
+	} else {
+		memcpy(sq_self->outbuf + sq_self->outlen, p, n);
+		sq_self->outlen += n;
 	}
-	memcpy(sq_self->outbuf + sq_self->outlen, p, n);
-	sq_self->outlen += n;
+	out_unlock(sq_self);
+}
+
+static sq_shard *_Atomic all_shards[SQ_MAX_SHARDS]; // (defined with the threads code)
+
+// exit_flush writes every shard's buffered output (this thread's first) before the process exits.
+// It may run in a signal handler that interrupted out(), so it never waits long for a lock: a
+// buffer it can't lock is skipped. The locks it takes are kept, so nothing is added meanwhile.
+static void exit_flush(void) {
+	for (int64_t k = -1; k < sq_shard_count; k++) {
+		sq_shard *s = k < 0 ? sq_self : atomic_load(&all_shards[k]);
+		if (!s || (k >= 0 && s == sq_self)) continue;
+		if (sq_shard_count <= 1) {
+			if (s == sq_self) flush_locked(s);
+			continue;
+		}
+		bool locked = false;
+		for (int i = 0; i < 100 && !(locked = !atomic_flag_test_and_set_explicit(&s->outlock, memory_order_acquire)); i++) {
+			struct timespec ts = {0, 10000};
+			nanosleep(&ts, NULL);
+		}
+		if (locked) flush_locked(s);
+	}
 }
 
 void sq_print_byte(uint8_t c) {
@@ -513,6 +557,7 @@ static void err_int(int64_t v) {
 
 static SQ_NORETURN void die(const char *file, int line) {
 	if (!sq_self) { // a helper thread, in a blocking C call
+		exit_flush();
 		err_write("\n\nin a blocking C call (helper thread)\nexit status 2\n");
 		_exit(2);
 	}
@@ -536,28 +581,28 @@ static SQ_NORETURN void die(const char *file, int line) {
 }
 
 void sq_panic_cstr(const char *msg, const char *file, int line) {
-	sq_flush();
+	exit_flush();
 	err_write("panic: ");
 	err_write(msg);
 	die(file, line);
 }
 
 void sq_panic_str(sq_string msg, const char *file, int line) {
-	sq_flush();
+	exit_flush();
 	err_write("panic: ");
 	write_all(2, msg.p, (size_t)msg.len);
 	die(file, line);
 }
 
 void sq_panic_int(int64_t v, const char *file, int line) {
-	sq_flush();
+	exit_flush();
 	err_write("panic: ");
 	err_int(v);
 	die(file, line);
 }
 
 void sq_panic_index(int64_t i, int64_t n, const char *file, int line) {
-	sq_flush();
+	exit_flush();
 	err_write("panic: runtime error: index out of range [");
 	err_int(i);
 	err_write("] with length ");
@@ -566,7 +611,7 @@ void sq_panic_index(int64_t i, int64_t n, const char *file, int line) {
 }
 
 void sq_panic_slice(int64_t lo, int64_t hi, int64_t max, int64_t cap, const char *file, int line) {
-	sq_flush();
+	exit_flush();
 	err_write("panic: runtime error: slice bounds out of range [");
 	err_int(lo);
 	err_write(":");
@@ -579,7 +624,7 @@ void sq_panic_slice(int64_t lo, int64_t hi, int64_t max, int64_t cap, const char
 }
 
 void sq_panic_append(int64_t need, int64_t cap, const char *file, int line) {
-	sq_flush();
+	exit_flush();
 	err_write("panic: runtime error: append exceeds capacity (need ");
 	err_int(need);
 	err_write(", capacity ");
@@ -589,7 +634,7 @@ void sq_panic_append(int64_t need, int64_t cap, const char *file, int line) {
 }
 
 void sq_panic_arena(sq_arena *a, int64_t need, const char *file, int line) {
-	sq_flush();
+	exit_flush();
 	err_write("panic: arena ");
 	err_write(a->name);
 	err_write(" is full (capacity ");
@@ -632,7 +677,7 @@ static void on_fault(int sig, siginfo_t *si, void *uctx) {
 		if (addr >= lo && addr < hi) {
 			uintptr_t off = (addr - lo) % (uintptr_t)p->slot_size;
 			if (off < (uintptr_t)pagesz) {
-				sq_flush();
+				exit_flush();
 				err_write("fatal error: stack overflow in goroutine [");
 				err_write(p->name);
 				err_write("] (a C function used more stack than its //squark:stack budget)");
@@ -640,7 +685,7 @@ static void on_fault(int sig, siginfo_t *si, void *uctx) {
 			}
 		}
 	}
-	sq_flush();
+	exit_flush();
 	if (addr < 65536) {
 		err_write("panic: runtime error: invalid memory address or nil pointer dereference");
 	} else {
@@ -1071,13 +1116,19 @@ static bool chan_try_recv(sq_chan *c, void *out, bool *ok, sq_waiter **wk) {
 	return false;
 }
 
+// chan_remote reports whether waiters on c may be woken by another scheduler thread. With one
+// thread a shared channel is a local one (under its lock): a goroutine blocked on it counts as
+// parked, so a deadlock is reported instead of the thread sleeping forever.
+static bool chan_remote(sq_chan *c) { return c->shared && sq_shard_count > 1; }
+
 // chan_park parks the running goroutine after queueing w on c (c's lock held if shared).
 static void chan_park(sq_chan *c) {
-	if (c->shared) {
+	if (chan_remote(c)) {
 		park_shared(&c->mu);
 		return;
 	}
 	sq_self->total_parked++;
+	chan_unlock(c);
 	sq_park();
 }
 
@@ -1100,7 +1151,7 @@ void sq_chan_send(sq_chan *c, const void *elem, const char *file, int line) {
 		if (wk) wake(wk);
 		return;
 	}
-	sq_waiter w = {.g = sq_self->cur_g, .elem = (void *)elem, .remote = c->shared};
+	sq_waiter w = {.g = sq_self->cur_g, .elem = (void *)elem, .remote = chan_remote(c)};
 	wq_push(&c->sendq_head, &c->sendq_tail, &w);
 	chan_park(c);
 	if (!w.ok) sq_panic_cstr("send on closed channel", file, line);
@@ -1116,7 +1167,7 @@ bool sq_chan_recv(sq_chan *c, void *outp) {
 		if (wk) wake(wk);
 		return ok;
 	}
-	sq_waiter w = {.g = sq_self->cur_g, .elem = outp, .remote = c->shared};
+	sq_waiter w = {.g = sq_self->cur_g, .elem = outp, .remote = chan_remote(c)};
 	wq_push(&c->recvq_head, &c->recvq_tail, &w);
 	chan_park(c);
 	if (!w.ok) memset(outp, 0, (size_t)c->elemsize);
@@ -1204,7 +1255,7 @@ int64_t sq_select(sq_scase *cs, sq_waiter *ws, int64_t n, bool block, int64_t ti
 	sq_g *g = sq_self->cur_g;
 	sq_sel sel;
 	atomic_init(&sel.fired, -1);
-	bool remote = nl > 0;
+	bool remote = nl > 0 && sq_shard_count > 1; // see chan_remote
 	for (int64_t i = 0; i < n; i++) {
 		sq_chan *c = cs[i].c;
 		if (!c) continue;
@@ -1217,7 +1268,7 @@ int64_t sq_select(sq_scase *cs, sq_waiter *ws, int64_t n, bool block, int64_t ti
 	if (timeout_ns >= 0) {
 		g->sel_timer = &tw;
 		g->wait_fd = -1;
-		g->wake_at = sq_nanotime() + timeout_ns;
+		g->wake_at = deadline(timeout_ns);
 		g->heap_index = sq_self->ntimers;
 		sq_self->timer_heap[sq_self->ntimers++] = g;
 		heap_up(g->heap_index);
@@ -1230,6 +1281,7 @@ int64_t sq_select(sq_scase *cs, sq_waiter *ws, int64_t n, bool block, int64_t ti
 		sq_ctx_switch(&g->ctx, &sq_self->sched_ctx);
 	} else {
 		sq_self->total_parked++;
+		UNLOCK_ALL();
 		sq_park();
 	}
 #undef UNLOCK_ALL
@@ -1498,6 +1550,13 @@ int64_t sq_unixnano(void) {
 	return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 }
 
+// deadline is the monotonic time ns from now, saturating: a huge duration (time.Duration(math.MaxInt64))
+// means "never", not a time in the past.
+static int64_t deadline(int64_t ns) {
+	int64_t now = sq_nanotime();
+	return ns > INT64_MAX - now ? INT64_MAX : now + ns;
+}
+
 void sq_sleep(int64_t ns) {
 	if (ns <= 0) {
 		sq_gosched();
@@ -1505,7 +1564,7 @@ void sq_sleep(int64_t ns) {
 	}
 	sq_g *g = sq_self->cur_g;
 	g->wait_fd = -1;
-	g->wake_at = sq_nanotime() + ns;
+	g->wake_at = deadline(ns);
 	g->heap_index = sq_self->ntimers;
 	sq_self->timer_heap[sq_self->ntimers++] = g;
 	heap_up(g->heap_index);
@@ -1545,6 +1604,43 @@ static void epoll_arm(int fd, fd_slot *s) {
 }
 #endif
 
+static void idle_event(int fd, int tag);
+static void fd_event(sq_g *g, int fd);
+
+#if SQ_KQUEUE
+// kq_event delivers one kqueue event (or a failed registration's EV_ERROR, which wakes its waiter
+// so that its syscall reports the error).
+static void kq_event(const struct kevent *ev) {
+	if ((uintptr_t)ev->udata & 1) { // idle set: udata is tag<<1 | 1 (goroutines are aligned)
+		idle_event((int)ev->ident, (int)((uintptr_t)ev->udata >> 1));
+		return;
+	}
+	fd_event(ev->udata, (int)ev->ident); // NULL udata: a wakeup or a withdrawn registration
+}
+
+// kq_flush sends the batched registrations without collecting events. Each change asks for a
+// receipt (EV_RECEIPT), so every change is applied: without room for an error in the event list,
+// kevent would stop at a failing change and drop the ones after it.
+static void kq_flush(void) {
+	struct kevent res[16];
+	struct timespec zero = {0, 0};
+	for (int i = 0; i < sq_self->nchanges; i += 16) {
+		int k = sq_self->nchanges - i < 16 ? sq_self->nchanges - i : 16;
+		for (int j = 0; j < k; j++) sq_self->changes[i + j].flags |= EV_RECEIPT;
+		int n = kevent(sq_self->pollfd, sq_self->changes + i, k, res, k, &zero);
+		for (int j = 0; j < n; j++)
+			if (!(res[j].flags & EV_ERROR) || res[j].data != 0) kq_event(&res[j]); // not a plain receipt
+	}
+	sq_self->nchanges = 0;
+}
+
+// kq_change queues a registration change for the next kevent call.
+static void kq_change(int fd, int16_t filter, uint16_t flags, void *udata) {
+	if (sq_self->nchanges == (int)(sizeof sq_self->changes / sizeof sq_self->changes[0])) kq_flush();
+	EV_SET(&sq_self->changes[sq_self->nchanges++], fd, filter, flags, 0, 0, udata);
+}
+#endif
+
 // arm_fd registers the current goroutine to be woken when fd is readable (mode 'r') or writable
 // ('w').
 static void arm_fd(int fd, int mode) {
@@ -1557,11 +1653,7 @@ static void arm_fd(int fd, int mode) {
 		else s->wr = g;
 	}
 #if SQ_KQUEUE
-	if (sq_self->nchanges == (int)(sizeof sq_self->changes / sizeof sq_self->changes[0])) {
-		kevent(sq_self->pollfd, sq_self->changes, sq_self->nchanges, NULL, 0, NULL);
-		sq_self->nchanges = 0;
-	}
-	EV_SET(&sq_self->changes[sq_self->nchanges++], fd, mode == 'r' ? EVFILT_READ : EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, sq_self->cur_g);
+	kq_change(fd, mode == 'r' ? EVFILT_READ : EVFILT_WRITE, EV_ADD | EV_ONESHOT, sq_self->cur_g);
 #else
 	if (s) {
 		epoll_arm(fd, s);
@@ -1586,7 +1678,10 @@ static bool wait_fd(int fd, int mode) {
 }
 
 // fd_event delivers a readiness event; stale events (for a goroutine no longer waiting on that
-// fd) are dropped.
+// fd) are dropped. A stale event must leave g's armed count alone: it belongs to g's current wait
+// (another fd, say), and uncounting it would stop the scheduler polling for it. Stale events come
+// from a kqueue registration that fails because the fd was closed before it was sent, and from
+// an event that arrives after its goroutine was woken some other way (a timer).
 static void fd_event(sq_g *g, int fd) {
 	if (!g) return;
 	fd_slot *s = slot(fd);
@@ -1594,18 +1689,16 @@ static void fd_event(sq_g *g, int fd) {
 		if (s->rd == g) s->rd = NULL;
 		if (s->wr == g) s->wr = NULL;
 	}
+	if (g->state != G_WAITING || g->wait_fd != fd) return;
 	if (g->armed) {
 		g->armed = false;
 		sq_self->fd_waiters--;
 	}
-	if (g->state != G_WAITING || g->wait_fd != fd) return;
 	g->wait_fd = -1;
 	g->wake = WAKE_FD;
 	heap_remove(g);
 	sq_ready(g);
 }
-
-static void idle_event(int fd, int tag);
 
 #if !SQ_KQUEUE
 // fd_ready delivers an epoll event for a table fd to its reader and/or writer, and re-arms the
@@ -1650,16 +1743,11 @@ static void netpoll(int64_t timeout_ns) {
 		ts.tv_nsec = timeout_ns % 1000000000;
 		tsp = &ts;
 	}
+	// the event list has room for an error from every change (changes[] is no longer), so a
+	// failing change doesn't stop the others from being applied
 	int n = kevent(sq_self->pollfd, sq_self->changes, sq_self->nchanges, events, 256, tsp);
 	sq_self->nchanges = 0;
-	for (int i = 0; i < n; i++) {
-		if ((uintptr_t)events[i].udata & 1) { // idle set: udata is tag<<1 | 1 (goroutines are aligned)
-			idle_event((int)events[i].ident, (int)((uintptr_t)events[i].udata >> 1));
-			continue;
-		}
-		// EV_ERROR (e.g. fd closed) also wakes the waiter so its syscall reports the error
-		fd_event(events[i].udata, (int)events[i].ident);
-	}
+	for (int i = 0; i < n; i++) kq_event(&events[i]);
 #else
 	struct epoll_event events[256];
 	int ms = timeout_ns < 0 ? -1 : (int)((timeout_ns + 999999) / 1000000);
@@ -1711,29 +1799,37 @@ static void release(uint8_t *p, int64_t n) {
 }
 
 // sq_wait_idle parks until fd is readable (returns 0) or until grace_ns passes first (returns 1).
-// On timeout the read registration stays armed; the caller either waits again or hands the fd to
-// the idle set with sq_park_idle.
+// On timeout the read registration is withdrawn; the caller either waits again or hands the fd to
+// the idle set with sq_park_idle, both of which register it anew.
 int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 	sq_g *g = sq_self->cur_g;
 	arm_fd((int)fd, 'r');
-	g->wake_at = sq_nanotime() + grace_ns;
+	g->wake_at = deadline(grace_ns);
 	g->heap_index = sq_self->ntimers;
 	sq_self->timer_heap[sq_self->ntimers++] = g;
 	heap_up(g->heap_index);
 	sq_park();
 	if (g->wake == WAKE_FD || g->wake == WAKE_CLOSED) return 0; // closed: the read reports it
-#if !SQ_KQUEUE
-	// The read registration would otherwise stay armed for g after it moves on. epoll events carry
-	// only g, not the fd, so fd_event can't tell such a stale event from a wait g starts later (a
-	// time.Sleep, or another fd). Disarm it; waiting again or sq_park_idle re-registers the fd.
-	// (kqueue events carry the fd, which fd_event checks.)
-	struct epoll_event ev = {.events = 0};
-	epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, (int)fd, &ev);
+	// Timed out. Left armed, the registration would count g as waiting on fd after it moves on
+	// (a goroutine blocked on a channel would then hang instead of being reported as a deadlock),
+	// and its late event would be stale.
+	fd_slot *s = slot((int)fd);
+	bool mine = !s || s->rd == g; // else another goroutine has registered to read fd since
+	if (s && s->rd == g) s->rd = NULL;
+#if SQ_KQUEUE
+	if (mine) kq_change((int)fd, EVFILT_READ, EV_DELETE, NULL); // fails harmlessly if it fired
+#else
+	if (s && (s->rd || s->wr)) {
+		epoll_arm((int)fd, s); // keep the other direction's registration (another goroutine's)
+	} else if (mine) {
+		struct epoll_event ev = {.events = 0};
+		epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, (int)fd, &ev);
+	}
+#endif
 	if (g->armed) {
 		g->armed = false;
 		sq_self->fd_waiters--;
 	}
-#endif
 	return 1;
 }
 
@@ -1764,11 +1860,7 @@ void sq_park_idle(int64_t fd, int64_t tag) {
 	if (tag < 0 || tag > 255) sq_panic_cstr("idle tag out of range", __FILE__, __LINE__);
 	if (fd >= 1 << 24) sq_panic_cstr("fd too large for the idle set", __FILE__, __LINE__);
 #if SQ_KQUEUE
-	if (sq_self->nchanges == (int)(sizeof sq_self->changes / sizeof sq_self->changes[0])) {
-		kevent(sq_self->pollfd, sq_self->changes, sq_self->nchanges, NULL, 0, NULL);
-		sq_self->nchanges = 0;
-	}
-	EV_SET(&sq_self->changes[sq_self->nchanges++], (int)fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, (void *)(((uintptr_t)tag << 1) | 1));
+	kq_change((int)fd, EVFILT_READ, EV_ADD | EV_ONESHOT, (void *)(((uintptr_t)tag << 1) | 1));
 #else
 	struct epoll_event ev = {.events = EPOLLIN | EPOLLONESHOT};
 	ev.data.u64 = ((uint64_t)tag << 33) | ((uint64_t)(uint32_t)fd << 1) | 1;
@@ -1982,6 +2074,7 @@ int64_t sq_close(int64_t fd) {
 int64_t sq_open(sq_string path, int64_t flags, int64_t mode) {
 	char buf[1024];
 	if (path.len >= (int64_t)sizeof buf) return -ENAMETOOLONG;
+	if (path.len > 0 && memchr(path.p, 0, (size_t)path.len)) return -EINVAL; // C would stop at the NUL: a different file
 	memcpy(buf, path.p, (size_t)path.len);
 	buf[path.len] = 0;
 	int f = 0;
@@ -2041,7 +2134,7 @@ static pthread_mutex_t listen_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct {
 	uint32_t addr;
 	uint16_t port;      // network order
-	int shared_fd;      // macOS: the process's socket for this address (the table's own copy)
+	int shared_fd;      // macOS with threads: the shards' socket for this address (the table's own copy), or -1
 	uint64_t shards[SQ_MAX_SHARDS / 64]; // which shards listen on it
 } listen_table[SQ_MAX_LISTEN];
 static int nlisten;
@@ -2073,7 +2166,7 @@ int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
 	}
 	int64_t fd;
 #if SQ_KQUEUE
-	if (e >= 0 && sq_shard_count > 1) {
+	if (e >= 0 && listen_table[e].shared_fd >= 0) {
 		fd = dup(listen_table[e].shared_fd);
 		if (fd < 0) fd = -errno;
 	} else
@@ -2084,8 +2177,14 @@ int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
 		memset(&listen_table[e], 0, sizeof listen_table[e]);
 		listen_table[e].addr = sa.sin_addr.s_addr;
 		listen_table[e].port = sa.sin_port;
-		listen_table[e].shared_fd = dup((int)fd);
+		listen_table[e].shared_fd = -1;
 	}
+#if SQ_KQUEUE
+	// the table keeps its own copy for the other shards, closed when no shard listens any more
+	if (fd >= 0 && e >= 0 && sq_shard_count > 1 && listen_table[e].shared_fd < 0) {
+		listen_table[e].shared_fd = fcntl((int)fd, F_DUPFD_CLOEXEC, 0);
+	}
+#endif
 	if (fd >= 0 && e >= 0) {
 		listen_table[e].shards[me / 64] |= (uint64_t)1 << (me % 64);
 		if (sq_self->nlisteners < (int)(sizeof sq_self->listeners / sizeof sq_self->listeners[0])) {
@@ -2098,7 +2197,9 @@ int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
 	return fd;
 }
 
-// listener_closed forgets that this shard listens through fd, so it may listen there again.
+// listener_closed forgets that this shard listens through fd, so it may listen there again. When
+// no shard listens on the address any more, the table's copy of the socket is closed too, or the
+// address would go on accepting connections nobody takes.
 static void listener_closed(int fd) {
 	for (int i = 0; i < sq_self->nlisteners; i++) {
 		if (sq_self->listeners[i].fd != fd) continue;
@@ -2106,6 +2207,13 @@ static void listener_closed(int fd) {
 		int64_t me = sq_self->id;
 		pthread_mutex_lock(&listen_mu);
 		listen_table[e].shards[me / 64] &= ~((uint64_t)1 << (me % 64));
+		bool any = false;
+		for (size_t k = 0; k < sizeof listen_table[e].shards / sizeof listen_table[e].shards[0]; k++)
+			if (listen_table[e].shards[k]) any = true;
+		if (!any && listen_table[e].shared_fd >= 0) {
+			close(listen_table[e].shared_fd);
+			listen_table[e].shared_fd = -1;
+		}
 		pthread_mutex_unlock(&listen_mu);
 		sq_self->listeners[i] = sq_self->listeners[--sq_self->nlisteners];
 		return;
@@ -2215,7 +2323,7 @@ sq_string sq_strerror(int64_t err) {
 int64_t sq_getpid(void) { return (int64_t)getpid(); }
 
 void sq_exit(int64_t code) {
-	sq_flush();
+	exit_flush();
 	_exit((int)code);
 }
 
@@ -2260,6 +2368,8 @@ int64_t sq_pool_stat(int64_t i, int64_t which) {
 // ---------------------------------------------------------------------------
 // scheduler
 
+#define SQ_MAX_SLEEP_NS (3600 * (int64_t)1000000000) // an hour
+
 static void schedule(void) {
 	int64_t switches = 0;
 	for (;;) {
@@ -2292,7 +2402,10 @@ static void schedule(void) {
 					// returning from main ends the program, like Go; with threads N, once every
 					// shard's main has returned. Until then this shard keeps running its other
 					// goroutines: other shards' connections may be queued on its listening socket.
-					if (atomic_fetch_sub(&live_shards, 1) == 1) _exit(0);
+					if (atomic_fetch_sub(&live_shards, 1) == 1) {
+						exit_flush(); // other shards' goroutines may have printed since
+						_exit(0);
+					}
 					sq_self->main_done = true;
 					continue;
 				}
@@ -2314,7 +2427,7 @@ static void schedule(void) {
 		if (sq_self->runq_head) continue;
 		if (sq_self->fd_waiters == 0 && sq_self->ntimers == 0 && sq_self->idle_parked == 0 && sq_self->shared_parked == 0) {
 			if (sq_self->main_done) pthread_exit(NULL); // nothing left on this shard
-			sq_flush();
+			exit_flush();
 			err_write("fatal error: all goroutines are asleep - deadlock!\n");
 			_exit(2);
 		}
@@ -2322,6 +2435,9 @@ static void schedule(void) {
 		if (sq_self->ntimers > 0) {
 			timeout = sq_self->timer_heap[0]->wake_at - sq_nanotime();
 			if (timeout < 0) timeout = 0;
+			// a far-off timer: wake up now and then and look again (the pollers' timeouts are
+			// limited: epoll takes an int of milliseconds)
+			if (timeout > SQ_MAX_SLEEP_NS) timeout = SQ_MAX_SLEEP_NS;
 		}
 		if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0 || sq_self->shared_parked > 0) {
 			netpoll(timeout);
@@ -2356,7 +2472,7 @@ static void stack_report(void) {
 
 static void on_term(int sig) {
 	(void)sig;
-	sq_flush();
+	exit_flush();
 	if (stackcheck) stack_report();
 	_exit(0);
 }
@@ -2371,6 +2487,7 @@ static pid_t worker_pids[SQ_MAX_WORKERS];
 static volatile sig_atomic_t stop_signal;
 
 static void on_stop(int sig) { stop_signal = sig; }
+static void on_child(int sig) { (void)sig; } // only interrupts sigsuspend
 
 static void err_num(int64_t v) {
 	char b[24];
@@ -2409,13 +2526,29 @@ static void run_workers(void) {
 		}
 		worker_pids[i] = pid;
 	}
-	// supervisor: pass stop signals on, wait for every worker, and stop all if one fails
+	// supervisor: pass stop signals on, wait for every worker, and stop all if one fails. The
+	// signals are blocked except inside sigsuspend, so one that arrives between looking at
+	// stop_signal and waiting isn't left unforwarded until a worker happens to exit.
+	sigset_t watched, waitmask;
+	sigemptyset(&watched);
+	sigaddset(&watched, SIGINT);
+	sigaddset(&watched, SIGTERM);
+	sigaddset(&watched, SIGHUP);
+	sigaddset(&watched, SIGCHLD);
+	sigprocmask(SIG_BLOCK, &watched, &waitmask);
+	sigdelset(&waitmask, SIGINT);
+	sigdelset(&waitmask, SIGTERM);
+	sigdelset(&waitmask, SIGHUP);
+	sigdelset(&waitmask, SIGCHLD);
 	struct sigaction sa;
 	memset(&sa, 0, sizeof sa);
-	sa.sa_handler = on_stop; // no SA_RESTART: waitpid returns EINTR so the signal is forwarded
+	sa.sa_handler = on_stop;
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGHUP, &sa, NULL);
+	sa.sa_handler = on_child; // the default action ignores SIGCHLD, which wouldn't end sigsuspend
+	sa.sa_flags = SA_NOCLDSTOP;
+	sigaction(SIGCHLD, &sa, NULL);
 	int64_t alive = n;
 	int status = 0;
 	int forwarded = 0;
@@ -2426,7 +2559,11 @@ static void run_workers(void) {
 				if (worker_pids[i] > 0) kill(worker_pids[i], forwarded);
 		}
 		int st;
-		pid_t p = waitpid(-1, &st, 0);
+		pid_t p = waitpid(-1, &st, WNOHANG);
+		if (p == 0) {
+			sigsuspend(&waitmask); // until a stop signal or a worker's exit
+			continue;
+		}
 		if (p < 0) {
 			if (errno == EINTR) continue;
 			break;
@@ -2460,7 +2597,7 @@ static void run_workers(void) {
 
 #define SQ_SIGSTACK_SIZE 32768
 int64_t sq_shard_count = 1;
-static sq_shard *_Atomic all_shards[SQ_MAX_SHARDS]; // for the watchdog
+static sq_shard *_Atomic all_shards[SQ_MAX_SHARDS]; // for the watchdog and exit_flush
 // live_shards (declared with sq_shard): shards whose main hasn't returned
 
 static size_t align16(size_t n) { return (n + 15) & ~(size_t)15; }

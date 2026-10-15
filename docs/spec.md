@@ -368,8 +368,10 @@ is not necessarily NaN, and `min(0.0, -0.0)` may return either zero.
 ### Builtins
 
 `len`, `cap`, `append`, `copy` (also `copy(dst []byte, src string)`), `delete`, `close`, `min`,
-`max`, `panic(x)` (x is a string, integer, bool or error), `print`/`println` (write to **stdout**;
-accept numbers, strings, bools, pointers, errors and `[]byte`), `new`/`make` (arena only).
+`max`, `panic(x)` (x is a string, integer, bool or error), `print`/`println` (write to **stdout**
+a line at a time, so threads' lines don't mix; a partial line is written before other output to
+stdout, and every thread's at exit or a panic; accept numbers, strings, bools, pointers, errors and
+`[]byte`), `new`/`make` (arena only).
 
 ## 6. Statements
 
@@ -545,7 +547,8 @@ func handle(w *http.ResponseWriter, r *http.Request) {
   combined with `budget`). `threads` and `workers` combine: workers × threads shards in all.
   Shards share only constants, `shared var` data and shared channels. A shard whose goroutines
   all wait on shared channels sleeps until another shard wakes them, so a deadlock across shards
-  hangs instead of reporting `all goroutines are asleep`. Externs are called from whichever shard
+  hangs instead of reporting `all goroutines are asleep` (with one thread, a goroutine blocked on a
+  shared channel is reported like any other). Externs are called from whichever shard
   runs the goroutine (or a helper thread, for `blocking` externs), so C libraries must be
   thread-safe (libc and SQLite are; each shard opens its own SQLite connection, since package
   variables are per shard: `thread var db sqlite.DB`).
@@ -577,6 +580,10 @@ squark check [dir]                              # type and lifetime check only
 squark doc [dir] [pkg]                          # API with provenance; `squark doc std` for the stdlib
 squark emit-c [dir]                             # the generated C
 ```
+
+`squark run` passes SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGALRM, SIGUSR1 and SIGUSR2 on to the program
+and exits with its status (128+n if a signal ended it); one that arrives during the build removes
+the temporary files and exits with 128+n.
 
 ## 11. A complete program
 

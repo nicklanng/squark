@@ -1,0 +1,64 @@
+package main
+
+// A duration too large to add to the clock (time.Duration(math.MaxInt64)) means "never": it must
+// not wrap into the past or stop the thread's other timers. Test program for TestHugeDurations
+// (internal/driver), which kills it if it hangs.
+
+import (
+	"math"
+	"net"
+	"strconv"
+	"time"
+)
+
+const forever = time.Duration(math.MaxInt64)
+
+var never chan int cap 1
+
+task sleeper() pool 1 {
+	time.Sleep(forever)
+	println("sleeper woke")
+}
+
+task selecter() pool 1 {
+	select {
+	case <-never:
+		println("received")
+	case <-time.After(forever):
+		println("select timed out")
+	}
+}
+
+task waiter(c net.Conn) pool 1 {
+	println("readable:", c.WaitReadable(forever))
+}
+
+func main() {
+	l, err := net.Listen("127.0.0.1:0")
+	if err != nil {
+		panic(err)
+	}
+	var b [32]byte
+	a := string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), l.Port()))
+	c, err := net.Dial(a)
+	if err != nil {
+		panic(err)
+	}
+	server, err := l.Accept()
+	if err != nil {
+		panic(err)
+	}
+	_ = c
+	go waiter(server)
+	go sleeper()
+	go selecter()
+	start := time.Now()
+	time.Sleep(100 * time.Millisecond)
+	d := time.Since(start)
+	println(d >= 100*time.Millisecond, d < 5*time.Second)
+	select {
+	case <-never:
+	case <-time.After(50 * time.Millisecond):
+		println("main's select timed out")
+	}
+}

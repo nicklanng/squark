@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -32,16 +33,17 @@ func writeProgram(t *testing.T, dir, src string) {
 	}
 }
 
-const sleeper = "package main\n\nimport \"time\"\n\nfunc main() {\n\tprintln(\"ready\")\n\ttime.Sleep(time.Hour)\n}\n"
+const sleeper = "package main\n\nimport (\n\t\"os\"\n\t\"time\"\n)\n\nfunc main() {\n\tprintln(\"ready\", os.Getpid())\n\ttime.Sleep(time.Hour)\n}\n"
 
 // TestRunSignals: a signal to `squark run` reaches the program, the exit status says which signal
-// (128+n, as a shell reports it), and the temporary binary is removed.
+// (128+n, as a shell reports it), the program doesn't outlive squark, and the temporary binary is
+// removed.
 func TestRunSignals(t *testing.T) {
 	squark := squarkBin(t)
 	for _, tc := range []struct {
 		sig  syscall.Signal
 		code int
-	}{{syscall.SIGTERM, 143}, {syscall.SIGINT, 130}} {
+	}{{syscall.SIGTERM, 143}, {syscall.SIGINT, 130}, {syscall.SIGHUP, 129}, {syscall.SIGQUIT, 131}, {syscall.SIGALRM, 142}} {
 		t.Run(tc.sig.String(), func(t *testing.T) {
 			root := t.TempDir()
 			prog := filepath.Join(root, "sleeper")
@@ -52,6 +54,7 @@ func TestRunSignals(t *testing.T) {
 			cmd.Env = append(os.Environ(), "TMPDIR="+tmp)
 			var stdout bytes.Buffer
 			cmd.Stdout = &stdout
+			cmd.WaitDelay = 2 * time.Second // an orphaned program would hold stdout open
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -76,6 +79,70 @@ func TestRunSignals(t *testing.T) {
 			if !errors.As(err, &ee) || ee.ExitCode() != tc.code {
 				t.Errorf("exit: %v, want status %d", err, tc.code)
 			}
+			if left, _ := os.ReadDir(tmp); len(left) > 0 {
+				t.Errorf("temporary files left behind: %v", left)
+			}
+			if f := strings.Fields(stdout.String()); len(f) == 2 {
+				pid, _ := strconv.Atoi(f[1])
+				if pid > 0 && syscall.Kill(pid, 0) == nil {
+					syscall.Kill(pid, syscall.SIGKILL)
+					t.Errorf("the program (pid %d) outlived squark run", pid)
+				}
+			} else {
+				t.Errorf("program output %q", stdout.String())
+			}
+		})
+	}
+}
+
+// TestRunSignalDuringBuild: a signal while `squark run` is still compiling ends it with 128+n and
+// removes its temporary directories (the build's too).
+func TestRunSignalDuringBuild(t *testing.T) {
+	squark := squarkBin(t)
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) {
+			root := t.TempDir()
+			prog := filepath.Join(root, "sleeper")
+			writeProgram(t, prog, sleeper)
+			tmp := filepath.Join(root, "tmp")
+			os.Mkdir(tmp, 0o755)
+			// a C compiler that says when it starts, then takes its time
+			marker := filepath.Join(root, "cc-started")
+			slowcc := filepath.Join(root, "slowcc")
+			script := "#!/bin/sh\ntouch " + marker + "\nsleep 1\nexec cc \"$@\"\n"
+			if err := os.WriteFile(slowcc, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(squark, "run", prog)
+			cmd.Env = append(os.Environ(), "TMPDIR="+tmp, "CC="+slowcc)
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; ; i++ {
+				if _, err := os.Stat(marker); err == nil {
+					break
+				}
+				if i == 400 {
+					cmd.Process.Kill()
+					t.Fatal("the build did not start")
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			cmd.Process.Signal(sig)
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				cmd.Process.Kill()
+				t.Fatal("squark run did not exit")
+			}
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != 128+int(sig) {
+				t.Errorf("exit: %v, want status %d", err, 128+int(sig))
+			}
+			time.Sleep(1500 * time.Millisecond) // the compiler, still running, finds its directory gone
 			if left, _ := os.ReadDir(tmp); len(left) > 0 {
 				t.Errorf("temporary files left behind: %v", left)
 			}

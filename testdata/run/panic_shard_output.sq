@@ -1,0 +1,24 @@
+package main
+
+// With threads, a panic on one thread writes what the other threads have buffered first: a print
+// without a newline stays in its thread's buffer until then.
+
+import (
+	"runtime"
+	"time"
+)
+
+threads 2
+
+shared var ready chan int cap 1
+
+func main() {
+	if runtime.Shard() == 1 {
+		print("partial line from thread 1")
+		ready <- 1
+		time.Sleep(time.Hour)
+	}
+	<-ready
+	print("thread 0 panics")
+	panic("stop")
+}

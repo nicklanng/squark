@@ -2,6 +2,8 @@
 // the heap: column text is copied into caller-provided buffers.
 package sqlite
 
+import "os"
+
 link "sqlite3"
 cflags "-I/opt/homebrew/opt/sqlite/include"
 ldflags "-L/opt/homebrew/opt/sqlite/lib"
@@ -92,6 +94,11 @@ func check(rc int) error {
 // meanwhile wait for it. Exec, Prepare, Changes and LastInsertRowID hold it for the call (or join
 // the statement the goroutine is running: call Changes and LastInsertRowID before Reset).
 func Open(path string) (DB, error) {
+	for i := 0; i < len(path); i++ {
+		if path[i] == 0 { // C would stop at the NUL and open another file
+			return DB{}, os.Errno(22) // EINVAL, as os.Open reports it
+		}
+	}
 	var h rawptr
 	rc := open(path, &h)
 	return DB{h: h}, check(rc)

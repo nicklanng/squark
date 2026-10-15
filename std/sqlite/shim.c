@@ -89,6 +89,7 @@ int64_t sq_sqlite_open(sq_string path, conn **out) {
 	char buf[1024];
 	*out = NULL;
 	if (path.len >= (int64_t)sizeof buf) return SQLITE_CANTOPEN;
+	if (path.len > 0 && memchr(path.p, 0, (size_t)path.len)) return SQLITE_CANTOPEN; // Open reports EINVAL first
 	memcpy(buf, path.p, (size_t)path.len);
 	buf[path.len] = 0;
 	conn *c = sqlite3_malloc(sizeof *c);
