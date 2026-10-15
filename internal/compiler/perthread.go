@@ -1,6 +1,9 @@
 package compiler
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // PerThreadVar is a package variable that, with threads N, every scheduler thread has its own copy
 // of, and that the program changes after start-up: its value can differ from thread to thread (a
@@ -48,6 +51,14 @@ func PerThreadVars(prog *Program) []PerThreadVar {
 type ptWalker struct {
 	fn    *Func
 	found map[*Var]string
+	uses  map[*Var]*storageUse // for NoStorageErrors (nil otherwise)
+}
+
+// storageUse records how a package map or channel view is used: given storage (assigned as a
+// whole, or its address taken) and used (written into, sent on, received from...).
+type storageUse struct {
+	given bool
+	used  *Pos
 }
 
 // perThread reports whether v is a package variable with one copy per scheduler thread that
@@ -89,11 +100,26 @@ func globalOf(x Expr) *Var {
 
 // written records that x (a variable, or an element or field of one) is changed.
 func (w *ptWalker) written(x Expr, how string) {
+	direct := true
 	for {
 		if v := globalOf(x); v != nil {
 			w.note(v, how)
+			if w.uses != nil {
+				u := w.uses[v]
+				if u == nil {
+					u = &storageUse{}
+					w.uses[v] = u
+				}
+				if direct && (how == "written" || how == "address taken") {
+					u.given = true
+				} else if u.used == nil {
+					p := x.Pos()
+					u.used = &p
+				}
+			}
 			return
 		}
+		direct = false
 		switch e := unparen(x).(type) {
 		case *IndexExpr:
 			x = e.X
@@ -285,4 +311,44 @@ func (w *ptWalker) expr(x Expr) {
 		w.expr(e.X)
 		w.expr(e.Arena)
 	}
+}
+
+// NoStorageErrors reports package map and channel views that nothing ever gives storage (no
+// initializer, never assigned as a whole, address never taken) but that the program writes to, sends
+// on or receives from: at run time a write would panic and a channel operation block forever.
+// (`var m map[K]V` without `cap N` is the usual slip.)
+func NoStorageErrors(prog *Program) ErrorList {
+	uses := map[*Var]*storageUse{}
+	for _, p := range prog.Packages {
+		for _, fn := range p.Funcs {
+			if fn.Decl == nil || fn.Decl.Body == nil {
+				continue
+			}
+			w := &ptWalker{fn: fn, found: map[*Var]string{}, uses: uses}
+			w.stmt(fn.Decl.Body)
+		}
+	}
+	var errs ErrorList
+	for _, p := range prog.Packages {
+		if p.Std {
+			continue
+		}
+		for _, v := range p.Globals {
+			if v.Type == nil || v.Spec == nil || len(v.Spec.Values) > 0 {
+				continue
+			}
+			u := uses[v]
+			if u == nil || u.given || u.used == nil {
+				continue
+			}
+			switch t := v.Type.Underlying().(type) {
+			case *Map:
+				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a map with no storage: nothing assigns it, so writing to it (line %d) would panic; declare it %s map[%s]%s cap N", v.Name, u.used.Line, v.Name, t.Key, t.Value)})
+			case *Chan:
+				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a channel with no storage: nothing assigns it, so using it (line %d) would block forever; declare it %s chan %s cap N", v.Name, u.used.Line, v.Name, t.Elem)})
+			}
+		}
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Pos.Line < errs[j].Pos.Line })
+	return errs
 }

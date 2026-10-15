@@ -1,0 +1,22 @@
+package main
+
+var counts map[string]int // ERROR "counts is a map with no storage: nothing assigns it, so writing to it (line 14) would panic; declare it counts map[string]int cap N"
+var ok map[string]int cap 4
+var given map[string]int
+var events chan int // ERROR "events is a channel with no storage: nothing assigns it, so using it (line 17) would block forever; declare it events chan int cap N"
+var unused map[int]int
+var viaPtr map[int]int
+
+arena a 1K
+
+func main() {
+	given = make(map[string]int, 4) in a
+	counts["x"]++
+	ok["y"] = 1
+	given["z"] = 2
+	events <- 1
+	println(len(unused))
+	p := &viaPtr
+	_ = p
+	viaPtr[1] = 1
+}

@@ -85,6 +85,9 @@ func Compile(prog *Program) ([]*Func, error) {
 	if err := Check(prog); err != nil {
 		return nil, err
 	}
+	if errs := NoStorageErrors(prog); len(errs) > 0 {
+		return nil, errs
+	}
 	order, err := CallGraphOrder(prog)
 	if err != nil {
 		return nil, err

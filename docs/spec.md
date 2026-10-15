@@ -438,6 +438,8 @@ must not outlive the memory it points to:
 | `anytype is only allowed as the type of a function's parameter` | make the function take it as a parameter; results, variables and fields have concrete types |
 | `F has anytype parameters: it can only be called` | wrap the call in a named function with concrete parameter types, and pass that |
 | `... (in pkg.F with x T, called at file:line)` | the error is in F's body for that argument type: pass a type that supports what F does with it |
+| `m is a map with no storage` | declare it `var m map[K]V cap N`, or assign it storage (`m = make(map[K]V, n) in a`) |
+| `c is a channel with no storage` | declare it `var c chan T cap N` |
 | `only tasks can be preemptible` | mark the task the work runs in; functions it calls yield too |
 | `only extern functions can be blocking` | drop `blocking`; squark code waits by parking already (channels, I/O, sleeps) |
 | `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (error constants, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |
