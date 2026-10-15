@@ -8,6 +8,19 @@ import (
 	"strings"
 )
 
+// docText renders a declaration's doc comment, one "// " line each, ending in a newline.
+func docText(doc []string) string {
+	var b strings.Builder
+	for _, l := range doc {
+		if l == "" {
+			b.WriteString("//\n")
+		} else {
+			b.WriteString("// " + l + "\n")
+		}
+	}
+	return b.String()
+}
+
 // DocLine renders a function signature with its provenance (declared or inferred), e.g.
 //
 //	func Cut(s, sep string) (string, string, bool) from s, sep
@@ -89,6 +102,14 @@ func DocLine(fn *Func) string {
 		}
 		b.WriteString(" (" + strings.Join(rs, ", ") + ")")
 	}
+	if fn.Summary == nil && fn.Sig.HasContract && len(from) == 0 {
+		// a generic function's template is never analyzed: show its declared contract
+		for _, i := range fn.Sig.From {
+			if i < len(slots) {
+				from = append(from, slots[i].Name)
+			}
+		}
+	}
 	hasRefResult := false
 	for _, r := range fn.Sig.Results {
 		if HasRefs(r.Type) {
@@ -142,9 +163,14 @@ func DocPackage(p *Package, all bool) string {
 			if o.Type != nil && !isUntyped(o.Type) {
 				t = " " + o.Type.String()
 			}
-			consts = append(consts, entry{o.Pos, fmt.Sprintf("const %s%s = %s", name, t, v)})
+			var doc []string
+			if cd, ok := o.decl.(constDecl); ok {
+				doc = cd.spec.Doc
+			}
+			consts = append(consts, entry{o.Pos, docText(doc) + fmt.Sprintf("const %s%s = %s", name, t, v)})
 		case ObjVar:
 			v := o.Var
+			n := len(vars)
 			switch {
 			case v.ArenaSize > 0:
 				vars = append(vars, entry{o.Pos, fmt.Sprintf("arena %s %d", name, v.ArenaSize)})
@@ -159,12 +185,18 @@ func DocPackage(p *Package, all bool) string {
 			default:
 				vars = append(vars, entry{o.Pos, fmt.Sprintf("var %s %s", name, v.Type)})
 			}
+			if v.Spec != nil && len(vars) > n {
+				vars[n].text = docText(v.Spec.Doc) + vars[n].text
+			}
 		case ObjType:
 			n, ok := o.Type.(*Named)
 			if !ok {
 				continue
 			}
 			var b strings.Builder
+			if o.TypeDecl != nil {
+				b.WriteString(docText(o.TypeDecl.Doc))
+			}
 			if st, ok := n.Underlying().(*Struct); ok {
 				fmt.Fprintf(&b, "type %s struct {", name)
 				hidden := false
@@ -184,7 +216,7 @@ func DocPackage(p *Package, all bool) string {
 			}
 			for _, m := range n.Methods {
 				if show(m.Name) {
-					b.WriteString("\n" + DocLine(m))
+					b.WriteString("\n" + docText(m.Decl.Doc) + DocLine(m))
 				}
 			}
 			types = append(types, entry{o.Pos, b.String()})
@@ -195,7 +227,7 @@ func DocPackage(p *Package, all bool) string {
 		if f.RecvType != nil || !show(f.Name) || f.Sig == nil || f.GenericOf != nil {
 			continue // instances are documented by their template
 		}
-		funcs = append(funcs, entry{f.Decl.P, DocLine(f)})
+		funcs = append(funcs, entry{f.Decl.P, docText(f.Decl.Doc) + DocLine(f)})
 	}
 	byPos := func(es []entry) {
 		sort.Slice(es, func(i, j int) bool {

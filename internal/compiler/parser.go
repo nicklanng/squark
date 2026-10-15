@@ -121,9 +121,15 @@ func (p *parser) file(path string) *File {
 				// shared var x = expr: one copy for all scheduler threads, read-only after init;
 				// thread var x: one copy per thread, like var, said on purpose
 				pragmas := p.tok.pragmas
+				doc := p.tok.doc
 				shared := p.tok.lit == "shared"
 				p.next()
 				d := p.genDecl()
+				for _, vs := range d.Values {
+					if vs.Doc == nil {
+						vs.Doc = doc
+					}
+				}
 				d.Shared = shared
 				d.Thread = !shared
 				d.Pragmas = pragmas
@@ -205,14 +211,17 @@ func (p *parser) clauses(d *FuncDecl) {
 
 func (p *parser) topDecl() any {
 	pragmas := p.tok.pragmas
+	doc := p.tok.doc
 	switch p.tok.tok {
 	case FUNC:
 		d := p.funcDecl()
+		d.Doc = doc
 		d.Pragmas = pragmas
 		p.semi()
 		return d
 	case TASK:
 		d := p.funcDecl()
+		d.Doc = doc
 		d.Pragmas = pragmas
 		p.semi()
 		return d
@@ -229,6 +238,7 @@ func (p *parser) topDecl() any {
 			panic(bailout{})
 		}
 		d := p.funcDecl()
+		d.Doc = doc
 		d.Kind = KindExtern
 		d.ExternSym = sym
 		d.P = pos
@@ -446,10 +456,12 @@ func (p *parser) params() []*Field {
 
 func (p *parser) genDecl() *GenDecl {
 	d := &GenDecl{Tok: p.tok.tok, P: p.tok.pos}
+	doc := p.tok.doc
 	p.next()
 	one := func(iota int, prev *ValueSpec) *ValueSpec {
 		if d.Tok == TYPE {
-			ts := &TypeSpec{P: p.tok.pos, Name: p.ident()}
+			ts := &TypeSpec{P: p.tok.pos, Doc: p.tok.doc}
+			ts.Name = p.ident()
 			if p.tok.tok == ASSIGN {
 				p.errorf(p.tok.pos, "type aliases are not supported")
 			}
@@ -457,7 +469,7 @@ func (p *parser) genDecl() *GenDecl {
 			d.Types = append(d.Types, ts)
 			return nil
 		}
-		vs := &ValueSpec{P: p.tok.pos, Iota: iota}
+		vs := &ValueSpec{P: p.tok.pos, Iota: iota, Doc: p.tok.doc}
 		vs.Names = append(vs.Names, p.ident())
 		for p.got(COMMA) {
 			vs.Names = append(vs.Names, p.ident())
@@ -488,6 +500,12 @@ func (p *parser) genDecl() *GenDecl {
 		p.expect(RPAREN)
 	} else {
 		one(0, nil)
+		for _, vs := range d.Values { // the declaration's comment is the spec's
+			vs.Doc = doc
+		}
+		for _, ts := range d.Types {
+			ts.Doc = doc
+		}
 	}
 	return d
 }

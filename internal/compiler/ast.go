@@ -52,9 +52,9 @@ type Ident struct {
 
 type BasicLit struct {
 	ExprInfo
-	P   Pos
+	P    Pos
 	Kind Tok // INT, FLOAT, CHAR, STRING
-	Lit string
+	Lit  string
 }
 
 type CompositeLit struct {
@@ -99,18 +99,18 @@ const (
 
 type IndexExpr struct {
 	ExprInfo
-	X     Expr
-	Index Expr
-	P     Pos
+	X       Expr
+	Index   Expr
+	P       Pos
 	CommaOk bool // v, ok := m[k]
 }
 
 type SliceExpr struct {
 	ExprInfo
-	X        Expr
-	Lo, Hi   Expr
-	Max      Expr
-	P        Pos
+	X      Expr
+	Lo, Hi Expr
+	Max    Expr
+	P      Pos
 }
 
 type CallExpr struct {
@@ -137,9 +137,9 @@ type StarExpr struct {
 
 type UnaryExpr struct {
 	ExprInfo
-	P  Pos
-	Op Tok
-	X  Expr
+	P       Pos
+	Op      Tok
+	X       Expr
 	CommaOk bool // v, ok := <-ch
 }
 
@@ -233,27 +233,27 @@ type FuncType struct {
 	ResultStatic bool
 }
 
-func (x *Ident) Pos() Pos        { return x.P }
-func (x *BasicLit) Pos() Pos     { return x.P }
-func (x *CompositeLit) Pos() Pos { return x.P }
-func (x *KeyValueExpr) Pos() Pos { return x.Key.Pos() }
-func (x *ParenExpr) Pos() Pos    { return x.P }
-func (x *SelectorExpr) Pos() Pos { return x.Sel.P }
-func (x *IndexExpr) Pos() Pos    { return x.X.Pos() } // as go/ast: where the expression starts
-func (x *SliceExpr) Pos() Pos    { return x.X.Pos() }
-func (x *CallExpr) Pos() Pos     { return x.Fun.Pos() }
-func (x *StarExpr) Pos() Pos     { return x.P }
-func (x *UnaryExpr) Pos() Pos    { return x.P }
-func (x *BinaryExpr) Pos() Pos   { return x.P }
-func (x *ArrayType) Pos() Pos    { return x.P }
-func (x *MapType) Pos() Pos      { return x.P }
-func (x *ChanType) Pos() Pos     { return x.P }
-func (x *StructType) Pos() Pos   { return x.P }
+func (x *Ident) Pos() Pos         { return x.P }
+func (x *BasicLit) Pos() Pos      { return x.P }
+func (x *CompositeLit) Pos() Pos  { return x.P }
+func (x *KeyValueExpr) Pos() Pos  { return x.Key.Pos() }
+func (x *ParenExpr) Pos() Pos     { return x.P }
+func (x *SelectorExpr) Pos() Pos  { return x.Sel.P }
+func (x *IndexExpr) Pos() Pos     { return x.X.Pos() } // as go/ast: where the expression starts
+func (x *SliceExpr) Pos() Pos     { return x.X.Pos() }
+func (x *CallExpr) Pos() Pos      { return x.Fun.Pos() }
+func (x *StarExpr) Pos() Pos      { return x.P }
+func (x *UnaryExpr) Pos() Pos     { return x.P }
+func (x *BinaryExpr) Pos() Pos    { return x.P }
+func (x *ArrayType) Pos() Pos     { return x.P }
+func (x *MapType) Pos() Pos       { return x.P }
+func (x *ChanType) Pos() Pos      { return x.P }
+func (x *StructType) Pos() Pos    { return x.P }
 func (x *ArenaTypeExpr) Pos() Pos { return x.P }
 func (x *VecTypeExpr) Pos() Pos   { return x.P }
 func (x *TryExpr) Pos() Pos       { return x.P }
 func (x *InExpr) Pos() Pos        { return x.P }
-func (x *FuncType) Pos() Pos     { return x.P }
+func (x *FuncType) Pos() Pos      { return x.P }
 
 // ---- statements ----
 
@@ -392,43 +392,43 @@ type ArenaStmt struct {
 
 type EmptyStmt struct{ P Pos }
 
-func (s *ExprStmt) Pos() Pos     { return s.X.Pos() }
-func (s *SendStmt) Pos() Pos     { return s.P }
-func (s *IncDecStmt) Pos() Pos   { return s.P }
-func (s *AssignStmt) Pos() Pos   { return s.Lhs[0].Pos() }
-func (s *GoStmt) Pos() Pos       { return s.P }
-func (s *DeferStmt) Pos() Pos    { return s.P }
-func (s *ReturnStmt) Pos() Pos   { return s.P }
-func (s *BranchStmt) Pos() Pos   { return s.P }
-func (s *BlockStmt) Pos() Pos    { return s.P }
-func (s *IfStmt) Pos() Pos       { return s.P }
-func (s *CaseClause) Pos() Pos   { return s.P }
-func (s *SwitchStmt) Pos() Pos   { return s.P }
-func (s *SelectStmt) Pos() Pos   { return s.P }
-func (s *ForStmt) Pos() Pos      { return s.P }
-func (s *RangeStmt) Pos() Pos    { return s.P }
-func (s *DeclStmt) Pos() Pos     { return s.Decl.P }
-func (s *LabeledStmt) Pos() Pos  { return s.P }
-func (s *EmptyStmt) Pos() Pos    { return s.P }
-func (s *ArenaStmt) Pos() Pos    { return s.P }
-func (*ExprStmt) stmt()          {}
-func (*SelectStmt) stmt()        {}
-func (*SendStmt) stmt()          {}
-func (*IncDecStmt) stmt()        {}
-func (*AssignStmt) stmt()        {}
-func (*GoStmt) stmt()            {}
-func (*DeferStmt) stmt()         {}
-func (*ReturnStmt) stmt()        {}
-func (*BranchStmt) stmt()        {}
-func (*BlockStmt) stmt()         {}
-func (*IfStmt) stmt()            {}
-func (*CaseClause) stmt()        {}
-func (*SwitchStmt) stmt()        {}
-func (*ForStmt) stmt()           {}
-func (*RangeStmt) stmt()         {}
-func (*DeclStmt) stmt()          {}
-func (*LabeledStmt) stmt()       {}
-func (*EmptyStmt) stmt()         {}
+func (s *ExprStmt) Pos() Pos    { return s.X.Pos() }
+func (s *SendStmt) Pos() Pos    { return s.P }
+func (s *IncDecStmt) Pos() Pos  { return s.P }
+func (s *AssignStmt) Pos() Pos  { return s.Lhs[0].Pos() }
+func (s *GoStmt) Pos() Pos      { return s.P }
+func (s *DeferStmt) Pos() Pos   { return s.P }
+func (s *ReturnStmt) Pos() Pos  { return s.P }
+func (s *BranchStmt) Pos() Pos  { return s.P }
+func (s *BlockStmt) Pos() Pos   { return s.P }
+func (s *IfStmt) Pos() Pos      { return s.P }
+func (s *CaseClause) Pos() Pos  { return s.P }
+func (s *SwitchStmt) Pos() Pos  { return s.P }
+func (s *SelectStmt) Pos() Pos  { return s.P }
+func (s *ForStmt) Pos() Pos     { return s.P }
+func (s *RangeStmt) Pos() Pos   { return s.P }
+func (s *DeclStmt) Pos() Pos    { return s.Decl.P }
+func (s *LabeledStmt) Pos() Pos { return s.P }
+func (s *EmptyStmt) Pos() Pos   { return s.P }
+func (s *ArenaStmt) Pos() Pos   { return s.P }
+func (*ExprStmt) stmt()         {}
+func (*SelectStmt) stmt()       {}
+func (*SendStmt) stmt()         {}
+func (*IncDecStmt) stmt()       {}
+func (*AssignStmt) stmt()       {}
+func (*GoStmt) stmt()           {}
+func (*DeferStmt) stmt()        {}
+func (*ReturnStmt) stmt()       {}
+func (*BranchStmt) stmt()       {}
+func (*BlockStmt) stmt()        {}
+func (*IfStmt) stmt()           {}
+func (*CaseClause) stmt()       {}
+func (*SwitchStmt) stmt()       {}
+func (*ForStmt) stmt()          {}
+func (*RangeStmt) stmt()        {}
+func (*DeclStmt) stmt()         {}
+func (*LabeledStmt) stmt()      {}
+func (*EmptyStmt) stmt()        {}
 
 // ---- declarations ----
 
@@ -440,6 +440,7 @@ type ImportSpec struct {
 }
 
 type ValueSpec struct {
+	Doc    []string // the comment lines above it (or above its declaration)
 	Names  []*Ident
 	Type   Expr
 	Values []Expr
@@ -448,13 +449,14 @@ type ValueSpec struct {
 }
 
 type TypeSpec struct {
+	Doc  []string
 	Name *Ident
 	Type Expr
 	P    Pos
 }
 
 type GenDecl struct {
-	Tok     Tok // CONST, VAR, TYPE
+	Tok     Tok  // CONST, VAR, TYPE
 	Shared  bool // shared var: one copy for every scheduler thread, read-only after initialization
 	Thread  bool // thread var: one copy per scheduler thread (as var), on purpose
 	Values  []*ValueSpec
@@ -472,6 +474,7 @@ const (
 )
 
 type FuncDecl struct {
+	Doc     []string
 	Recv    *Field
 	Name    *Ident
 	Type    *FuncType
@@ -479,12 +482,12 @@ type FuncDecl struct {
 	Pragmas []string
 	P       Pos
 
-	Kind      FuncKind
-	ExternSym string // extern "sym" (empty: same as Name)
-	Pool      Expr   // task ... pool N
-	Stack     Expr   // ... stack N
-	Blocking  bool   // extern ... blocking: the call runs on a helper thread
-	BlockingPos Pos
+	Kind           FuncKind
+	ExternSym      string // extern "sym" (empty: same as Name)
+	Pool           Expr   // task ... pool N
+	Stack          Expr   // ... stack N
+	Blocking       bool   // extern ... blocking: the call runs on a helper thread
+	BlockingPos    Pos
 	Preemptible    bool // task ... preemptible: its loops may yield after a time slice
 	PreemptiblePos Pos
 }
@@ -505,9 +508,9 @@ type ArenaDecl struct {
 }
 
 type File struct {
-	Path    string
-	Package string
-	Imports []*ImportSpec
+	Path       string
+	Package    string
+	Imports    []*ImportSpec
 	Decls      []any // *GenDecl, *FuncDecl or *ArenaDecl
 	Pragmas    []string
 	Directives []*Directive

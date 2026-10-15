@@ -485,7 +485,7 @@ language as a user would. Repros below are minimal; the examples carry workaroun
 
 ### Docs
 
-- [ ] **E16.** Spec/stdlib gaps: vectors aren't comparable; arena growth policy (append reserves cap
+- [x] **E16.** — documented in the spec (vectors not comparable, arena growth, port 0 under threads, `select {}`, `try` and named results, the report with a budget, helper stacks, per-thread runtime data, a conn crossing threads, one fd from two goroutines); `squark doc` (and so `stdlib.md`) now prints doc comments, and shows a generic function's declared provenance. Was: Spec/stdlib gaps: vectors aren't comparable; arena growth policy (append reserves cap
   4, outgrown slices stay); listening on port 0 with threads gives each thread its own port;
   `select {}`; `try` zeroes named results; the memory report prints whenever a budget is declared;
   helper stacks are at least 64 KiB; ~350 KiB of runtime data per thread; a `net.Conn` (an fd) may
@@ -517,3 +517,4 @@ Append one line per work session: date, items closed, anything left half-done.
 - 2026-10-14: audited every libc call (both OSes); R21 found and fixed; no-heap test widened.
 - 2026-10-15: five examples written by separate agents found E1–E16 (section E). Examples
   committed with workarounds.
+- 2026-10-15: section E closed (E1–E16). Left out on purpose: shortest-float formatting and ParseFloat (need a correctly rounding algorithm), decoder recovery after an error, compile-time detection of a map without storage.

@@ -24,26 +24,45 @@ func Contains(s string, substr string) bool
 func TrimSpace(s string) string from s
 func TrimPrefix(s string, prefix string) string from s
 func TrimSuffix(s string, suffix string) string from s
+// Cut slices s around the first instance of sep.
 func Cut(s string, sep string) (string, string, bool) from s
+// CutPrefix returns s without prefix and true, or s and false if s doesn't start with prefix.
 func CutPrefix(s string, prefix string) (string, bool) from s
+// CutSuffix returns s without suffix and true, or s and false if s doesn't end with suffix.
 func CutSuffix(s string, suffix string) (string, bool) from s
+// AppendRepeat appends n copies of s (Go's Repeat, into the caller's memory).
 func AppendRepeat(dst []byte, s string, n int) []byte from dst
+// EqualFold reports ASCII case-insensitive equality.
 func EqualFold(a string, b string) bool
+// AppendLower appends the ASCII-lowercased s to dst.
 func AppendLower(dst []byte, s string) []byte from dst
+// Split splits s around sep into out, returning the used part of out. An empty sep splits after
+// each UTF-8 sequence, as in Go. It stops when out is full; the last element then holds the
+// unsplit remainder.
 func Split(s string into out, sep string, out []string) []string from out
+// Fields splits s around runs of ASCII whitespace into out.
 func Fields(s string into out, out []string) []string from out
+// Count counts the non-overlapping instances of sub in s; an empty sub counts the runes plus one,
+// as in Go.
 func Count(s string, sub string) int
 
 package bufio
 
 const ErrTooLong = error(-10, "bufio: line longer than the buffer")
 
+// Reader holds input read ahead of the lines returned so far.
 type Reader struct {
 	// unexported fields
 }
+// Buffered returns how many bytes have been read from the source but not returned yet.
 func (r *bufio.Reader) Buffered() int
-func (r *bufio.Reader) ReadLine(src anytype) (string, error) static
+// ReadLine returns the next line from src, without its "\n" or "\r\n", as a view of the buffer
+// that stays valid until the next call. A last line without a newline is returned before the
+// source's error (io.EOF at the end of the input). A line longer than the buffer is skipped and
+// reported as ErrTooLong; the next call reads the line after it.
+func (r *bufio.Reader) ReadLine(src anytype) (string, error) from r
 
+// NewReader returns a Reader that buffers into storage (its capacity is the longest line).
 func NewReader(storage []byte) bufio.Reader from storage
 
 package math
@@ -66,10 +85,15 @@ extern func Exp(x float64) float64 stack 1024
 extern func Log(x float64) float64 stack 1024
 extern func Sin(x float64) float64 stack 1024
 extern func Cos(x float64) float64 stack 1024
+// Float64bits returns the IEEE 754 bits of f.
 extern func Float64bits(f float64) uint64 stack 1024
+// Float64frombits returns the float64 with IEEE 754 bits b.
 extern func Float64frombits(b uint64) float64 stack 1024
+// Round returns x rounded to the nearest integer, halves away from zero.
 extern func Round(x float64) float64 stack 1024
+// Trunc returns the integer part of x.
 extern func Trunc(x float64) float64 stack 1024
+// Mod returns the remainder of x/y, with the sign of x.
 extern func Mod(x float64, y float64) float64 stack 1024
 extern func Log2(x float64) float64 stack 1024
 extern func Log10(x float64) float64 stack 1024
@@ -77,9 +101,14 @@ extern func Tan(x float64) float64 stack 1024
 extern func Atan(x float64) float64 stack 1024
 extern func Atan2(y float64, x float64) float64 stack 1024
 extern func Hypot(x float64, y float64) float64 stack 1024
+// Inf returns positive infinity if sign >= 0, negative infinity otherwise.
 func Inf(sign int) float64
+// NaN returns an IEEE 754 not-a-number value.
 func NaN() float64
+// IsNaN reports whether f is not a number.
 func IsNaN(f float64) bool
+// IsInf reports whether f is an infinity: either one if sign is 0, +Inf if sign > 0, -Inf if
+// sign < 0.
 func IsInf(f float64, sign int) bool
 
 package strconv
@@ -88,19 +117,36 @@ const ErrSyntax = error(22, "invalid syntax")
 const ErrRange = error(34, "value out of range")
 const ErrBase = error(22, "invalid base")
 
+// AppendInt appends the decimal form of v to dst.
 func AppendInt(dst []byte, v int) []byte from dst
+// AppendUint appends the decimal form of v to dst.
 func AppendUint(dst []byte, v uint64) []byte from dst
+// FormatInt writes v into buf and returns it as a string view of buf.
+// AppendIntBase appends v in base 2 to 36 (lower-case letters for digits over 9), as Go's
+// strconv.AppendInt(dst, v, base) does. Base 16 gives hex.
 func AppendIntBase(dst []byte, v int, base int) []byte from dst
+// AppendUintBase appends v in base 2 to 36.
 func AppendUintBase(dst []byte, v uint64, base int) []byte from dst
+// AppendIntPad appends v in decimal, padded on the left with pad to at least width bytes
+// (AppendIntPad(dst, 7, 3, '0') appends "007"; a zero-padded negative number keeps its sign first).
 func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst
 func FormatInt(buf []byte, v int) string from buf
+// AppendFloat appends v with prec digits after the decimal point, like Go's
+// strconv.AppendFloat(dst, v, 'f', prec, 64): the exact binary value rounded half to even. A negative
+// prec counts as 0. The result can be long (1e300 has 301 digits), so size dst for it.
 func AppendFloat(dst []byte, v float64, prec int) []byte from dst
+// Atoi parses a base-10 integer.
 func Atoi(s string) (int, error)
+// ParseInt parses an integer in the given base (2 to 36). Unlike Go there is no base 0, so no
+// prefixes and no '_' separators.
 func ParseInt(s string, base int) (int, error)
+// ParseBool accepts 1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False.
 func ParseBool(s string) (bool, error)
 
 package bytes
 
+// Buffer appends into storage supplied by the caller. It never grows: writes that do not fit
+// are truncated and reported with io.ErrShortBuffer.
 type Buffer struct {
 	// unexported fields
 }
@@ -111,22 +157,34 @@ func (b *bytes.Buffer) Bytes() []byte from b
 func (b *bytes.Buffer) String() string from b
 func (b *bytes.Buffer) Overflowed() bool
 func (b *bytes.Buffer) Reset()
+// Truncate keeps the first n bytes; like Go it panics unless 0 <= n <= Len().
 func (b *bytes.Buffer) Truncate(n int)
 func (b *bytes.Buffer) Write(p []byte) (int, error)
 func (b *bytes.Buffer) WriteString(s string) (int, error)
 func (b *bytes.Buffer) WriteByte(c byte) error
+// WriteInt appends the decimal form of v.
 func (b *bytes.Buffer) WriteInt(v int) error
 
+// NewBuffer returns a Buffer that writes into storage (its length is ignored, its capacity used).
 func NewBuffer(storage []byte) bytes.Buffer from storage
+// Equal reports whether a and b are the same bytes.
 func Equal(a []byte, b []byte) bool
+// IndexByte returns the index of the first c in s, or -1. (string(s) is a view of s, not a copy,
+// so the byte-slice functions are the strings package's.)
 func IndexByte(s []byte, c byte) int
+// Index returns the index of the first sep in s, or -1.
 func Index(s []byte, sep []byte) int
+// HasPrefix reports whether s begins with prefix.
 func HasPrefix(s []byte, prefix []byte) bool
 
 package errors
 
+// New returns an error with the given message. The message must be a string constant or
+// otherwise live in static memory; the compiler checks this at every call site.
 func New(msg static string) error
+// WithCode returns an error carrying an integer code.
 func WithCode(code int, msg static string) error
+// Is reports whether err is target.
 func Is(err error, target error) bool
 
 package os
@@ -142,6 +200,7 @@ var Stdin os.File
 var Stdout os.File
 var Stderr os.File
 
+// File is an open file descriptor. It is a plain value; copying it does not duplicate the descriptor.
 type File struct {
 	// unexported fields
 }
@@ -150,18 +209,28 @@ func (f os.File) Read(p []byte) (int, error)
 func (f os.File) Write(p []byte) (int, error)
 func (f os.File) WriteString(s string) (int, error)
 func (f os.File) Close() error
+// ReadFull reads into p until it is full or the file ends, returning the bytes read.
+// ReadFull reads exactly len(p) bytes. If the file ends first it returns what it read and
+// io.EOF (nothing read) or io.ErrUnexpectedEOF (some read), as Go's io.ReadFull does.
 func (f os.File) ReadFull(p []byte) (int, error)
 
 extern func Exit(code int) stack 8192
+// Getpid returns the process id (with workers N, each worker has its own).
 extern func Getpid() int stack 1024
 extern func Getenv(name string) string static stack 8192
+// Errno converts a positive errno value into an error.
 func Errno(n int) error
+// NArgs returns the number of command-line arguments, including the program name.
 func NArgs() int
+// Arg returns command-line argument i ("" if out of range). Arg(0) is the program name.
 func Arg(i int) string static
 func Open(path string) (os.File, error)
 func Create(path string) (os.File, error)
 func OpenFile(path string, flag int, perm int) (os.File, error)
+// FromFd wraps an existing descriptor.
 func FromFd(fd int) os.File
+// ReadFile reads the whole file at path into buf and returns the part it fills. A file that
+// doesn't fit is io.ErrTooLarge (buf then holds its beginning).
 func ReadFile(path string, buf []byte) ([]byte, error) from buf
 
 package time
@@ -178,6 +247,7 @@ func (d time.Duration) Nanoseconds() int
 func (d time.Duration) Microseconds() int
 func (d time.Duration) Milliseconds() int
 func (d time.Duration) Seconds() float64
+// Time is a monotonic instant plus the wall clock reading when it was taken.
 type Time struct {
 	// unexported fields
 }
@@ -189,7 +259,11 @@ func (t time.Time) Before(u time.Time) bool
 
 func Now() time.Time
 func Since(t time.Time) time.Duration
+// Sleep parks the calling goroutine for at least d.
 func Sleep(d time.Duration)
+// After is for select only: `case <-time.After(d):` runs if no other case is ready within d.
+// (squark has no heap to make a channel per call, so the compiler turns the case into a timer;
+// anywhere else, After is an error.)
 func After(d time.Duration) chan time.Time static
 
 package net
@@ -200,6 +274,7 @@ type Listener struct {
 	// unexported fields
 }
 func (l net.Listener) Accept() (net.Conn, error)
+// Port returns the port l listens on: the one the system chose, after Listen(":0").
 func (l net.Listener) Port() int
 func (l net.Listener) Close() error
 type Conn struct {
@@ -209,24 +284,45 @@ func (c net.Conn) Fd() int
 func (c net.Conn) Read(p []byte) (int, error)
 func (c net.Conn) Write(p []byte) (int, error)
 func (c net.Conn) WriteString(s string) (int, error)
+// Write2 writes a then b, using a single writev where possible.
 func (c net.Conn) Write2(a []byte, b []byte) (int, error)
+// WaitReadable parks until c is readable and returns true, or returns false if nothing arrives
+// within grace.
 func (c net.Conn) WaitReadable(grace time.Duration) bool
+// ParkIdle hands c to the runtime's idle set with a tag (0..255) that NextIdle returns with it,
+// e.g. to say which server it belongs to. No goroutine waits for it: when it becomes readable it is
+// returned by NextIdle. The calling goroutine's stack is returned to the OS when it exits, so an
+// idle connection costs no memory beyond the kernel's socket.
 func (c net.Conn) ParkIdle(tag int)
+// CloseWrite shuts down the sending side: the peer reads EOF once it has read everything sent,
+// while c can still read. Close a connection this way after a final reply, so the reply isn't
+// lost to a reset when unread input remains.
 func (c net.Conn) CloseWrite() error
 func (c net.Conn) Close() error
 
+// Listen opens a TCP listener on addr ("host:port" or ":port").
 func Listen(addr string) (net.Listener, error)
+// Dial connects to a TCP address.
 func Dial(addr string) (net.Conn, error)
+// NextIdle blocks until a parked connection becomes readable and returns it with its tag.
+// Only one goroutine may call NextIdle at a time.
 func NextIdle() (net.Conn, int)
+// IdleCount reports how many connections are parked in the idle set.
 func IdleCount() int
 
 package http
 
+// ReadBufferSize bounds request line + headers + body.
 const ReadBufferSize = 16384
+// WriteBufferSize is the response staging buffer; larger bodies stream as chunks.
 const WriteBufferSize = 16384
+// RequestArenaSize is the per-request arena (Request.Arena), freed when the response is done.
 const RequestArenaSize = 16384
 const MaxHeaders = 32
+// IdleRelease is how long a keep-alive connection may sit idle before its goroutine exits and the
+// connection moves to the runtime's idle set (where it costs no stack until its next request).
 const IdleRelease time.Duration = 100000000
+// MaxServers is how many Serve calls one process may run.
 const MaxServers = 16
 
 const ErrTooManyServers = error(503, "http: too many servers in one process")
@@ -235,6 +331,7 @@ type Header struct {
 	Name string
 	Value string
 }
+// Request fields are views into the connection's read buffer, valid until the handler returns.
 type Request struct {
 	Method string
 	Path string
@@ -245,24 +342,34 @@ type Request struct {
 	Arena arena
 	// unexported fields
 }
+// HeaderValue returns the first value of the named header (case-insensitive), or "".
 func (r *http.Request) HeaderValue(name string) string from r
+// NumHeaders and HeaderAt iterate the request headers.
 func (r *http.Request) NumHeaders() int
 func (r *http.Request) HeaderAt(i int) http.Header from r
+// QueryValue returns the raw (not unescaped) value of key in the query string.
 func (r *http.Request) QueryValue(key string) string from r
+// ResponseWriter stages the response in the connection goroutine's write buffer.
 type ResponseWriter struct {
 	// unexported fields
 }
+// SetHeader adds a response header. Content-Length, Date and Connection are managed for you.
 func (w *http.ResponseWriter) SetHeader(name string, value string)
+// WriteHeader sets the status code (it is sent with the first flush).
 func (w *http.ResponseWriter) WriteHeader(code int)
 func (w *http.ResponseWriter) Write(p []byte) (int, error)
 func (w *http.ResponseWriter) WriteString(s string) (int, error)
 func (w *http.ResponseWriter) WriteByte(c byte) error
 func (w *http.ResponseWriter) WriteInt(v int)
+// Status returns the status code that will be (or was) sent.
 func (w *http.ResponseWriter) Status() int
+// HandlerFunc handles one request.
 type HandlerFunc func(*http.ResponseWriter, *http.Request)
 
+// ListenAndServe listens on addr and serves each connection in its own goroutine.
 func ListenAndServe(addr string, h http.HandlerFunc) error
 func Serve(l net.Listener, h http.HandlerFunc) error
+// StatusText returns the reason phrase for a status code.
 func StatusText(code int) string static
 
 package utf8
@@ -270,9 +377,14 @@ package utf8
 const RuneError = 65533
 const MaxRune = 1114111
 
+// AppendRune appends the UTF-8 encoding of r to dst.
 func AppendRune(dst []byte, r int32) []byte from dst
+// RuneLen returns the number of bytes needed to encode r.
 func RuneLen(r int32) int
+// DecodeRuneInString returns the first rune of s and its width in bytes. Invalid UTF-8 gives
+// (RuneError, 1); an empty string gives (RuneError, 0).
 func DecodeRuneInString(s string) (int32, int)
+// RuneCountInString counts the runes in s.
 func RuneCountInString(s string) int
 
 package json
@@ -281,40 +393,71 @@ const ErrSyntax = error(1, "json: syntax error")
 const ErrType = error(2, "json: unexpected value type")
 const ErrBuffer = error(3, "json: string does not fit in buffer")
 
+// Decoder pulls values out of a JSON document.
 type Decoder struct {
 	Err error
 	// unexported fields
 }
+// BeginObject consumes '{'.
 func (d *json.Decoder) BeginObject() bool
+// BeginArray consumes '['.
 func (d *json.Decoder) BeginArray() bool
+// More reports whether the current array has another element (and consumes the separator).
 func (d *json.Decoder) More() bool
+// Field reads the next object key into keybuf, returning false at the end of the object.
 func (d *json.Decoder) Field(keybuf []byte) (string, bool) from keybuf
+// String decodes a JSON string into buf and returns a view of buf.
 func (d *json.Decoder) String(buf []byte) (string, bool) from buf
+// Int decodes an integer. A number with a fraction or exponent is ErrType (it is consumed).
 func (d *json.Decoder) Int() (int, bool)
+// Bool decodes true or false.
 func (d *json.Decoder) Bool() (bool, bool)
+// Null consumes a null if it is the next value and reports whether it was (a missing or optional
+// value; anything else is left for the other methods).
 func (d *json.Decoder) Null() bool
+// Skip skips one value of any type (iteratively; nesting is tracked with a counter).
 func (d *json.Decoder) Skip() bool
+// Offset returns how many bytes of the input have been consumed.
 func (d *json.Decoder) Offset() int
+// Line returns the 1-based line the decoder has reached (where an error was found, after one).
 func (d *json.Decoder) Line() int
+// End reports whether only whitespace remains.
 func (d *json.Decoder) End() bool
 
+// AppendString appends s as a quoted, escaped JSON string. Invalid UTF-8 becomes U+FFFD, and
+// U+2028 and U+2029 are escaped, as Go does.
 func AppendString(dst []byte, s string) []byte from dst
+// WriteString writes s to w as a JSON string literal, escaped as AppendString does, without
+// building it in memory first: runs that need no escaping go straight to w. w is any writer with
+// Write([]byte) and WriteString(string) methods (a *bytes.Buffer, *http.ResponseWriter, net.Conn
+// or os.File); their results are ignored. On an unbuffered writer (a Conn or File) each run is a
+// write: wrap it in a bytes.Buffer for strings with many escapes.
 func WriteString(w anytype, s string)
+// AppendInt appends a JSON number.
 func AppendInt(dst []byte, v int) []byte from dst
+// AppendBool appends true or false.
 func AppendBool(dst []byte, v bool) []byte from dst
 func NewDecoder(data []byte) json.Decoder from data
 
 package runtime
 
+// Shard returns the index of the calling goroutine's scheduler thread, from 0 to Shards()-1.
 extern func Shard() int stack 1024
+// Shards returns the number of scheduler threads in this process (threads N; 1 by default).
 extern func Shards() int stack 1024
+// Gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
+// Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
 extern func Gosched() stack 1024
 
 package sort
 
+// Slice sorts s ([]T for any T) by less (a func(a, b T) bool).
 func Slice(s anytype, less anytype)
+// IsSorted reports whether s is sorted by less.
 func IsSorted(s anytype, less anytype) bool
+// Ints sorts s in increasing order.
 func Ints(s []int)
+// Strings sorts s in increasing order.
 func Strings(s []string)
 
 package sqlite
@@ -333,24 +476,41 @@ const ErrTruncated = error(-1, "sqlite: column text larger than buffer")
 type DB struct {
 	// unexported fields
 }
+// Close closes the connection; nothing may use it afterwards (or be waiting for it).
 func (db sqlite.DB) Close() error
+// Exec runs one or more SQL statements that return no rows. Outside a transaction, a statement
+// that finds the database locked (another worker setting it up) is retried for up to 5 seconds.
 func (db sqlite.DB) Exec(sql string) error
+// Prepare compiles a statement for repeated use.
 func (db sqlite.DB) Prepare(sql string) (sqlite.Stmt, error)
 func (db sqlite.DB) Changes() int
 func (db sqlite.DB) LastInsertRowID() int
 type Stmt struct {
 	// unexported fields
 }
+// Bind* use 1-based parameter indexes, like SQLite. Text is copied by SQLite.
 func (s sqlite.Stmt) BindInt(i int, v int) error
 func (s sqlite.Stmt) BindText(i int, v string) error
 func (s sqlite.Stmt) BindNull(i int) error
+// Step advances to the next row; it returns true while a row is available.
 func (s sqlite.Stmt) Step() (bool, error)
+// Reset makes the statement ready to run again, clears its bindings and gives back the
+// connection.
 func (s sqlite.Stmt) Reset() error
 func (s sqlite.Stmt) Finalize() error
 func (s sqlite.Stmt) ColumnCount() int
 func (s sqlite.Stmt) ColumnType(i int) int
 func (s sqlite.Stmt) ColumnInt(i int) int
+// ColumnText copies column i (0-based) into buf and returns it as a view of buf.
 func (s sqlite.Stmt) ColumnText(i int, buf []byte) (string, error) from buf
 
+// Open opens (creating if needed) a database file. When the file is locked by another connection
+// (another thread or process, e.g. with threads N or workers N), statements wait up to 5 seconds
+// before failing with "database is locked"; only the calling goroutine waits.
+//
+// A connection serves one goroutine at a time: a statement holds it from its first Bind or Step
+// until Reset (so start with `defer st.Reset()`), and other goroutines that use the connection
+// meanwhile wait for it. Exec, Prepare, Changes and LastInsertRowID hold it for the call (or join
+// the statement the goroutine is running: call Changes and LastInsertRowID before Reset).
 func Open(path string) (sqlite.DB, error)
 ```

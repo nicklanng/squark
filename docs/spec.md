@@ -199,7 +199,8 @@ extern "slow_query" func query(q string) int stack 128K blocking // runs on a he
   goroutines of its scheduler thread. Each call costs two thread handoffs (microseconds), so mark
   only calls that always wait. Arguments may point into the goroutine's stack (it stays put while
   the goroutine waits). The C function's `stack N` budget applies to the helper threads (two per
-  scheduler thread, counted in the memory report), not to goroutine stacks.
+  scheduler thread, counted in the memory report, each with at least 64 KiB of stack), not to
+  goroutine stacks.
 - C code that is usually fast but sometimes slow can move itself instead: `sq_detach()` (in
   `sq_rt.h`), called in the middle of a C call, moves the running goroutine (its stack, mid-call)
   to a helper thread and lets its scheduler thread go on; the C code carries on there.
@@ -265,6 +266,10 @@ func build(a arena, n int) *Node { return new(Node) in a }   // allocate in the 
 
 - Sizes are constants.
 - A full arena panics: `panic: arena scratch is full (capacity 65536, used …, need …)`.
+- `append(s, x) in a` grows a slice to twice its capacity (at least what it needs, and at least 4
+  elements). A slice that is the arena's latest allocation grows in place; any other is copied,
+  and the old elements stay allocated until the arena ends. Size arenas for that, or collect into a
+  stack buffer or vector first and copy into the arena at the exact size.
 - Every HTTP request carries one: `r.Arena`.
 
 ### Constants, variables, types
@@ -334,7 +339,7 @@ read-only data.
 | `string(b)` | zero-copy view of `b`'s bytes. `string(b) in a` copies into the arena, and so does `string(s) in a` for a string `s` (to keep a string beyond the memory it views) |
 | `[]byte(s)` | only `[]byte(s) in a` (copies). Otherwise `copy(buf[:], s)` |
 | `string(r)` (rune) | only for constants; use `utf8.AppendRune` |
-| `try f(...)` | if `f`'s last result (an `error`) is non-nil, return it from the enclosing function (whose last result must be `error`), with zero values for the other results. Otherwise yields the remaining results |
+| `try f(...)` | if `f`'s last result (an `error`) is non-nil, return it from the enclosing function (whose last result must be `error`), with zero values for the other results (named results too, even if already assigned). Otherwise yields the remaining results |
 | `error(code, msg)`, `error(msg)` | builds an error. `msg` must be static memory (a constant or package-level data) |
 | `&T{...}` | address of a temporary that lives until the end of the enclosing block |
 | `[]T{...}` | the backing array lives until the end of the enclosing block |
@@ -374,7 +379,7 @@ As in Go, except:
   labeled `break`/`continue`.
 - `select` works as in Go: it waits until one of its sends or receives can proceed (a random one
   if several can), `default` runs if none can, nil channels are never ready, and `break` leaves
-  it. Cases may mix per-thread and shared channels. For a timeout, `case <-time.After(d):` runs
+  it. `select {}` blocks forever. Cases may mix per-thread and shared channels. For a timeout, `case <-time.After(d):` runs
   if no other case is ready within d; since there is no heap to make a channel per call,
   `time.After` is allowed only there, without a received value (`time.Now()` gives the time).
 - `defer` is not allowed inside loops. Its arguments must live until the function returns.
@@ -524,9 +529,14 @@ func handle(w *http.ResponseWriter, r *http.Request) {
   overrides `threads N`, except that with a `budget` it can't go above N, the count the budget
   was proven for. It has no effect on programs without the directive. Each shard runs `main`
   with its own package variables (see `thread var`, §4), goroutine pools, timers and poller;
-  goroutines never move between shards, so rule 10 holds within each and nothing needs locks. Error constants are shared (they're read-only). Listening on an address from every shard
-  works: on Linux each shard gets its own socket (`SO_REUSEPORT`) and the kernel spreads
-  connections; on macOS the shards share one socket. `runtime.Shard()` and `runtime.Shards()`
+  goroutines never move between shards, so rule 10 holds within each and nothing needs locks.
+  Error constants are shared (they're read-only). Listening on an address from every shard works:
+  on Linux each shard gets its own socket (`SO_REUSEPORT`) and the kernel spreads connections; on
+  macOS the shards share one socket. Port 0 is never shared: each shard listening on `":0"` gets
+  its own port (`l.Port()`), so a program that tests itself listens on one shard. A `net.Conn` is a
+  descriptor and can be sent to another shard on a shared channel; use it on one shard at a time,
+  and close it on the shard that uses it (§9 on closing). Each shard also has about 350 KiB of
+  runtime data (output buffer, poller and idle-connection tables), counted in static data. `runtime.Shard()` and `runtime.Shards()`
   report where a goroutine runs. The process exits when every shard's `main` has returned (a
   shard whose `main` returns stops its goroutines), at the first panic, or at `os.Exit`. The
   memory budget counts static data and stacks once per shard (and `threads auto` can't be
@@ -559,7 +569,7 @@ func handle(w *http.ResponseWriter, r *http.Request) {
 ## 10. Toolchain
 
 ```sh
-squark build [-o out] [-v] [-work dir] [dir]   # -v prints the memory breakdown
+squark build [-o out] [-v] [-work dir] [dir]   # -v prints the memory breakdown (always printed with a budget)
 squark run [-v] dir [args...]
 squark check [dir]                              # type and lifetime check only
 squark doc [dir] [pkg]                          # API with provenance; `squark doc std` for the stdlib

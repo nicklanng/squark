@@ -20,6 +20,11 @@ type lexer struct {
 
 	// pragmas collects "//squark:..." comment lines seen since the last token.
 	pragmas []string
+	// doc collects the comment lines directly above the next token (no blank line between, and
+	// not trailing code on their line): a declaration's doc comment.
+	doc         []string
+	docEnd      int // line of doc's last comment
+	lastTokLine int
 }
 
 type lexToken struct {
@@ -27,6 +32,7 @@ type lexToken struct {
 	lit     string
 	pos     Pos
 	pragmas []string
+	doc     []string
 }
 
 func newLexer(file string, src []byte) *lexer {
@@ -136,6 +142,12 @@ again:
 		text := string(l.src[start:l.off])
 		if strings.HasPrefix(text, "//squark:") {
 			l.pragmas = append(l.pragmas, strings.TrimSpace(text[len("//squark:"):]))
+		} else if p.Line != l.lastTokLine { // a comment line of its own (not trailing code)
+			if len(l.doc) == 0 || l.docEnd != p.Line-1 {
+				l.doc = nil
+			}
+			l.doc = append(l.doc, strings.TrimPrefix(text[2:], " "))
+			l.docEnd = p.Line
 		}
 		goto again
 	}
@@ -174,6 +186,13 @@ again:
 	if len(l.pragmas) > 0 && t.tok != SEMICOLON {
 		t.pragmas = l.pragmas
 		l.pragmas = nil
+	}
+	if t.tok != SEMICOLON {
+		if len(l.doc) > 0 && l.docEnd == t.pos.Line-1 {
+			t.doc = l.doc
+		}
+		l.doc = nil
+		l.lastTokLine = t.pos.Line
 	}
 	return t
 }
