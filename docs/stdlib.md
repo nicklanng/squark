@@ -8,10 +8,15 @@ provenance: `from p` means a result may point into what `p` refers to, `x T into
 // Package io holds the shared error values for readers and writers.
 package io
 
+// EOF is returned by Read when no more input is available.
 const EOF = error(-1, "EOF")
+// ErrShortWrite means a write accepted fewer bytes than requested.
 const ErrShortWrite = error(-2, "short write")
+// ErrShortBuffer means a caller-provided buffer was too small for the result.
 const ErrShortBuffer = error(-3, "short buffer")
+// ErrUnexpectedEOF means the input ended before a read of a fixed size was complete.
 const ErrUnexpectedEOF = error(-4, "unexpected EOF")
+// ErrTooLarge means the input doesn't fit in the caller's buffer.
 const ErrTooLarge = error(-5, "input larger than the buffer")
 
 // Package strings provides string helpers. Results are views of their inputs; nothing is copied.
@@ -54,6 +59,7 @@ func Count(s string, sub string) int
 // Read([]byte) (int, error) method (a net.Conn, an os.File, ...).
 package bufio
 
+// ErrTooLong is returned for a line that doesn't fit in the buffer; the line is skipped.
 const ErrTooLong = error(-10, "bufio: line longer than the buffer")
 
 // Reader holds input read ahead of the lines returned so far.
@@ -200,8 +206,9 @@ func HasPrefix(s []byte, prefix []byte) bool
 // so creating one never allocates.
 package errors
 
-// New returns an error with the given message. The message must be a string constant or
-// otherwise live in static memory; the compiler checks this at every call site.
+// New returns an error with the given message. The message must be constant data: a string
+// constant, or a string copied into a package arena (not a view of a package variable, which can
+// change); the compiler checks this at every call site.
 func New(msg static string) error
 // WithCode returns an error carrying an integer code.
 func WithCode(code int, msg static string) error
@@ -294,6 +301,7 @@ func After(d time.Duration) chan time.Time static
 package net
 
 const ErrBadAddress = error(22, "invalid address (want host:port)")
+// ErrTimeout is returned by ReadTimeout when nothing arrived in time.
 const ErrTimeout = error(-20, "i/o timeout")
 
 type Listener struct {

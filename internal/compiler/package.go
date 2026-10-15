@@ -235,6 +235,13 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 				d := filepath.Join(dir, imp.Path)
 				key := l.localKey(d)
 				dep, err = l.load(key, strings.TrimPrefix(key, "local:"), d, false)
+			} else if p := imp.Path; p == "" || p != path.Clean(p) || p == "." || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "../") {
+				// one spelling per package: "bytes/." would load bytes a second time
+				msg := fmt.Sprintf("invalid import path %q", p)
+				if clean := path.Clean("/" + p)[1:]; clean != "" {
+					msg += fmt.Sprintf(" (write it as %q)", clean)
+				}
+				return nil, &Error{imp.P, msg}
 			} else {
 				dep, err = l.load("std/"+imp.Path, imp.Path, path.Join("std", imp.Path), true)
 			}

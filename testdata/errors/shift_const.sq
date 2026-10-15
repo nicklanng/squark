@@ -8,3 +8,7 @@ func main() {
 	var b uint8 = 300 << n // ERROR "constant 300 overflows"
 	println(v, f, b)
 }
+
+func floatShift(s uint) float64 {
+	return float64(1 << s) // ERROR "shifted operand 1 (type float64) must be integer"
+}

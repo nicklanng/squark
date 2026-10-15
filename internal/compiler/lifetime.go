@@ -86,8 +86,10 @@ type SumEdge struct {
 
 // Summary describes how a function relates its parameters' and results' regions.
 type Summary struct {
-	Edges  []SumEdge
-	Static []IfacePos // regions that must be static
+	Edges     []SumEdge
+	Static    []IfacePos // regions that must be static
+	Constant  []IfacePos // regions that must be constant data (error messages, shared vars)
+	ResStatic []IfacePos // result regions that may be mutable static memory (a package variable)
 }
 
 func (p IfacePos) String() string {
@@ -104,7 +106,8 @@ type lifetime struct {
 
 	fn      *Func
 	nodes   []rnode
-	static  int
+	static  int // static memory: package variables, which can change
+	rodata  int // constant data: literals, constants, error messages, shared vars, C externs
 	caller  int
 	body    int // the function body's lifetime (deferred calls run at its end)
 	vars    map[*Var]vec
@@ -300,7 +303,8 @@ func (l *lifetime) reset(fn *Func) {
 	l.vars = map[*Var]vec{}
 	l.lives = map[*Var]int{}
 	l.params, l.results = nil, nil
-	l.static = l.constant(0, "static memory", Pos{})
+	l.static = l.constant(0, "package-variable memory", Pos{})
+	l.rodata = l.constant(-1, "constant data", Pos{})
 	l.caller = l.constant(1, "the caller", Pos{})
 	l.body = l.constant(2, "the function body", Pos{})
 }
@@ -332,6 +336,40 @@ func (l *lifetime) staticVec() vec {
 		v[i] = l.static
 	}
 	return v
+}
+
+// rodataVec is a reference to constant data. Only level 0 is constant: constant data holds
+// references nowhere deeper (strings, errors and arrays or structs of them), and deeper levels are
+// invariant, so making them constant would wrongly forbid storing it in a package variable.
+func (l *lifetime) rodataVec() vec {
+	v := l.staticVec()
+	v[0] = l.rodata
+	return v
+}
+
+// requireConstant makes v's references constant data (error messages, shared vars).
+func (l *lifetime) requireConstant(v vec, w *why) {
+	l.outlives(v[0], l.rodata, w)
+	for _, n := range v[1:] {
+		l.outlives(n, l.static, w)
+	}
+}
+
+// globalVec is the region vector of a package variable's value: constant data for variables that
+// can't change after initialization, static memory otherwise.
+func (l *lifetime) globalVec(v *Var) vec {
+	if v.Shared || v.ConstData || v.ReadOnly && !isArena(v.Type) {
+		return l.rodataVec()
+	}
+	return l.staticVec()
+}
+
+func isArena(t Type) bool {
+	if t == nil {
+		return false
+	}
+	_, ok := t.Underlying().(*ArenaType)
+	return ok
 }
 
 // outlives records a ≥ b.
@@ -385,6 +423,8 @@ func (l *lifetime) prepend(r int, v vec) vec {
 		}
 		return out
 	}
+	// the last level stands for every deeper one, so v's last two levels collapse into it
+	l.equal(v[levels-2], v[levels-1], nil)
 	copy(out[1:], v[:levels-1])
 	return out
 }
@@ -422,7 +462,7 @@ func (l *lifetime) life(v *Var) int {
 // points to outlives it) on first use.
 func (l *lifetime) varVec(v *Var) vec {
 	if v.Global {
-		return l.staticVec()
+		return l.globalVec(v)
 	}
 	if x, ok := l.vars[v]; ok {
 		return x
@@ -485,6 +525,11 @@ func (l *lifetime) function(fn *Func) {
 			rv[k] = n
 		}
 		l.results = append(l.results, rv)
+		// with deferred calls, every return goes through the named results (as in Go), and a
+		// deferred call may change them after the return statement
+		if r := fn.Sig.Results[i]; r.Name != "" && len(fn.Defers) > 0 && HasRefs(r.Type) {
+			l.assign(rv, l.varVec(r), &why{r.Pos, "returned (deferred calls can change it)", wStore})
+		}
 	}
 	l.depth = 2
 	l.stmts(fn.Decl.Body.List)
@@ -502,7 +547,13 @@ func (l *lifetime) globals() {
 			}
 			for i, x := range vs.Values {
 				v := l.vecOf(x)
-				if v != nil {
+				if v == nil {
+					continue
+				}
+				if o := vs.Names[i].Obj; o != nil && o.Var != nil && o.Var.Shared {
+					// every thread reads it: it can't view memory that a thread may change
+					l.requireConstant(v, &why{x.Pos(), "stored in shared var " + vs.Names[i].Name + ", which every thread reads", wStore})
+				} else {
 					l.requireAll(v, l.static, &why{x.Pos(), "stored in package variable " + vs.Names[i].Name, wStore})
 				}
 			}
@@ -524,7 +575,7 @@ type pathStep struct {
 func (l *lifetime) check() {
 	for u := range l.nodes {
 		n := &l.nodes[u]
-		if n.kind != rConst || n.rank < 2 {
+		if n.kind != rConst || n.rank < 2 && n.rank != 0 {
 			continue
 		}
 		for _, start := range l.nodes[u].out {
@@ -615,6 +666,12 @@ func (l *lifetime) report(u, v int, prev map[int]pathStep) {
 	dst := &l.nodes[v]
 	var msg string
 	switch {
+	case dst.rank < 0:
+		msg = what + " cannot be used as constant data"
+		if how != "" {
+			msg += " (" + how + ")"
+		}
+		msg += ": package variables can change; use a string constant (or data built only from constants)"
 	case dst.rank == 0:
 		msg = what + " cannot escape into static memory"
 		if how != "" {
@@ -672,7 +729,7 @@ func (l *lifetime) summarize() *Summary {
 		}
 		visited := map[int]bool{a: true}
 		queue := []int{a}
-		static := false
+		static, constant := false, false
 		for len(queue) > 0 {
 			x := queue[0]
 			queue = queue[1:]
@@ -686,6 +743,9 @@ func (l *lifetime) summarize() *Summary {
 				case rConst:
 					if e.to == l.static {
 						static = true
+					}
+					if e.to == l.rodata {
+						static, constant = true, true
 					}
 				case rParam, rResult:
 					se := SumEdge{posOf(a), posOf(e.to)}
@@ -703,6 +763,30 @@ func (l *lifetime) summarize() *Summary {
 		}
 		if static && meaningful(posOf(a)) {
 			s.Static = append(s.Static, posOf(a))
+		}
+		if constant && meaningful(posOf(a)) {
+			s.Constant = append(s.Constant, posOf(a))
+		}
+	}
+	// results that may view a package variable: a caller must not use them as constant data
+	visited := map[int]bool{l.static: true}
+	queue := []int{l.static}
+	for len(queue) > 0 {
+		x := queue[0]
+		queue = queue[1:]
+		for _, e := range l.nodes[x].out {
+			if visited[e.to] {
+				continue
+			}
+			visited[e.to] = true
+			switch t := &l.nodes[e.to]; t.kind {
+			case rResult:
+				if p := posOf(e.to); meaningful(p) {
+					s.ResStatic = append(s.ResStatic, p)
+				}
+			case rVar:
+				queue = append(queue, e.to)
+			}
 		}
 	}
 	return s
@@ -734,15 +818,18 @@ func (l *lifetime) vecOf1(e Expr) vec {
 		if e.Obj != nil && e.Obj.Kind == ObjVar {
 			return l.varVec(e.Obj.Var)
 		}
-		return l.staticVec()
+		return l.rodataVec()
 	case *BasicLit:
-		return l.staticVec()
+		return l.rodataVec()
 	case *ParenExpr:
 		return l.vecOf1(e.X)
 	case *SelectorExpr:
 		switch e.Kind {
 		case SelQualified:
-			return l.staticVec()
+			if o := e.Sel.Obj; o != nil && o.Kind == ObjVar {
+				return l.globalVec(o.Var)
+			}
+			return l.rodataVec()
 		case SelField:
 			x := l.vecOf(e.X)
 			if e.Implicit == "*" {
@@ -792,6 +879,9 @@ func (l *lifetime) vecOf1(e Expr) vec {
 		l.vecOf(e.X)
 		l.vecOf(e.Y)
 		if e.InArena != nil {
+			if l.packageArena(e.InArena) {
+				return l.rodataVec()
+			}
 			return l.alloc(e.InArena, e.P)
 		}
 		return nil
@@ -849,7 +939,7 @@ func (l *lifetime) storage(e Expr) int {
 		l.assign(shift(t), l.vecOf(e), nil)
 		return t[0]
 	}
-	l.vecOf(e)
+	l.vecOf1(e) // not vecOf: a temporary used as a view would ask for its storage again
 	return l.constant(l.depth, "a temporary in this block", e.Pos())
 }
 
@@ -885,6 +975,22 @@ func (l *lifetime) compositeLit(e *CompositeLit) vec {
 }
 
 // alloc returns the vector of a fresh object allocated in arena expression a.
+// packageArena reports whether a is a package-level arena. A string copied into one is constant
+// data: the arena is never freed, and nothing can write through a string.
+func (l *lifetime) packageArena(a Expr) bool {
+	l.vecOf(a)
+	var o *Object
+	switch a := unparen(a).(type) {
+	case *Ident:
+		o = a.Obj
+	case *SelectorExpr:
+		if a.Kind == SelQualified {
+			o = a.Sel.Obj
+		}
+	}
+	return o != nil && o.Kind == ObjVar && o.Var.Global && isArena(o.Var.Type)
+}
+
 func (l *lifetime) alloc(a Expr, pos Pos) vec {
 	av := l.vecOf(a)
 	r := l.fresh()
@@ -902,10 +1008,20 @@ func (l *lifetime) alloc(a Expr, pos Pos) vec {
 // ---- calls ----
 
 func (l *lifetime) callResults(x Expr) []vec {
-	if call, ok := unparen(x).(*CallExpr); ok {
-		return l.call(call)
+	for {
+		switch e := unparen(x).(type) {
+		case *CallExpr:
+			return l.call(e)
+		case *TryExpr: // the results without the error
+			x = e.X
+			continue
+		case *InExpr: // the call carries the arena itself
+			l.vecOf(e.Arena)
+			x = e.X
+			continue
+		}
+		return []vec{l.vecOf(x)}
 	}
-	return []vec{l.vecOf(x)}
 }
 
 func (l *lifetime) argSlots(e *CallExpr, sig *Signature) []vec {
@@ -990,10 +1106,11 @@ func (l *lifetime) applyCall(e *CallExpr, sig *Signature, slots []vec) []vec {
 	name := exprString(e.Fun)
 	hasRecv := e.Callee != nil && e.Callee.Sig.Recv != nil
 	if e.Callee != nil && e.Callee.Extern != "" && !e.Callee.Sig.HasContract {
-		// C functions without declared provenance are trusted: results are treated as static
+		// C functions without declared provenance are trusted: results are treated as constant
+		// data (C string tables such as strerror's)
 		var out []vec
 		for range sig.Results {
-			out = append(out, l.staticVec())
+			out = append(out, l.rodataVec())
 		}
 		return out
 	}
@@ -1037,6 +1154,12 @@ func (l *lifetime) applyCall(e *CallExpr, sig *Signature, slots []vec) []vec {
 		for _, p := range s.Static {
 			l.outlives(at(p), l.static, &why{e.P, name + " keeps " + describeArg(p.Index, hasRecv) + " in static memory", wStore})
 		}
+		for _, p := range s.Constant {
+			l.outlives(at(p), l.rodata, &why{e.P, name + " uses " + describeArg(p.Index, hasRecv) + " as constant data", wStore})
+		}
+		for _, p := range s.ResStatic {
+			l.outlives(l.static, at(p), &why{e.P, "returned by " + name + ", which may view a package variable", wPass})
+		}
 	}
 	return results
 }
@@ -1045,6 +1168,9 @@ func (l *lifetime) call(e *CallExpr) []vec {
 	if e.Conversion {
 		x := l.vecOf(e.Args[0])
 		if e.InArena != nil {
+			if isString(e.T) && l.packageArena(e.InArena) {
+				return []vec{l.rodataVec()}
+			}
 			return []vec{l.alloc(e.InArena, e.P)}
 		}
 		if basicKind(e.T) == Rawptr || basicKind(e.T) == Uintptr {
@@ -1104,7 +1230,7 @@ func (l *lifetime) call(e *CallExpr) []vec {
 		}
 		msg := e.Args[len(e.Args)-1]
 		if mv := l.vecOf(msg); mv != nil {
-			l.requireAll(mv, l.static, &why{msg.Pos(), "used as an error message, which must be static", wStore})
+			l.requireConstant(mv, &why{msg.Pos(), "used as an error message, which must be constant", wStore})
 		}
 		return nil
 	case "min", "max":
@@ -1142,7 +1268,7 @@ func (l *lifetime) call(e *CallExpr) []vec {
 		if se, ok := unparen(e.Fun).(*SelectorExpr); ok {
 			l.vecOf(se.X)
 		}
-		return []vec{l.staticVec()}
+		return []vec{l.rodataVec()} // an error message is constant data
 	default:
 		for _, a := range e.Args {
 			l.vecOf(a)

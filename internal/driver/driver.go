@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,11 +82,27 @@ func helperStackReserved(need int64) int64 {
 // Worst returns the worst-case total. Worker processes share the code but each has its own static
 // data and goroutine stacks; with workers auto this is the total for one worker.
 func (m *MemoryReport) Worst() int64 {
-	per := m.Static + m.Helpers*m.HelperStack
+	per := satAdd(m.Static, satMul(m.Helpers, m.HelperStack))
 	for _, p := range m.Pools {
-		per += int64(p.Count) * p.Touchable
+		per = satAdd(per, satMul(int64(p.Count), p.Touchable))
 	}
-	return m.Code + max(m.Workers, 1)*max(m.Threads, 1)*per
+	return satAdd(m.Code, satMul(satMul(max(m.Workers, 1), max(m.Threads, 1)), per))
+}
+
+// satAdd and satMul saturate at MaxInt64 instead of wrapping, so a huge worst case can't pass the
+// budget check by overflowing (sizes are non-negative).
+func satAdd(a, b int64) int64 {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+func satMul(a, b int64) int64 {
+	if a != 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
 }
 
 var heapSymbols = []string{"malloc", "calloc", "realloc", "free", "posix_memalign", "aligned_alloc", "valloc", "strdup", "strndup", "asprintf", "vasprintf"}
@@ -442,7 +459,7 @@ func FormatMemory(m *MemoryReport) string {
 		if p.Name == "main.main" {
 			name = "main goroutine"
 		}
-		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack (proven %d B)\n", name, human(int64(p.Count)*p.Touchable), p.Count, human(p.Touchable), p.Stack)
+		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack (proven %d B)\n", name, human(satMul(int64(p.Count), p.Touchable)), p.Count, human(p.Touchable), p.Stack)
 	}
 	if m.Helpers > 0 {
 		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack: threads that run blocking and detached C calls\n", "blocking-call helpers", human(m.Helpers*m.HelperStack), m.Helpers, human(m.HelperStack))

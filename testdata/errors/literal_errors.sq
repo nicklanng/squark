@@ -1,0 +1,20 @@
+package main
+
+// one error per bad literal (no "constant unknown overflows" after it); size suffixes follow a
+// plain decimal integer
+func main() {
+	a := 08   // ERROR "invalid integer literal 08"
+	b := 0x   // ERROR "invalid integer literal 0x"
+	k := 010K // ERROR "invalid size literal 010K"
+	u := 1_0K // ERROR "invalid size literal 1_0K"
+	ok := 64K
+	_, _, _, _, _ = a, b, k, u, ok
+}
+
+var gs string
+
+func cat() {
+	arena a 64 {
+		gs += " world" in a // ERROR "+= can't allocate: write gs = gs + \" world\" in a"
+	}
+}

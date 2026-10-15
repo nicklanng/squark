@@ -32,13 +32,17 @@ func hasAnyParam(sig *Signature) bool {
 func (c *Checker) instantiate(e *CallExpr) (*Func, []bool) {
 	gen := e.Callee
 	params := gen.Sig.Params
-	if len(e.Args) != len(params) {
+	nfixed := len(params)
+	if gen.Sig.Variadic {
+		nfixed-- // the variadic parameter has a concrete type; args checks the rest
+	}
+	if len(e.Args) < nfixed || !gen.Sig.Variadic && len(e.Args) != len(params) {
 		c.errorf(e.P, "wrong argument count in call to %s: have %d, want %d", exprString(e.Fun), len(e.Args), len(params))
 		return nil, nil
 	}
 	pre := make([]bool, len(e.Args))
 	var targs []Type
-	for i, p := range params {
+	for i, p := range params[:nfixed] {
 		if p.Type != tAnyType {
 			continue
 		}
@@ -71,7 +75,17 @@ func (c *Checker) instantiate(e *CallExpr) (*Func, []bool) {
 		}
 	}
 
+	// A new instance requested while checking an instance of the same template (directly or
+	// through others) is recursion whose argument types grow (f(&x) inside f): it would make
+	// instances without end, so report it here rather than in the call graph.
+	for in := c.inst; in != nil; in = in.InstFrom {
+		if in.GenericOf == gen {
+			c.errorf(e.P, "recursion is not allowed: %s calls itself (with %s arguments)\n\tsquark sizes every goroutine stack at compile time, which needs an acyclic call graph; rewrite with a loop and an explicit fixed-size stack", gen.FullName(), typeList(targs))
+			return nil, nil
+		}
+	}
 	inst := *gen
+	inst.InstFrom = c.inst
 	inst.Generic = false
 	inst.Instances = nil
 	inst.GenericOf = gen
@@ -101,6 +115,14 @@ func (c *Checker) instantiate(e *CallExpr) (*Func, []bool) {
 	c.prog.Funcs = append(c.prog.Funcs, &inst)
 	c.pending = append(c.pending, &inst)
 	return &inst, pre
+}
+
+func typeList(ts []Type) string {
+	var parts []string
+	for _, t := range ts {
+		parts = append(parts, t.String())
+	}
+	return strings.Join(parts, ", ")
 }
 
 // instanceNote describes the instance being checked, for error messages.

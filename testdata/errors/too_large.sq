@@ -1,0 +1,18 @@
+package main
+
+// Sizes are bounded (1T = 2^40 bytes, pools 2^24 goroutines) so size arithmetic can't overflow
+// and the C compiler never sees an impossible type.
+var big [1 << 61]int64 // ERROR "type [2305843009213693952]int64 is too large"
+
+var m map[int]int cap 1 << 60 // ERROR "map capacity 1152921504606846976 is too large"
+
+arena pa 1 << 62 // ERROR "arena size 4611686018427387904 is too large"
+
+type S struct { // ERROR "is too large (more than 1T"
+	a [1 << 36]int64
+	b [1 << 36]int64
+}
+
+task t() pool 1 << 30 {} // ERROR "pool size 1073741824 is too large"
+
+func main() {}

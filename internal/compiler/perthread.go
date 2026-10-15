@@ -2,7 +2,9 @@ package compiler
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // PerThreadVar is a package variable that, with threads N, every scheduler thread has its own copy
@@ -52,6 +54,8 @@ type ptWalker struct {
 	fn    *Func
 	found map[*Var]string
 	uses  map[*Var]*storageUse // for NoStorageErrors (nil otherwise)
+	// inComm: in a select case's send or receive, where a nil channel is never ready (not a use)
+	inComm bool
 }
 
 // storageUse records how a package map or channel view is used: given storage (assigned as a
@@ -110,9 +114,12 @@ func (w *ptWalker) written(x Expr, how string) {
 					u = &storageUse{}
 					w.uses[v] = u
 				}
-				if direct && (how == "written" || how == "address taken") {
-					u.given = true
-				} else if u.used == nil {
+				switch {
+				case direct && (how == "written" || how == "address taken" || strings.HasPrefix(how, "changed by method")):
+					u.given = true // a pointer method may assign it storage
+				case how == "changed by delete" || w.inComm:
+					// delete on a nil map does nothing, and a select skips a nil channel
+				case u.used == nil:
 					p := x.Pos()
 					u.used = &p
 				}
@@ -196,7 +203,9 @@ func (w *ptWalker) stmt(s Stmt) {
 		w.stmt(s.Else)
 	case *SelectStmt:
 		for _, cc := range s.Cases {
+			w.inComm = true
 			w.stmt(cc.Comm)
+			w.inComm = false
 			w.stmts(cc.Body)
 		}
 	case *SwitchStmt:
@@ -228,6 +237,7 @@ func (w *ptWalker) stmt(s Stmt) {
 	case *DeclStmt:
 		for _, vs := range s.Decl.Values {
 			for _, x := range vs.Values {
+				w.referenced(x, "aliased")
 				w.expr(x)
 			}
 		}
@@ -255,7 +265,12 @@ func (w *ptWalker) expr(x Expr) {
 		w.expr(e.X)
 		w.expr(e.Index)
 	case *SliceExpr:
-		if _, ok := e.X.info().T.Underlying().(*Array); ok {
+		t := e.X.info().T
+		if v := e.X.info().View; v != nil {
+			t = v // a vector is sliced through its view
+		}
+		switch t.Underlying().(type) {
+		case *Array, *VecType:
 			w.written(e.X, "sliced (a writable view)")
 		}
 		w.expr(e.X)
@@ -313,6 +328,14 @@ func (w *ptWalker) expr(x Expr) {
 	}
 }
 
+// useAt names where a variable declared at decl is used: the line, and the file if it differs.
+func useAt(decl, use Pos) string {
+	if use.File != decl.File {
+		return fmt.Sprintf("%s:%d", filepath.Base(use.File), use.Line)
+	}
+	return fmt.Sprintf("line %d", use.Line)
+}
+
 // NoStorageErrors reports package map and channel views that nothing ever gives storage (no
 // initializer, never assigned as a whole, address never taken) but that the program writes to, sends
 // on or receives from: at run time a write would panic and a channel operation block forever.
@@ -343,9 +366,9 @@ func NoStorageErrors(prog *Program) ErrorList {
 			}
 			switch t := v.Type.Underlying().(type) {
 			case *Map:
-				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a map with no storage: nothing assigns it, so writing to it (line %d) would panic; declare it %s map[%s]%s cap N", v.Name, u.used.Line, v.Name, t.Key, t.Value)})
+				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a map with no storage: nothing assigns it, so writing to it (%s) would panic; declare it %s map[%s]%s cap N", v.Name, useAt(v.Pos, *u.used), v.Name, t.Key, t.Value)})
 			case *Chan:
-				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a channel with no storage: nothing assigns it, so using it (line %d) would block forever; declare it %s chan %s cap N", v.Name, u.used.Line, v.Name, t.Elem)})
+				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a channel with no storage: nothing assigns it, so using it (%s) would block forever; declare it %s chan %s cap N", v.Name, useAt(v.Pos, *u.used), v.Name, t.Elem)})
 			}
 		}
 	}

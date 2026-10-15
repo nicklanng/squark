@@ -2,8 +2,9 @@
 // so creating one never allocates.
 package errors
 
-// New returns an error with the given message. The message must be a string constant or
-// otherwise live in static memory; the compiler checks this at every call site.
+// New returns an error with the given message. The message must be constant data: a string
+// constant, or a string copied into a package arena (not a view of a package variable, which can
+// change); the compiler checks this at every call site.
 func New(msg static string) error {
 	return error(1, msg)
 }

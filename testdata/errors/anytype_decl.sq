@@ -14,4 +14,10 @@ task tk(a anytype) pool 1 {} // ERROR "anytype is only allowed as the type of a 
 
 func many(xs ...anytype) {} // ERROR "a variadic parameter can't be anytype"
 
+func slice(xs []anytype) {} // ERROR "anytype is only allowed as the type of a function's parameter"
+
+func ptr(p *anytype) {} // ERROR "anytype is only allowed as the type of a function's parameter"
+
+func fn(f func(anytype)) {} // ERROR "anytype is only allowed as the type of a function's parameter"
+
 func main() {}

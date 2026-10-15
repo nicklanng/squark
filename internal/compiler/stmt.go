@@ -344,6 +344,11 @@ func (c *Checker) assign(s *AssignStmt) {
 		}
 		op := map[Tok]Tok{ADD_ASSIGN: ADD, SUB_ASSIGN: SUB, MUL_ASSIGN: MUL, QUO_ASSIGN: QUO, REM_ASSIGN: REM,
 			AND_ASSIGN: AND, OR_ASSIGN: OR, XOR_ASSIGN: XOR, SHL_ASSIGN: SHL, SHR_ASSIGN: SHR, AND_NOT_ASSIGN: AND_NOT}[s.Tok]
+		if in, ok := s.Rhs[0].(*InExpr); ok && op == ADD {
+			// `in a` would only cover the right side: say how to allocate the whole result
+			c.errorf(s.P, "%s can't allocate: write %s = %s + %s in %s", s.Tok, exprString(s.Lhs[0]), exprString(s.Lhs[0]), exprString(in.X), exprString(in.Arena))
+			return
+		}
 		be := &BinaryExpr{X: s.Lhs[0], Op: op, Y: s.Rhs[0], P: s.P}
 		c.binary(be)
 		if be.Mode == ModeInvalid {
@@ -409,8 +414,11 @@ func (c *Checker) deferStmt(s *DeferStmt) {
 	if call.Builtin != "" {
 		switch call.Builtin {
 		case "close", "print", "println", "panic":
-		default:
+		case "len", "cap", "append", "min", "max", "new", "make", "error.Error", "error.Code", "arena.Used", "arena.Left", "arena.Cap", "vec.TryPush", "vec.TryAppend", "vec.Pop":
 			c.errorf(s.P, "defer discards result of %s", exprString(call))
+			return
+		default:
+			c.errorf(s.P, "defer %s is not supported (only close, panic, print and println among builtins); defer a function that calls it", exprString(call))
 			return
 		}
 	}
@@ -664,10 +672,21 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 	c.toViewRead(s.X)
 	xt := s.X.info().T
 	var kt, vt Type
+	keyChecked := false
 	switch u := xt.Underlying().(type) {
 	case *Basic:
 		switch {
 		case isInteger(u):
+			// as in Go, an untyped constant takes the type of an existing iteration variable
+			if isUntyped(xt) && !s.Define && s.Key != nil && !isBlank(s.Key) {
+				c.expr(s.Key)
+				keyChecked = true
+				if t := s.Key.info().T; t != nil && isInteger(t) && !isUntyped(t) {
+					if !c.convertUntyped(s.X, t, "range") {
+						setType(s.X, t) // reported: don't also report the assignment
+					}
+				}
+			}
 			c.defaultUntyped(s.X)
 			kt = s.X.info().T
 		case isString(u):
@@ -720,7 +739,9 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 			v.info().T, v.info().Mode = types[i], ModeVar
 			continue
 		}
-		c.expr(v)
+		if !(i == 0 && keyChecked) {
+			c.expr(v)
+		}
 		if c.checkAssignTarget(v) && !assignableType(types[i], v.info().T) {
 			c.errorf(v.Pos(), "cannot assign %s to %s (type %s) in range", types[i], exprString(v), v.info().T)
 		}

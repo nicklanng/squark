@@ -1,0 +1,12 @@
+package main
+
+// a vector type's built-in methods take these names: a user method would never be called
+type Stack [..3]int
+
+func (s *Stack) Push(x int) {} // ERROR "method Stack.Push would be hidden by the vector method Push"
+
+func (s *Stack) Clear() {} // ERROR "method Stack.Clear would be hidden by the vector method Clear"
+
+func (s *Stack) Top() int { return s[len(s)-1] }
+
+func main() {}

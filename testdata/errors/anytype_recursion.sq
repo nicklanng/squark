@@ -1,0 +1,10 @@
+package main
+
+// recursion whose argument types grow (f(&x) inside f) would instantiate without end
+func grow(x anytype, n int) {
+	if n > 0 {
+		grow(&x, n-1) // ERROR "recursion is not allowed: main.grow calls itself"
+	}
+}
+
+func main() { grow(1, 2) }

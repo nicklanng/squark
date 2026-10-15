@@ -1,0 +1,23 @@
+package main
+
+// A linked list is deeper than the analysis tracks (4 pointer levels): the levels past the last
+// share its region, so a local stored 3 links down still can't reach a static node.
+type Node struct {
+	next *Node
+	val  *int
+}
+
+var tail Node
+
+func (n *Node) setThird(p *int) { n.next.next.next.val = p }
+
+func f() {
+	x := 1234
+	var b, a, n Node
+	b.next = &tail // ERROR "cannot escape into static memory"
+	a.next = &b
+	n.next = &a
+	n.setThird(&x)
+}
+
+func main() { f() }

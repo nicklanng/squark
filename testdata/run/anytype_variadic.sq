@@ -1,0 +1,9 @@
+package main
+
+// an anytype function with a variadic parameter takes any number of trailing arguments
+func f(x anytype, ys ...int) int { return len(ys) + int(x) }
+
+func main() {
+	s := []int{4, 5}
+	println(f(1, 2, 3), f(1), f(int8(2), s...))
+}

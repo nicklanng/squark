@@ -24,7 +24,7 @@ current.
    a function's parameters can be `anytype` (§4): each call makes a copy for its argument types.
 7. **`go` only starts a `task`:** `task f(args) pool N { ... }`. Tasks have no results. Arguments to
    `go` and values sent on channels must not reference stack or arena memory.
-8. **Errors are values with a static message:** `const ErrX = error(404, "not found")`. They can't
+8. **Errors are values with a constant message:** `const ErrX = error(404, "not found")`. They can't
    be formatted with dynamic text; use the code, or log separately.
 9. **`string(b)` is a zero-copy view of `b`.** `[]byte(s)` is an error without an arena.
 10. **Cooperative within a thread; threads share nothing mutable.** A thread's goroutines switch
@@ -88,7 +88,9 @@ arena ...
   as C shims.
 - `func main()` in package `main` is the entry point; when it returns, the program exits.
 - There are no `init` functions. Package-level `var` initializers run in declaration order, packages
-  in import order.
+  in import order. An initializer that reads a variable not initialized yet (a later one, or itself
+  through a function, `var x = f()` with `f` reading `x`) sees its zero value; Go would reorder the
+  initializers or report an initialization cycle.
 - Exported means capitalized, as in Go.
 
 ## 3. Types
@@ -97,7 +99,7 @@ arena ...
 |---|---|
 | `bool`, `string`, `int` (64-bit), `int8`…`int64`, `uint` (64-bit), `uint8`…`uint64`, `uintptr`, `float32`, `float64` | as Go; `byte` = `uint8`, `rune` = `int32` |
 | `rawptr` | untyped C pointer (`void*`) for extern calls; converts to and from pointers and `uintptr`, and is not lifetime-checked |
-| `error` | a value: integer code + static message. Methods `Error() string`, `Code() int`. Zero value is `nil` |
+| `error` | a value: integer code + constant message (§5). Methods `Error() string`, `Code() int`. Zero value is `nil`, whose `Error()` is `""` and `Code()` is 0 (not a panic: an error isn't an interface) |
 | `arena` | a reference to arena storage. Methods `Used()`, `Left()`, `Cap()` (all `int`) |
 | `[N]T` | array (storage) |
 | `[]T` | slice (view) |
@@ -109,7 +111,10 @@ arena ...
 | `*T`, `struct{...}`, `func(...) ...` | as Go. A func value can only be a named top-level function |
 
 Not supported: interfaces, generic types (functions can take `anytype` parameters, §4), complex
-numbers, type aliases, embedded fields, local type declarations, directional channel types.
+numbers, type aliases, embedded fields, local type declarations, directional channel types, and
+named types that refer to themselves only through pointers, slices, arrays and func types
+(`type State func() State`, `type L []L`): put a struct in between
+(`type State struct{ next func() State }`).
 
 ### Storage and views
 
@@ -136,7 +141,10 @@ for k, v := range seen {}
 - Map and channel storage **cannot be copied** (`m2 := m` is an error), because they point into
   themselves. Pass a view. The same holds for a struct, array or vector that contains map or
   channel storage: copying one out of a variable is an error (use a pointer), while a fresh value
-  (`T{}`, a call result) is fine because its storage is still unused.
+  (`T{}`, a call result) is fine because its storage is still unused. This covers every copy:
+  `copy`, `append(s, xs...)`, a vector's `Append`, an `append` that grows into an arena, calling a
+  value-receiver method (give it a pointer receiver), and a named result (it is a variable that is
+  copied out on return; return an unnamed result built by a literal instead).
 - Arrays and vectors copy by value, like Go arrays.
 
 ### Vectors `[..N]T`
@@ -227,7 +235,9 @@ however its type allows (index it, call it, call its methods); a type that doesn
 at the call, reported where the body uses it, with the instance named ("in sort.Slice with
 s []main.Entry, called at main.go:40"). Nothing happens at run time and nothing is boxed; each
 instance is code, as if written by hand for those types. Storage passed as `anytype` (a map or
-channel with `cap`) becomes its view, and untyped constants their default type.
+channel with `cap`, or a vector `[..N]T`) becomes its view (a vector becomes the slice `[]T` of
+its elements, so the body can't `Push`; pass `&v` for that), and untyped constants their default
+type.
 
 Functions and methods take `anytype` parameters (tasks and externs don't), not as their variadic
 parameter, and results have ordinary types (`bufio.Reader.ReadLine(src anytype)` reads from a
@@ -265,6 +275,8 @@ func build(a arena, n int) *Node { return new(Node) in a }   // allocate in the 
 ```
 
 - Sizes are constants.
+- Every declared size (a type, an arena, a capacity, the budget) is at most 1T (2^40 bytes or
+  elements), and a task pool at most 2^24 goroutines.
 - A full arena panics: `panic: arena scratch is full (capacity 65536, used …, need …)`.
 - `append(s, x) in a` grows a slice to twice its capacity (at least what it needs, and at least 4
   elements). A slice that is the arena's latest allocation grows in place; any other is copied,
@@ -299,7 +311,9 @@ shared var crcTable = makeTable()   // may call functions, read files, query SQL
 
 Its initializer runs once, on the first scheduler thread and in order with the other package
 initializers, before any other thread starts. Afterwards it is read-only, with the same rules as
-constants. Its type is limited to numbers, strings, bools, errors and arrays or structs of them,
+constants. A string in it must be constant data (as for error messages, §5): a string viewing a
+package variable would change when that thread changes the variable, so copy it into a package
+arena instead (`return string(buf[:n]) in pkgArena`). Its type is limited to numbers, strings, bools, errors and arrays or structs of them,
 because nothing a shared slice, map or pointer refers to could be kept read-only.
 
 A plain `var` is one copy per scheduler thread: under `threads N` a counter counts one thread's
@@ -340,10 +354,13 @@ read-only data.
 | `[]byte(s)` | only `[]byte(s) in a` (copies). Otherwise `copy(buf[:], s)` |
 | `string(r)` (rune) | only for constants; use `utf8.AppendRune` |
 | `try f(...)` | if `f`'s last result (an `error`) is non-nil, return it from the enclosing function (whose last result must be `error`), with zero values for the other results (named results too, even if already assigned). Otherwise yields the remaining results |
-| `error(code, msg)`, `error(msg)` | builds an error. `msg` must be static memory (a constant or package-level data) |
+| `error(code, msg)`, `error(msg)` | builds an error. `msg` must be constant data: a string constant, another error's `Error()`, a `shared var`, a C extern's result, or a string copied into a package arena (`string(b) in pkgArena`). A package variable's contents can change, so it can't be a message |
 | `&T{...}` | address of a temporary that lives until the end of the enclosing block |
 | `[]T{...}` | the backing array lives until the end of the enclosing block |
 | map literals | not supported; declare storage and assign |
+| `f(g())` with a multi-value `g` | not supported; assign `g`'s results first |
+| `[N]T(s)`, `(*[N]T)(s)` (slice to array) | not supported; `copy(arr[:], s)` |
+| `[]*T{{...}}` (elided `&T`) | not supported; write `&T{...}` |
 | func literals, method values, method expressions | not supported |
 | `v.(T)`, type switches | not supported (no interfaces) |
 
@@ -387,7 +404,12 @@ As in Go, except:
   it. `select {}` blocks forever. Cases may mix per-thread and shared channels. For a timeout, `case <-time.After(d):` runs
   if no other case is ready within d; since there is no heap to make a channel per call,
   `time.After` is allowed only there, without a received value (`time.Now()` gives the time).
-- `defer` is not allowed inside loops. Its arguments must live until the function returns.
+- `defer` is not allowed inside loops. Its arguments must live until the function returns. The
+  builtins it takes are `close`, `panic`, `print` and `println` (defer a function that calls
+  `delete`, `copy` or a vector method), and a variadic call needs its arguments as a slice
+  (`defer f(xs...)`).
+- A panic ends the program at once: deferred calls don't run while panicking (there is no
+  `recover`, and the operating system closes the program's files and sockets).
 - `go f(args)`: `f` must be a task. Arguments must not reference stack or arena memory.
 - Channel sends: the value must not reference stack or arena memory.
 - `arena NAME SIZE { ... }` is a statement.
@@ -432,11 +454,15 @@ must not outlive the memory it points to:
 | `goroutine … can outlive this function` | pass only static data, or values without references (ints, structs of ints) |
 | `cannot copy map[...] cap N storage` | pass a view: `func f(m map[K]V)` and call `f(store)` |
 | `cannot copy x: T contains … storage` | pass or keep a pointer (`*T`); range by index and use `&xs[i]` |
+| `cannot copy the elements of xs` | keep a slice of pointers (`[]*T`), or of views for map/chan elements |
+| `cannot call M on a copy of x` | declare M with a pointer receiver: `func (x *T) M()` |
+| `named result r holds … storage` | return an unnamed `T{...}`, or take a `*T` parameter and fill it |
 | `append exceeds capacity` (runtime panic) | larger storage, or `append(...) in a` |
 | `map capacity exceeded` (runtime panic) | a larger `cap N` |
 | `memory budget exceeded` | lower pool sizes (`pool pkg.task N`), fewer `workers`, or raise the budget |
 | `workers auto can't be checked against the budget` | `workers N` with the number of cores you deploy on |
 | `threads auto can't be checked against the budget` | `threads N` with the number of cores you deploy on |
+| `cannot be used as constant data` | use a string constant, or copy the string into a package arena (`string(b) in pkgArena`) |
 | `shared var X: T can't be shared` | share numbers, strings, bools, errors or arrays/structs of them; keep everything else per thread |
 | `a shared channel's elements can't hold references` | send an index, ID or fixed-size array instead of a string or slice |
 | `time.After can only be used as a select case` | `select { case <-time.After(d): ... }`; to just wait, `time.Sleep(d)` |

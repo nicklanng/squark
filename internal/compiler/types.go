@@ -329,6 +329,7 @@ type Func struct {
 	GenericOf *Func   // for an instance: its template
 	TypeArgs  []Type  // for an instance: the types of its anytype parameters
 	InstPos   Pos     // for an instance: the call that made it
+	InstFrom  *Func   // for an instance: the instance whose body made it (nil from ordinary code)
 }
 
 func (f *Func) FullName() string {

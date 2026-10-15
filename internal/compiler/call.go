@@ -85,6 +85,7 @@ func (c *Checker) call(e *CallExpr) {
 				if !(isString(e.Args[0].info().T) && basicKind(vt.Elem) == Uint8) {
 					c.checkArg(e.Args[0], sig.Params, 0, sig, e, true)
 				}
+				c.checkElemsCopy(e.Args[0], vt.Elem)
 			} else {
 				c.args(e, sig)
 			}
@@ -238,7 +239,11 @@ func (c *Checker) conversion(e *CallExpr, t Type) {
 		if b, ok := tu.(*Basic); ok {
 			switch {
 			case isString(b) && isInteger(xi.T):
-				r, _ := constant.Int64Val(xi.Const)
+				// outside the rune range (or too big for int64) is U+FFFD, as in Go
+				r, exact := constant.Int64Val(xi.Const)
+				if !exact || r < 0 || r > 0x10FFFF {
+					r = 0xFFFD
+				}
 				e.Const, e.Mode = constant.MakeString(string(rune(r))), ModeConst
 				return
 			case isNumeric(b) && isNumeric(xi.T):
@@ -279,8 +284,15 @@ func (c *Checker) conversion(e *CallExpr, t Type) {
 				xi.T = t
 				return
 			}
-		} else if c.convertUntyped(x, defaultType(xi.T), "conversion") {
-			xi = x.info()
+		} else {
+			// an untyped non-constant number (1 << n) takes the conversion's type, as in Go
+			target := defaultType(xi.T)
+			if xi.Const == nil && !isBoolean(xi.T) && isNumeric(t) {
+				target = t
+			}
+			if c.convertUntyped(x, target, "conversion") {
+				xi = x.info()
+			}
 		}
 	}
 	if isString(t) && isString(xi.T) && c.allocArena != nil {
@@ -428,10 +440,7 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 				e.Const, e.Mode = constant.MakeInt64(u.Len), ModeConst
 			}
 		case *Slice, *Chan:
-		case *Map:
-			if name == "cap" {
-				// capacity of the fixed table
-			}
+		case *Map: // cap is the number of entries the storage holds (map[K]V cap N: N)
 		case *Basic:
 			if name == "cap" || !isString(u) {
 				c.errorf(x.Pos(), "invalid argument %s (type %s) for %s", exprString(x), xi.T, name)
@@ -477,7 +486,12 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 				}
 				return
 			}
-			c.assignable(y, &Slice{Elem: st.Elem}, "append")
+			if c.assignable(y, &Slice{Elem: st.Elem}, "append") {
+				c.checkElemsCopy(y, st.Elem)
+			}
+			return
+		}
+		if e.InArena != nil && !c.checkElemsCopy(s, st.Elem) { // growing copies the elements
 			return
 		}
 		for _, a := range e.Args[1:] {
@@ -507,7 +521,9 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 		ss, ok := src.info().T.Underlying().(*Slice)
 		if !ok || !Identical(ss.Elem, ds.Elem) {
 			c.errorf(src.Pos(), "invalid argument: arguments to copy %s (type %s) and %s (type %s) have different element types", exprString(dst), dst.info().T, exprString(src), src.info().T)
+			return
 		}
+		c.checkElemsCopy(src, ss.Elem)
 	case "make":
 		c.makeBuiltin(e)
 	case "new":

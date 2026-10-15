@@ -1,0 +1,11 @@
+package main
+
+func main() {
+	var m map[int]int cap 2
+	var v [..2]int
+	var a, b [2]int
+	defer delete(m, 1)   // ERROR "defer delete(m, 1) is not supported (only close, panic, print and println among builtins)"
+	defer copy(a[:], b[:]) // ERROR "defer copy(a[:], b[:]) is not supported"
+	defer v.Push(1)      // ERROR "defer v.Push(1) is not supported"
+	defer len(a)         // ERROR "defer discards result of len(a)"
+}

@@ -186,21 +186,21 @@ func (c *Checker) collect(pkg *Package) {
 					}
 				case CONST:
 					for _, vs := range d.Values {
-						if isErrorConst(vs) || isCompositeConst(vs) {
+						for i, name := range vs.Names {
 							// error constants and constant composites (tables, structs) are static
-							// read-only values, shared by every scheduler thread
-							for _, name := range vs.Names {
-								v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, ReadOnly: true, ConstData: isCompositeConst(vs)}
+							// read-only values, shared by every scheduler thread; each name is
+							// classified on its own (const ErrA, N = error(1, "a"), 5)
+							if i < len(vs.Values) && len(vs.Values) == len(vs.Names) && (isErrorValue(vs.Values[i]) || isCompositeExpr(vs.Values[i])) {
+								one := &ValueSpec{Doc: vs.Doc, Names: []*Ident{name}, Type: vs.Type, Values: []Expr{vs.Values[i]}, Iota: vs.Iota, P: vs.P}
+								v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, ReadOnly: true, ConstData: isCompositeExpr(vs.Values[i]), Spec: one}
 								o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f}
 								v.Obj = o
 								name.Obj = o
 								pkg.Globals = append(pkg.Globals, v)
 								declare(o)
+								pkg.GlobalInits = append(pkg.GlobalInits, one)
+								continue
 							}
-							pkg.GlobalInits = append(pkg.GlobalInits, vs)
-							continue
-						}
-						for i, name := range vs.Names {
 							o := &Object{Kind: ObjConst, Name: name.Name, Pos: name.P, Pkg: pkg, decl: constDecl{vs, i, f}}
 							name.Obj = o
 							declare(o)
@@ -292,17 +292,15 @@ func (c *Checker) collect(pkg *Package) {
 	}
 }
 
-// isErrorConst reports whether a const spec initializes errors: const ErrX = error(404, "x").
-func isErrorConst(vs *ValueSpec) bool {
-	if len(vs.Values) == 0 {
-		return false
-	}
-	call, ok := vs.Values[0].(*CallExpr)
-	if !ok {
-		return false
-	}
-	id, ok := call.Fun.(*Ident)
-	return ok && id.Name == "error"
+// isErrorValue reports error(...), the value of an error constant.
+func isErrorValue(x Expr) bool {
+	call, ok := x.(*CallExpr)
+	return ok && isErrorCall(call)
+}
+
+func isCompositeExpr(x Expr) bool {
+	_, ok := unparen(x).(*CompositeLit)
+	return ok
 }
 
 // checkSharedType reports a shared var whose type could let one thread change what another reads.
@@ -333,19 +331,6 @@ func (c *Checker) checkSharedType(n *Ident, t Type) {
 	}
 }
 
-// isCompositeConst reports const X = T{...}: a constant table or struct.
-func isCompositeConst(vs *ValueSpec) bool {
-	if len(vs.Values) == 0 {
-		return false
-	}
-	for _, x := range vs.Values {
-		if _, ok := unparen(x).(*CompositeLit); !ok {
-			return false
-		}
-	}
-	return true
-}
-
 // checkConstData reports where a constant composite isn't made of constants: its type may hold
 // numbers, strings, bools, errors and arrays or structs of them, and every element must be a
 // constant expression.
@@ -364,7 +349,7 @@ func (c *Checker) checkConstData(name string, x Expr) {
 		case *KeyValueExpr:
 			walk(e.Value)
 		default:
-			if x.info().Const == nil && !isErrorConstExpr(x) {
+			if x.info().Const == nil && !isErrorConstExpr(x) && !isNilLit(x) { // nil: a nil error
 				c.errorf(x.Pos(), "const %s: %s is not constant", name, exprString(x))
 			}
 		}
@@ -440,6 +425,13 @@ func (c *Checker) findTask(target string) *Func {
 }
 
 // constSize evaluates a constant non-negative integer clause expression.
+// MaxSize bounds every size the program declares (a type, an arena, a capacity, the budget):
+// 1 TiB, far above any real machine and far below where size arithmetic would overflow.
+const MaxSize = 1 << 40
+
+// MaxPool bounds a task pool's goroutine count.
+const MaxPool = 1 << 24
+
 func (c *Checker) constSize(x Expr, what string) (int64, bool) {
 	c.expr(x)
 	v, ok := constInt(x)
@@ -447,7 +439,68 @@ func (c *Checker) constSize(x Expr, what string) (int64, bool) {
 		c.errorf(x.Pos(), "%s must be a non-negative integer constant", what)
 		return 0, false
 	}
+	if v > MaxSize {
+		c.errorf(x.Pos(), "%s %d is too large (at most 1T = 2^40)", what, v)
+		return 0, false
+	}
 	return v, true
+}
+
+// checkPool reports a pool size outside 1..MaxPool.
+func (c *Checker) checkPool(x Expr, n int64) {
+	if n < 1 {
+		c.errorf(x.Pos(), "pool size must be at least 1")
+	} else if n > MaxPool {
+		c.errorf(x.Pos(), "pool size %d is too large (at most %d goroutines)", n, MaxPool)
+	}
+}
+
+// sizeBound is an upper bound on the bytes a value of type t occupies, saturating at
+// MaxSize+1 (padding is approximated generously).
+func sizeBound(t Type) int64 {
+	const over = MaxSize + 1
+	mul := func(n, m int64) int64 {
+		if n != 0 && m > over/n {
+			return over
+		}
+		return min(n*m, over)
+	}
+	switch u := t.(type) {
+	case nil:
+		return 0
+	case *Named:
+		if u.underlying == nil {
+			return 0
+		}
+		return sizeBound(u.underlying)
+	case *Basic:
+		return sizeofBasic(u.Kind)
+	case *Array:
+		return mul(u.Len, sizeBound(u.Elem))
+	case *VecType:
+		return min(8+mul(u.Len, sizeBound(u.Elem)), over)
+	case *MapStore:
+		// the table has about twice cap slots, each a key, a value and a control byte
+		return min(64+mul(2*u.Cap+16, sizeBound(u.Key)+sizeBound(u.Value)+1), over)
+	case *ChanStore:
+		return min(128+mul(max(u.Cap, 1), sizeBound(u.Elem)), over)
+	case *Struct:
+		var n int64
+		for _, f := range u.Fields {
+			n = min(n+sizeBound(f.Type)+8, over)
+		}
+		return n
+	}
+	return 24 // pointers, slices, strings, errors, views, funcs, arenas
+}
+
+// checkTypeSize reports a type larger than MaxSize.
+func (c *Checker) checkTypeSize(pos Pos, t Type) Type {
+	if sizeBound(t) > MaxSize {
+		c.errorf(pos, "type %s is too large (more than 1T = 2^40 bytes)", t)
+		return tInvalid
+	}
+	return t
 }
 
 func parseSize(s string) (int64, error) {
@@ -484,7 +537,9 @@ func (c *Checker) resolveDecls(pkg *Package) {
 		c.resolveNamed(n)
 	}
 	for _, n := range pkg.Types {
-		c.checkValueCycle(n, nil)
+		if !c.checkValueCycle(n, nil) {
+			c.checkRefCycle(n, n.underlying, map[Type]bool{n: true})
+		}
 	}
 	// constants
 	for _, f := range pkg.Files {
@@ -542,6 +597,9 @@ func (c *Checker) resolveDecls(pkg *Package) {
 					}
 				}
 			}
+			if _, ok := named.Underlying().(*VecType); ok && isVecMethod(fn.Name) {
+				c.errorf(d.Name.P, "method %s.%s would be hidden by the vector method %s; give it another name", named.Obj.Name, fn.Name, fn.Name)
+			}
 			named.Methods = append(named.Methods, fn)
 		}
 		c.anyParams = d.Kind == KindFunc // functions and methods, not tasks or externs
@@ -550,9 +608,7 @@ func (c *Checker) resolveDecls(pkg *Package) {
 		fn.Generic = hasAnyParam(fn.Sig)
 		if d.Pool != nil {
 			if n, ok := c.constSize(d.Pool, "pool size"); ok {
-				if n < 1 {
-					c.errorf(d.Pool.Pos(), "pool size must be at least 1")
-				}
+				c.checkPool(d.Pool, n)
 				fn.Pool = int(n)
 			}
 		}
@@ -638,9 +694,7 @@ func (c *Checker) resolveDecls(pkg *Package) {
 				c.errorf(d.P, "pool %s: no task named %s (write pkg.task, e.g. pool http.serveConn 256)", d.Target, d.Target)
 				continue
 			}
-			if n < 1 {
-				c.errorf(d.P, "pool size must be at least 1")
-			}
+			c.checkPool(d.Value, n)
 			fn.Pool = int(n)
 		}
 	}
@@ -658,7 +712,13 @@ func (c *Checker) resolveDecls(pkg *Package) {
 				continue
 			}
 			for _, vs := range g.Values {
-				if g.Tok == CONST && !isErrorConst(vs) && !isCompositeConst(vs) {
+				if g.Tok == CONST {
+					// error constants and constant composites, each with its own one-name spec
+					for _, name := range vs.Names {
+						if o := name.Obj; o != nil && o.Kind == ObjVar {
+							c.globalVarSpec(o.Var.Spec)
+						}
+					}
 					continue
 				}
 				c.globalVarSpec(vs)
@@ -787,6 +847,42 @@ func (c *Checker) checkValueCycle(t Type, path []*Named) bool {
 	return false
 }
 
+// checkRefCycle reports a named type that refers to itself through pointers, slices, arrays and
+// func types only (type F func() F, type L []L). C can't spell such a type; a struct, map or
+// channel in between breaks the cycle (type S struct{ next func() S }).
+func (c *Checker) checkRefCycle(start *Named, t Type, seen map[Type]bool) bool {
+	if t == Type(start) && len(seen) > 0 {
+		c.errorf(start.Obj.Pos, "invalid recursive type %s: it refers to itself without a struct in between; wrap it in one (type %s struct{ ... })", start.Obj.Name, start.Obj.Name)
+		return true
+	}
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch u := t.(type) {
+	case *Named:
+		if _, ok := u.underlying.(*Struct); ok {
+			return false
+		}
+		return c.checkRefCycle(start, u.underlying, seen)
+	case *Pointer:
+		return c.checkRefCycle(start, u.Elem, seen)
+	case *Slice:
+		return c.checkRefCycle(start, u.Elem, seen)
+	case *Array:
+		return c.checkRefCycle(start, u.Elem, seen)
+	case *VecType:
+		return c.checkRefCycle(start, u.Elem, seen)
+	case *Signature:
+		for _, p := range append(append([]*Var{}, u.Params...), u.Results...) {
+			if c.checkRefCycle(start, p.Type, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *Checker) resolveConst(o *Object) {
 	if o.state == 2 {
 		return
@@ -875,7 +971,8 @@ func (c *Checker) signature(ft *FuncType, recv *Var) *Signature {
 	anyParams := c.anyParams
 	c.anyParams = false // only in this signature's own parameter list
 	for i, f := range ft.Params {
-		c.anyParams = anyParams
+		_, bare := f.Type.(*Ident)
+		c.anyParams = anyParams && bare // anytype itself, not []anytype or *anytype
 		t := c.typExpr(f.Type)
 		c.anyParams = false
 		if f.Variadic && t == tAnyType {
@@ -1031,12 +1128,12 @@ func (c *Checker) typExpr1(x Expr) Type {
 			c.errorf(e.Len.Pos(), "invalid array length %s", exprString(e.Len))
 			return tInvalid
 		}
-		return &Array{Len: n, Elem: elem}
+		return c.checkTypeSize(e.Len.Pos(), &Array{Len: n, Elem: elem})
 	case *ChanType:
 		elem := c.typExpr(e.Elem)
 		if e.Cap != nil {
 			n, _ := c.constSize(e.Cap, "channel capacity")
-			return &ChanStore{Elem: elem, Cap: n}
+			return c.checkTypeSize(e.Cap.Pos(), &ChanStore{Elem: elem, Cap: n})
 		}
 		return &Chan{Elem: elem}
 	case *MapType:
@@ -1046,17 +1143,17 @@ func (c *Checker) typExpr1(x Expr) Type {
 			c.errorf(e.Key.Pos(), "invalid map key type %s (must be an integer, string, bool or pointer)", k)
 		}
 		if e.Cap != nil {
-			n, _ := c.constSize(e.Cap, "map capacity")
-			if n < 1 {
+			n, ok := c.constSize(e.Cap, "map capacity")
+			if ok && n < 1 {
 				c.errorf(e.Cap.Pos(), "map capacity must be at least 1")
 			}
-			return &MapStore{Key: k, Value: v, Cap: n}
+			return c.checkTypeSize(e.Cap.Pos(), &MapStore{Key: k, Value: v, Cap: n})
 		}
 		return &Map{Key: k, Value: v}
 	case *VecTypeExpr:
 		elem := c.typExpr(e.Elem)
 		n, _ := c.constSize(e.Len, "vector capacity")
-		return &VecType{Len: n, Elem: elem}
+		return c.checkTypeSize(e.Len.Pos(), &VecType{Len: n, Elem: elem})
 	case *FuncType:
 		return c.signature(e, nil)
 	case *ArenaTypeExpr:
@@ -1074,7 +1171,7 @@ func (c *Checker) typExpr1(x Expr) Type {
 				st.Fields = append(st.Fields, &StructField{Name: n.Name, Type: t, Pos: n.P})
 			}
 		}
-		return st
+		return c.checkTypeSize(e.Pos(), st)
 	}
 	c.errorf(x.Pos(), "%s is not a type", exprString(x))
 	return tInvalid
@@ -1178,6 +1275,11 @@ func (c *Checker) funcBody(fn *Func) {
 	}
 	for _, r := range fn.Sig.Results {
 		if r.Name != "" {
+			// a named result is a variable whose value is copied out on return, and a copy of used
+			// map or channel storage aliases the original
+			if s := storageIn(r.Type); s != nil && r.Name != "_" {
+				c.errorf(r.Pos, "named result %s holds %s storage, which can't be copied out on return; return an unnamed %s built by a literal, or take a *%s parameter to fill", r.Name, s, r.Type, r.Type)
+			}
 			r.Depth = 2
 			r.CName = c.newVarName(r.Name)
 			if r.Name != "_" {

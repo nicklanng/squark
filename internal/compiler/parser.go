@@ -324,7 +324,7 @@ func (p *parser) signature(pos Pos) *FuncType {
 }
 
 // atClause reports whether the next tokens start a clause after the parameters (`pool N`, `stack N`,
-// `from p` or `static`) rather than a result type that happens to have one of those names.
+// `from p`, `static`, or an enclosing type's `cap N`) rather than a result type that happens to have one of those names.
 func (p *parser) atClause() bool {
 	if p.tok.tok != IDENT {
 		return false
@@ -341,6 +341,11 @@ func (p *parser) atClause() bool {
 		return p.peek().tok == IDENT
 	case "static":
 		return true
+	case "cap": // chan func() cap N: the capacity of the enclosing channel or map type
+		switch p.peek().tok {
+		case INT, LPAREN, IDENT:
+			return true
+		}
 	case "blocking", "preemptible":
 		t := p.peek()
 		return t.tok == SEMICOLON || t.tok == EOF || t.tok == LBRACE || t.tok == IDENT && isClauseWord(t.lit)
@@ -1132,6 +1137,8 @@ func exprString(x Expr) string {
 		return "*" + exprString(e.X)
 	case *ParenExpr:
 		return "(" + exprString(e.X) + ")"
+	case *TryExpr:
+		return "try " + exprString(e.X)
 	case *InExpr:
 		return exprString(e.X) + " in " + exprString(e.Arena)
 	case *IndexExpr:

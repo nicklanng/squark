@@ -1,0 +1,68 @@
+package main
+
+import "errors"
+
+// Error messages and shared vars must be constant data: package variables can change (and with
+// threads N each thread changes its own), so neither may view one.
+var buf [8]byte
+
+var greeting = "hello" // a variable: it could be reassigned to view buf
+
+const Hello = "hello"
+
+func name() string {
+	n := copy(buf[:], "hello")
+	return string(buf[:n])
+}
+
+func pass(s string) string { return s }
+
+shared var s1 = name() // ERROR "cannot be used as constant data (stored in shared var s1"
+
+shared var s2 = Hello
+
+shared var s3 = pass("literal")
+
+func viaError() error {
+	return error(1, name()) // ERROR "cannot be used as constant data (used as an error message"
+}
+
+func viaVar() error {
+	return error(2, greeting) // ERROR "cannot be used as constant data"
+}
+
+func viaNew() error {
+	return errors.New(string(buf[:3])) // ERROR "cannot be used as constant data (errors.New uses argument 1 as constant data)"
+}
+
+func fine(err error) error {
+	_ = errors.New(Hello)
+	_ = error(3, pass("x"))
+	_ = error(4, s2) // shared vars are constant after initialization
+	return error(5, err.Error())
+}
+
+func main() {
+	_ = viaError()
+	_ = viaVar()
+	_ = viaNew()
+	_ = fine(nil)
+	println(s1, s2, s3)
+}
+
+// a string copied into a package arena is constant data: the arena is never freed
+arena names 1K
+
+func copied() string {
+	n := copy(buf[:], "hello")
+	return string(buf[:n]) in names
+}
+
+shared var s4 = copied()
+
+func viaArena() error { return error(6, copied()) }
+
+// constant data can be stored in a package variable (which is then ordinary static memory)
+var last string
+
+func save(err error) { last = err.Error() }

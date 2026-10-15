@@ -1255,6 +1255,8 @@ func TestPerThreadNote(t *testing.T) {
 		"cell: address taken in main",
 		"buf: sliced (a writable view) in main",
 		"Total: written in Add",
+		"vec: sliced (a writable view) in main",
+		"aliased: aliased in main",
 	} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note lacks %q:\n%s", want, note)

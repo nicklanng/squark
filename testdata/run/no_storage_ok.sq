@@ -1,0 +1,25 @@
+package main
+
+// Not "no storage" errors: a pointer method can give a map its storage, delete on a nil map does
+// nothing, and a select never picks a nil channel.
+type M map[string]int
+
+func (m *M) Init(a arena) { *m = make(map[string]int, 4) in a }
+
+arena pa 1K
+
+var gm M
+var never map[string]int
+var quiet chan int
+
+func main() {
+	gm.Init(pa)
+	gm["x"] = 1
+	delete(never, "x")
+	select {
+	case v := <-quiet:
+		println("got", v)
+	default:
+		println("nothing", gm["x"], len(never))
+	}
+}

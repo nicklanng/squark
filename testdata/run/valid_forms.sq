@@ -1,0 +1,32 @@
+package main
+
+// Valid programs that used to be rejected: an untyped range bound takes the iteration variable's
+// type, a const spec may mix error and ordinary constants, a constant composite may hold a nil
+// error, and `cap` after a func type belongs to the enclosing channel or map type.
+const ErrA, X = error(1, "a"), 5
+const T, Y = [2]int{1, 2}, 3
+const errs = [2]error{ErrA, nil}
+
+func f() { println("f") }
+
+var c chan func() cap 1
+var m map[int]func() cap 1
+
+func main() {
+	var i int8
+	for i = range 10 {
+	}
+	var b byte
+	n := 0
+	for b = range 3 {
+		n += int(b)
+	}
+	println(i, b, n)
+	var x int8 = X
+	var y int8 = Y
+	println(ErrA.Error(), x, T[1], y, errs[0] == ErrA, errs[1] == nil)
+	c <- f
+	(<-c)()
+	m[1] = f
+	m[1]()
+}

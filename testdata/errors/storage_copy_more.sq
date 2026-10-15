@@ -1,0 +1,52 @@
+package main
+
+// Every way of copying map or channel storage that is in use is rejected (L2 covered `=`, `:=`
+// and arguments; these are the rest).
+type R struct{ m map[int]int cap 4 }
+
+func (r R) Put(k, v int) { r.m[k] = v }
+
+func (r *R) PutP(k, v int) { r.m[k] = v }
+
+type Store map[string]int cap 8
+
+func (s Store) Add(k string) { s[k] = 1 }
+
+func fill(dst []R) {
+	var a [1]R
+	a[0].m[1] = 111
+	copy(dst, a[:])          // ERROR "cannot copy the elements of a[:]"
+	_ = append(dst[:0], a[:]...) // ERROR "cannot copy the elements of a[:]"
+}
+
+func vec(v *[..2]map[int]int cap 4) {
+	var a [1]map[int]int cap 4
+	v.Append(a[:]) // ERROR "each is map[int]int cap 4 storage"
+}
+
+func grow(s []R, x R) []R {
+	arena a 1K {
+		_ = append(s, R{}) in a // ERROR "cannot copy the elements of s"
+	}
+	return s
+}
+
+func mk() (r R, n int) { // ERROR "named result r holds"
+	r.m[1] = 1
+	return
+}
+
+func fresh() (R, int) { return R{}, 1 } // unnamed and built by a literal: fine
+
+func main() {
+	var r R
+	r.Put(1, 2)  // ERROR "cannot call Put on a copy of r"
+	R{}.Put(1, 2) // a fresh value: fine
+	r.PutP(1, 2)
+	var st Store
+	st.Add("a") // ERROR "cannot call Add on a copy of st"
+	var b [1]R
+	fill(b[:])
+	_, _ = mk()
+	_, _ = fresh()
+}

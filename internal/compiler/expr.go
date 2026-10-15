@@ -52,6 +52,19 @@ func (c *Checker) value(x Expr) bool {
 	return false
 }
 
+// isDecimal reports a decimal integer literal without a leading zero or underscores.
+func isDecimal(s string) bool {
+	if s == "" || len(s) > 1 && s[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Checker) valueExpr(x Expr, hint Type) bool {
 	c.exprHint(x, hint)
 	return c.value(x)
@@ -75,6 +88,11 @@ func (c *Checker) expr1(x Expr, hint Type) {
 			}
 			if mult > 1 {
 				lit = lit[:len(lit)-1]
+				if !isDecimal(lit) {
+					c.errorf(e.P, "invalid size literal %s: K, M and G follow a plain decimal integer", e.Lit)
+					c.invalid(e)
+					return
+				}
 			}
 			v := constant.MakeFromLiteral(lit, gotoken.INT, 0)
 			if mult > 1 {
@@ -82,12 +100,16 @@ func (c *Checker) expr1(x Expr, hint Type) {
 			}
 			if v.Kind() == constant.Unknown {
 				c.errorf(e.P, "invalid integer literal %s", e.Lit)
+				c.invalid(e) // reported: no "overflows" error to follow
+				return
 			}
 			e.T, e.Const = tUntypedInt, v
 		case FLOAT:
 			v := constant.MakeFromLiteral(e.Lit, gotoken.FLOAT, 0)
 			if v.Kind() == constant.Unknown {
 				c.errorf(e.P, "invalid floating-point literal %s", e.Lit)
+				c.invalid(e)
+				return
 			}
 			e.T, e.Const = tUntypedFloat, v
 		case CHAR:
@@ -285,6 +307,20 @@ func (c *Checker) checkNestedStorageCopy(x Expr, t Type, into string) bool {
 	return true
 }
 
+// checkElemsCopy reports copying the elements of x (copy, append(s, xs...), vector Append, or an
+// append that grows into an arena) when they hold map or channel storage: the copies would alias it.
+func (c *Checker) checkElemsCopy(x Expr, elem Type) bool {
+	if isStorageCopy(elem) {
+		c.errorf(x.Pos(), "cannot copy the elements of %s: each is %s storage; copy views (%s) instead", exprString(x), elem, viewOf(elem))
+		return false
+	}
+	if s := storageIn(elem); s != nil {
+		c.errorf(x.Pos(), "cannot copy the elements of %s: %s contains %s storage; use a slice of pointers ([]*%s) instead", exprString(x), elem, s, elem)
+		return false
+	}
+	return true
+}
+
 // inExpr checks `x in a`: operations in x that need memory allocate from arena a.
 func (c *Checker) inExpr(e *InExpr, hint Type) {
 	if c.valueExpr(e.Arena, nil) {
@@ -429,10 +465,11 @@ func (c *Checker) ident(e *Ident) {
 
 func (c *Checker) assignable(x Expr, t Type, context string) bool {
 	xi := x.info()
-	if xi.Mode == ModeInvalid || xi.T == tInvalid || t == tInvalid {
+	if xi.Mode == ModeInvalid || t == tInvalid {
 		return false
 	}
-	if !c.value(x) {
+	// a call with no result, a package or a builtin has no type but no error yet either
+	if !c.value(x) || xi.T == tInvalid {
 		return false
 	}
 	if isUntyped(xi.T) {
@@ -737,6 +774,9 @@ func (c *Checker) indexedElts(elts []Expr, elem Type, length int64) int64 {
 		}
 		if length >= 0 && idx >= length {
 			c.errorf(v.Pos(), "index %d out of bounds [0:%d]", idx, length)
+		} else if length < 0 && idx >= MaxSize {
+			c.errorf(v.Pos(), "index %d is too large: the literal's backing array would exceed 1T", idx)
+			idx = 0
 		}
 		if seen[idx] {
 			c.errorf(v.Pos(), "duplicate index %d in array or slice literal", idx)
@@ -937,6 +977,12 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 				e.Implicit = "&"
 			case !ptrRecv && viaPtr:
 				e.Implicit = "*"
+			}
+			if rt := m.Sig.Recv.Type; !ptrRecv && !freshValue(e.X) {
+				// the receiver is a copy, and a copy of used map or channel storage aliases it
+				if s := storageIn(rt); s != nil {
+					c.errorf(e.Pos(), "cannot call %s on a copy of %s: %s holds %s storage; give %s a pointer receiver (*%s)", name, exprString(e.X), rt, s, name, rt)
+				}
 			}
 			if !callee {
 				c.errorf(e.Sel.P, "method values are not supported (they would need a closure); call %s(...) directly", exprString(e))

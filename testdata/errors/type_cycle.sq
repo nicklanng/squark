@@ -16,6 +16,18 @@ type C struct { // ERROR "invalid recursive type C"
 type A B
 type B A // ERROR "invalid recursive type B"
 
+type State func() State // ERROR "invalid recursive type State: it refers to itself without a struct"
+
+type Sl []Sl // ERROR "invalid recursive type Sl"
+
+type P *P // ERROR "invalid recursive type P"
+
+type F1 func(F2) // ERROR "invalid recursive type F1"
+type F2 func(*F1) // ERROR "invalid recursive type F2"
+
+// fine: a struct in between
+type St struct{ next func() St }
+
 // fine: through a pointer or a view
 type L struct {
 	next *L

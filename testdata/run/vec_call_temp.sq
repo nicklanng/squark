@@ -1,0 +1,21 @@
+package main
+
+// index, len and range on a call (or receive) that yields a vector: a temporary used as a view
+func mk() [..4]int {
+	var v [..4]int
+	v.Push(7)
+	v.Push(8)
+	return v
+}
+
+func main() {
+	println(mk()[0], len(mk()))
+	for _, x := range mk() {
+		println(x)
+	}
+	var c chan [..2]int cap 1
+	var w [..2]int
+	w.Push(3)
+	c <- w
+	println(len(<-c))
+}
