@@ -1,0 +1,601 @@
+// load is the squark port of bench/load: an HTTP load generator with N keep-alive connections,
+// each driven by its own goroutine sending pre-built requests through the std http client and
+// timing the responses (whose bodies are read and dropped).
+//
+//	load -url http://127.0.0.1:8080/notes -c 64 -d 10s [-method GET] [-body '{...}'] [-mix] [-seed 1000] [-json]
+//
+// The flags, the -json output and the latency histogram are bench/load's, so the harness can use
+// either. -mix seeds -seed notes with POST /notes, then sends 80% GET /notes/{id}, 10% GET /notes
+// and 10% POST /notes. -startup (launch a server and time it until it answers) needs process
+// spawning, which squark doesn't have: use the Go load (bench/bin/load) for that.
+//
+// With threads auto, each scheduler thread runs main: each opens its share of the connections (at
+// least 32, so -c 64 runs on two threads) and counts its own results, and the threads send their
+// counts to thread 0, which prints the total. SQUARK_THREADS=N limits the number of threads.
+package main
+
+import (
+	"http"
+	"json"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+)
+
+threads auto
+pool http.serveConn 1 // the http package's server goroutines: unused here
+
+const (
+	maxConns = 4096  // connections per scheduler thread
+	maxSeed  = 10000 // notes seeded for -mix
+
+	connsPerThread = 32
+)
+
+// the command line (each thread parses it)
+thread var (
+	rawURL  = "http://127.0.0.1:8080/notes"
+	conns   = 64
+	dur     = 10 * time.Second
+	method  = "GET"
+	body    = ""
+	mix     = false
+	seedN   = 1000
+	asJSON  = false
+	startup = 0
+)
+
+// the target and the requests built from it
+thread var (
+	addr     string // host:port to dial
+	host     string // the Host header
+	path     string // path and query
+	addrBuf  [256]byte
+	pathBuf  [4K]byte
+	fixedBuf [64K + 1K]byte
+	fixedReq []byte // the request without -mix
+	postBuf  [64K + 1K]byte
+	postReq  []byte
+	listBuf  [1K]byte
+	listReq  []byte
+	modeBuf  [1K]byte
+)
+
+type Seeded struct {
+	n   int
+	ids [maxSeed]int
+}
+
+// Stats are one thread's results; its connection goroutines update them between requests.
+type Stats struct {
+	h        Hist
+	requests int
+	non2xx   int
+	errors   int
+	status   [600]int
+	elapsed  time.Duration
+}
+
+thread var (
+	seeded Seeded
+	st     Stats
+	other  Stats
+	stop   bool
+	done   chan bool cap maxConns
+)
+
+// Thread 0 seeds the notes for -mix and sends their ids to the other threads; they send their
+// results back.
+shared var seedCh chan Seeded cap 1
+shared var results chan Stats cap 1
+
+func fatal(msg string) {
+	if runtime.Shard() == 0 {
+		var b [512]byte
+		m := append(b[:0], "load: "...)
+		m = append(m, msg...)
+		m = append(m, '\n')
+		os.Stderr.Write(m)
+		os.Exit(1)
+	}
+	for {
+		time.Sleep(time.Hour) // thread 0 reports the error and ends the process
+	}
+}
+
+func fatal2(msg string, detail string) {
+	var b [1024]byte
+	m := append(b[:0], msg...)
+	m = append(m, detail[:min(len(detail), 900)]...)
+	fatal(string(m))
+}
+
+// parseDuration parses a Go duration ("10s", "1.5s", "1m30s", "500ms").
+func parseDuration(s string) (time.Duration, bool) {
+	if s == "0" {
+		return 0, true
+	}
+	if s == "" {
+		return 0, false
+	}
+	var d float64
+	for len(s) > 0 {
+		i := 0
+		for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.') {
+			i++
+		}
+		if i == 0 {
+			return 0, false
+		}
+		v, err := strconv.ParseFloat(s[:i])
+		if err != nil {
+			return 0, false
+		}
+		s = s[i:]
+		j := 0
+		for j < len(s) && !(s[j] >= '0' && s[j] <= '9' || s[j] == '.') {
+			j++
+		}
+		unit := 0.0
+		switch s[:j] {
+		case "ns":
+			unit = 1
+		case "us", "µs":
+			unit = 1e3
+		case "ms":
+			unit = 1e6
+		case "s":
+			unit = 1e9
+		case "m":
+			unit = 60e9
+		case "h":
+			unit = 3600e9
+		default:
+			return 0, false
+		}
+		s = s[j:]
+		d += v * unit
+	}
+	return time.Duration(d), true
+}
+
+// parseFlags reads the command line as Go's flag package would (-name value, -name=value, and
+// --name; bool flags take no value), up to the first non-flag argument or "--".
+func parseFlags() {
+	for i := 1; i < os.NArgs(); i++ {
+		a := os.Arg(i)
+		if a == "--" || len(a) < 2 || a[0] != '-' {
+			return
+		}
+		name := a[1:]
+		if name[0] == '-' {
+			name = name[1:]
+		}
+		name, val, hasVal := strings.Cut(name, "=")
+		if name == "mix" || name == "json" {
+			b := true
+			if hasVal {
+				v, err := strconv.ParseBool(val)
+				if err != nil {
+					fatal2("invalid boolean value for -", name)
+				}
+				b = v
+			}
+			if name == "mix" {
+				mix = b
+			} else {
+				asJSON = b
+			}
+			continue
+		}
+		switch name {
+		case "url", "method", "body", "c", "seed", "startup", "d":
+		default:
+			fatal2("flag provided but not defined: -", name)
+		}
+		if !hasVal {
+			i++
+			if i >= os.NArgs() {
+				fatal2("flag needs an argument: -", name)
+			}
+			val = os.Arg(i)
+		}
+		switch name {
+		case "url":
+			rawURL = val
+		case "method":
+			method = val
+		case "body":
+			body = val
+		case "c", "seed", "startup":
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				fatal2("invalid value for flag -", name)
+			}
+			switch name {
+			case "c":
+				conns = n
+			case "seed":
+				seedN = n
+			default:
+				startup = n
+			}
+		case "d":
+			d, ok := parseDuration(val)
+			if !ok {
+				fatal2("invalid duration for -d: ", val)
+			}
+			dur = d
+		}
+	}
+}
+
+// parseTarget splits rawURL into the address to dial, the Host header and the request path.
+func parseTarget() {
+	rest, ok := strings.CutPrefix(rawURL, "http://")
+	if !ok {
+		fatal("only http:// URLs are supported")
+	}
+	hostport := rest
+	path = "/"
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		hostport = rest[:i]
+		path = rest[i:]
+	} else if i := strings.IndexByte(rest, '?'); i >= 0 {
+		hostport = rest[:i]
+		path = string(append(append(pathBuf[:0], '/'), rest[i:]...)) // "http://h?q" asks for "/?q"
+	}
+	if i := strings.IndexByte(path, '#'); i >= 0 {
+		path = path[:i]
+	}
+	host = hostport
+	addr = hostport
+	if strings.IndexByte(hostport, ':') < 0 {
+		addr = string(append(append(addrBuf[:0], hostport...), ":80"...))
+	}
+}
+
+// buildRequest builds a request as bench/load does: Host, User-Agent and, with a body or for POST
+// and PUT, Content-Type: application/json and Content-Length.
+func buildRequest(dst []byte, method string, path string, body string) []byte {
+	h := [2]http.Header{{Name: "User-Agent", Value: "squark-load"}, {Name: "Content-Type", Value: "application/json"}}
+	hdrs := h[:1]
+	if len(body) > 0 || method == "POST" || method == "PUT" {
+		hdrs = h[:2]
+	}
+	var b [64K]byte
+	n := copy(b[:], body)
+	req, err := http.AppendRequest(dst[:0], method, host, path, hdrs, b[:n])
+	if err != nil {
+		fatal2("building the request: ", err.Error())
+	}
+	return req
+}
+
+// getNote builds GET /notes/{id} into dst.
+func getNote(dst []byte, id int) []byte {
+	var p [32]byte
+	path := strconv.AppendInt(append(p[:0], "/notes/"...), id)
+	h := [1]http.Header{{Name: "User-Agent", Value: "squark-load"}}
+	req, _ := http.AppendRequest(dst[:0], "GET", host, string(path), h[:], nil)
+	return req
+}
+
+// seed POSTs n notes over one connection and keeps their ids.
+//
+//squark:noinline
+func seed(n int) {
+	var buf [64K]byte
+	c, err := http.Dial(addr, buf[:])
+	if err != nil {
+		fatal2("seeding: ", err.Error())
+	}
+	defer c.Close()
+	var key [16]byte
+	for i := 0; i < n; i++ {
+		resp, err := c.RoundTrip(postReq)
+		if err != nil {
+			fatal2("seeding: ", err.Error())
+		}
+		if resp.StatusCode != 201 {
+			var m [128]byte
+			fatal2(string(strconv.AppendInt(append(m[:0], "seeding: seed POST returned "...), resp.StatusCode)), "")
+		}
+		id := 0
+		d := json.NewDecoder(resp.Body)
+		if d.BeginObject() {
+			for {
+				k, ok := d.Field(key[:])
+				if !ok {
+					break
+				}
+				if k == "id" {
+					id, _ = d.Int()
+				} else {
+					d.Skip()
+				}
+			}
+		}
+		if id == 0 {
+			fatal2("seeding: seed POST: cannot parse id from ", string(resp.Body))
+		}
+		seeded.ids[seeded.n] = id
+		seeded.n++
+	}
+}
+
+// next is xorshift64*.
+func next(s *uint64) uint64 {
+	x := *s
+	x ^= x >> 12
+	x ^= x << 25
+	x ^= x >> 27
+	*s = x
+	return x * 2685821657736338717
+}
+
+func intn(s *uint64, n int) int { return int((next(s) >> 1) % uint64(n)) }
+
+// pick returns the request to send next.
+func pick(rng *uint64, dst []byte) []byte {
+	if !mix {
+		return fixedReq
+	}
+	r := intn(rng, 100)
+	switch {
+	case r < 80:
+		return getNote(dst, seeded.ids[intn(rng, seeded.n)])
+	case r < 90:
+		return listReq
+	}
+	return postReq
+}
+
+// worker drives one keep-alive connection until stop.
+task worker(id int) pool maxConns {
+	var buf [16K]byte
+	var rq [256]byte
+	rng := uint64(id+1)*0x9E3779B97F4A7C15 | 1
+	var c http.Client
+	connected := false
+	for !stop {
+		if !connected {
+			cl, err := http.Dial(addr, buf[:])
+			if err != nil {
+				st.errors++
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			c = cl
+			c.DiscardBody = true
+			connected = true
+		}
+		req := pick(&rng, rq[:])
+		t0 := time.Now()
+		resp, err := c.RoundTrip(req)
+		lat := time.Since(t0)
+		if err != nil {
+			st.errors++
+			c.Close()
+			connected = false
+			continue
+		}
+		st.requests++
+		st.h.record(int(lat))
+		if resp.StatusCode < 600 {
+			st.status[resp.StatusCode]++
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			st.non2xx++
+		}
+		if resp.Close {
+			c.Close()
+			connected = false
+		}
+	}
+	if connected {
+		c.Close()
+	}
+	done <- true
+}
+
+func merge(t *Stats, o *Stats) {
+	t.h.merge(&o.h)
+	t.requests += o.requests
+	t.non2xx += o.non2xx
+	t.errors += o.errors
+	for i := 0; i < len(t.status); i++ {
+		t.status[i] += o.status[i]
+	}
+	t.elapsed = max(t.elapsed, o.elapsed)
+}
+
+func us(ns int) float64 { return float64(ns) / 1e3 }
+
+func appendDur(b []byte, ns int) []byte {
+	switch {
+	case ns < 1000000:
+		return append(strconv.AppendFloat(b, us(ns), 1), "us"...)
+	case ns < 1000000000:
+		return append(strconv.AppendFloat(b, float64(ns)/1e6, 2), "ms"...)
+	}
+	return append(strconv.AppendFloat(b, float64(ns)/1e9, 2), 's')
+}
+
+func report(t *Stats, mode string) {
+	var out [16K]byte
+	b := out[:0]
+	h := &t.h
+	secs := t.elapsed.Seconds()
+	rps := float64(t.requests) / secs
+	if asJSON {
+		b = append(b, `{"url":`...)
+		b = json.AppendString(b, rawURL)
+		b = append(b, `,"mode":`...)
+		b = json.AppendString(b, mode)
+		b = append(b, `,"connections":`...)
+		b = strconv.AppendInt(b, conns)
+		b = append(b, `,"duration_s":`...)
+		b = strconv.AppendFloat(b, secs, -1)
+		b = append(b, `,"requests":`...)
+		b = strconv.AppendInt(b, t.requests)
+		b = append(b, `,"rps":`...)
+		b = strconv.AppendFloat(b, rps, -1)
+		b = append(b, `,"latency_us":{"min":`...)
+		b = strconv.AppendFloat(b, us(int(h.min)), -1)
+		b = append(b, `,"mean":`...)
+		b = strconv.AppendFloat(b, us(h.mean()), -1)
+		b = append(b, `,"p50":`...)
+		b = strconv.AppendFloat(b, us(h.quantile(0.50)), -1)
+		b = append(b, `,"p90":`...)
+		b = strconv.AppendFloat(b, us(h.quantile(0.90)), -1)
+		b = append(b, `,"p99":`...)
+		b = strconv.AppendFloat(b, us(h.quantile(0.99)), -1)
+		b = append(b, `,"max":`...)
+		b = strconv.AppendFloat(b, us(int(h.max)), -1)
+		b = append(b, `},"non2xx":`...)
+		b = strconv.AppendInt(b, t.non2xx)
+		b = append(b, `,"errors":`...)
+		b = strconv.AppendInt(b, t.errors)
+		b = append(b, `,"status":{`...)
+		first := true
+		for code := 0; code < len(t.status); code++ { // 3-digit codes: numeric order is Go's key order
+			if t.status[code] == 0 {
+				continue
+			}
+			if !first {
+				b = append(b, ',')
+			}
+			first = false
+			b = append(b, '"')
+			b = strconv.AppendInt(b, code)
+			b = append(b, `":`...)
+			b = strconv.AppendInt(b, t.status[code])
+		}
+		b = append(b, '}')
+		if seeded.n > 0 {
+			b = append(b, `,"seeded":`...)
+			b = strconv.AppendInt(b, seeded.n)
+		}
+		b = append(b, "}\n"...)
+		os.Stdout.Write(b)
+		return
+	}
+	b = append(b, "target:   "...)
+	b = append(b, rawURL...)
+	b = append(b, "  mode: "...)
+	b = append(b, mode...)
+	b = append(b, "  conns: "...)
+	b = strconv.AppendInt(b, conns)
+	b = append(b, "  duration: "...)
+	b = strconv.AppendFloat(b, secs, 2)
+	b = append(b, "s\n"...)
+	if seeded.n > 0 {
+		b = append(b, "seeded:   "...)
+		b = strconv.AppendInt(b, seeded.n)
+		b = append(b, " notes\n"...)
+	}
+	b = append(b, "requests: "...)
+	b = strconv.AppendInt(b, t.requests)
+	b = append(b, "  ("...)
+	b = strconv.AppendFloat(b, rps, 0)
+	b = append(b, " req/s)\nlatency:  p50 "...)
+	b = appendDur(b, h.quantile(0.50))
+	b = append(b, "  p90 "...)
+	b = appendDur(b, h.quantile(0.90))
+	b = append(b, "  p99 "...)
+	b = appendDur(b, h.quantile(0.99))
+	b = append(b, "  max "...)
+	b = appendDur(b, int(h.max))
+	b = append(b, "  mean "...)
+	b = appendDur(b, h.mean())
+	b = append(b, "\nstatus:  "...)
+	for code := 0; code < len(t.status); code++ {
+		if t.status[code] > 0 {
+			b = append(b, ' ')
+			b = strconv.AppendInt(b, code)
+			b = append(b, '=')
+			b = strconv.AppendInt(b, t.status[code])
+		}
+	}
+	b = append(b, "\nnon-2xx:  "...)
+	b = strconv.AppendInt(b, t.non2xx)
+	b = append(b, "  errors: "...)
+	b = strconv.AppendInt(b, t.errors)
+	b = append(b, '\n')
+	os.Stdout.Write(b)
+}
+
+func main() {
+	me := runtime.Shard()
+	shards := runtime.Shards()
+	parseFlags()
+	parseTarget()
+	if startup > 0 {
+		fatal("-startup launches the server, and squark can't start processes: use the Go load generator (bench/bin/load) for it")
+	}
+	if conns < 1 {
+		fatal("-c must be >= 1")
+	}
+	mode := string(append(append(append(modeBuf[:0], method...), ' '), path...))
+	if mix {
+		post := body
+		if post == "" {
+			post = `{"title":"x","body":"y"}`
+		}
+		postReq = buildRequest(postBuf[:], "POST", "/notes", post)
+		listReq = buildRequest(listBuf[:], "GET", "/notes", "")
+		mode = "mix"
+		if seedN <= 0 {
+			fatal("-mix needs -seed > 0")
+		}
+		if seedN > maxSeed {
+			fatal("-seed is at most 10000")
+		}
+		if me == 0 {
+			seed(seedN)
+			for i := 1; i < shards; i++ {
+				seedCh <- seeded
+			}
+		} else {
+			seeded = <-seedCh
+		}
+	} else {
+		fixedReq = buildRequest(fixedBuf[:], method, path, body)
+	}
+	// One thread keeps more than 100k requests/s going on well under a core, and spreading a few
+	// connections over many threads costs CPU the server (on the same machine) could use: so only
+	// the first threads, with at least connsPerThread connections each, open any.
+	active := min(shards, (conns+connsPerThread-1)/connsPerThread)
+	n := 0
+	if me < active {
+		n = conns / active
+		if me < conns%active {
+			n++
+		}
+	}
+	if n > maxConns {
+		fatal("-c is at most 4096 per scheduler thread")
+	}
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		go worker(me + i*active)
+	}
+	time.Sleep(dur)
+	stop = true
+	for i := 0; i < n; i++ {
+		<-done
+	}
+	st.elapsed = time.Since(start)
+	if me != 0 {
+		results <- st
+		return
+	}
+	for i := 1; i < shards; i++ {
+		other = <-results
+		merge(&st, &other)
+	}
+	report(&st, mode)
+}

@@ -1546,7 +1546,13 @@ static sq_g *heap_pop(void) {
 
 int64_t sq_nanotime(void) {
 	struct timespec ts;
+#ifdef __APPLE__
+	// macOS's CLOCK_MONOTONIC counts whole microseconds; the raw clock (mach_continuous_time, which
+	// also runs during sleep) counts nanoseconds
+	clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
 	clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
 	return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 }
 

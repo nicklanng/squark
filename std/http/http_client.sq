@@ -1,0 +1,644 @@
+package http
+
+// The client: one keep-alive connection per Client, reading responses into a buffer the caller
+// provides. Requests are written from that buffer (or from the caller's own bytes, RoundTrip), so
+// nothing is allocated.
+
+import (
+	"io"
+	"net"
+	"strings"
+	"time"
+)
+
+// ErrMalformed means a response that isn't HTTP/1.x: a bad status line, header, Content-Length
+// or chunk.
+const ErrMalformed = error(-40, "http: malformed response")
+
+// ErrHeaderTooLarge means a response's status line and headers don't fit in the client's buffer.
+const ErrHeaderTooLarge = error(-41, "http: response header larger than the client's buffer")
+
+// ErrBodyTooLarge means a response's body doesn't fit in the rest of the client's buffer. The
+// Response returned with it has the status and headers, and the part of the body that fit.
+const ErrBodyTooLarge = error(-42, "http: response body larger than the client's buffer")
+
+// ErrRequestTooLarge means a request's line and headers don't fit in the buffer they are built in.
+const ErrRequestTooLarge = error(-43, "http: request larger than the buffer")
+
+// ErrInvalidRequest means a method or header name isn't an HTTP token, or the path is empty or
+// holds a space or control character.
+const ErrInvalidRequest = error(-44, "http: invalid method, path or header name")
+
+// ErrClosed is returned by a Client made with NewClient once its connection has been closed (a
+// Client from Dial dials again instead).
+const ErrClosed = error(-45, "http: client connection closed")
+
+// ClientTimeout is a new Client's Timeout.
+const ClientTimeout = 30 * time.Second
+
+// Response is a response read by a Client. Its strings and Body are views of the client's buffer,
+// valid until the client's next request.
+type Response struct {
+	StatusCode int    // 200
+	Reason     string // "OK"
+	Proto      string // "HTTP/1.1"
+	Body       []byte
+	// ContentLength is the Content-Length header's value, or -1 without one (a chunked body or one
+	// that ends with the connection).
+	ContentLength int
+	// Close reports that the connection was closed after this response (the server asked for it,
+	// or the body ended with the connection). The client's next request dials again.
+	Close bool
+
+	headers  [MaxHeaders]Header
+	nheaders int
+}
+
+// HeaderValue returns the first value of the named header (case-insensitive), or "".
+func (r *Response) HeaderValue(name string) string {
+	for i := 0; i < r.nheaders; i++ {
+		if strings.EqualFold(r.headers[i].Name, name) {
+			return r.headers[i].Value
+		}
+	}
+	return ""
+}
+
+// NumHeaders and HeaderAt iterate the response headers (the first MaxHeaders of them).
+func (r *Response) NumHeaders() int       { return r.nheaders }
+func (r *Response) HeaderAt(i int) Header { return r.headers[i] }
+
+// Client is an HTTP/1.1 client on one keep-alive connection. Responses are read into the buffer
+// given to Dial or NewClient: the status line, headers and body together must fit in it (bodies
+// are de-chunked in place), or the request fails with ErrHeaderTooLarge or ErrBodyTooLarge. The
+// request line and headers are built in the same buffer before the response arrives; a request
+// body is sent from the caller's memory. A Client is used by one goroutine at a time.
+//
+// After an error the connection is closed, since its state is unknown. A Client from Dial then
+// dials again for its next request; a GET or HEAD sent on a reused connection that the server had
+// closed meanwhile (nothing came back) is sent again on a new one, once.
+type Client struct {
+	// Timeout bounds the wait for each response, from when its request has been sent to the end
+	// of its body (ClientTimeout by default; 0 or less waits forever). A response that takes
+	// longer fails with net.ErrTimeout. Writes and dials aren't bounded.
+	Timeout time.Duration
+	// DiscardBody makes the client read response bodies and drop them: Body stays empty, and a
+	// body of any size fits.
+	DiscardBody bool
+
+	conn   net.Conn
+	open   bool
+	reused bool // the connection has carried a response
+	got    bool // some of the current response has arrived
+	addr   string
+	host   string
+	buf    []byte
+	r      int // buf[r:n] has been read but not consumed
+	n      int
+	w      int // the end of the body read so far
+}
+
+// Dial connects to addr ("host:port"; host is an IPv4 address or localhost) and returns a Client
+// for it that reads responses into buf. Requests carry addr as their Host header. When the
+// connection closes, the next request dials again.
+func Dial(addr string, buf []byte) (Client, error) {
+	c := Client{Timeout: ClientTimeout, addr: addr, host: addr, buf: buf[:cap(buf)]}
+	conn, err := net.Dial(addr)
+	if err != nil {
+		return c, err
+	}
+	c.conn = conn
+	c.open = true
+	return c, nil
+}
+
+// NewClient returns a Client on an open connection, sending host as the Host header. Once the
+// connection closes, requests fail with ErrClosed.
+func NewClient(conn net.Conn, host string, buf []byte) Client {
+	return Client{Timeout: ClientTimeout, conn: conn, open: true, host: host, buf: buf[:cap(buf)]}
+}
+
+// Conn returns the client's current connection.
+func (c *Client) Conn() net.Conn { return c.conn }
+
+// Close closes the connection (a Client from Dial dials again if used afterwards).
+func (c *Client) Close() error {
+	if !c.open {
+		return nil
+	}
+	c.open = false
+	c.r, c.n = 0, 0
+	return c.conn.Close()
+}
+
+// Get sends a GET request for path and reads the response.
+func (c *Client) Get(path string) (Response, error) {
+	return c.Do("GET", path, nil, nil)
+}
+
+// Post sends body to path with the given Content-Type and reads the response.
+func (c *Client) Post(path string, contentType string, body []byte) (Response, error) {
+	h := [1]Header{{Name: "Content-Type", Value: contentType}}
+	return c.Do("POST", path, h[:], body)
+}
+
+// Do sends a request and reads its response. The request carries the Host header, the given
+// headers and, if body isn't empty or the method is POST, PUT or PATCH, a Content-Length and the
+// body (Host, Content-Length and Transfer-Encoding in headers are ignored). A CR, LF or NUL in a
+// header value is sent as a space. A response to HEAD has no body, whatever its headers say;
+// interim 1xx responses are skipped.
+func (c *Client) Do(method string, path string, headers []Header, body []byte) (Response, error) {
+	retry := method == "GET" || method == "HEAD"
+	for attempt := 0; ; attempt++ {
+		if err := c.connect(); err != nil {
+			return Response{}, err
+		}
+		c.compact()
+		head, err := appendHead(c.buf[c.n:c.n], method, c.host, path, headers, len(body))
+		if err != nil {
+			return Response{}, err // nothing was sent: the connection is still usable
+		}
+		resp, again, err := c.exchange(head, body, method == "HEAD", retry && attempt == 0)
+		if !again {
+			return resp, err
+		}
+	}
+}
+
+// RoundTrip sends req, one complete request (from AppendRequest, say), as it is and reads the
+// response. A load generator can build its requests once and send them many times.
+func (c *Client) RoundTrip(req []byte) (Response, error) {
+	s := string(req)
+	head := strings.HasPrefix(s, "HEAD ")
+	retry := head || strings.HasPrefix(s, "GET ")
+	for attempt := 0; ; attempt++ {
+		if err := c.connect(); err != nil {
+			return Response{}, err
+		}
+		c.compact()
+		resp, again, err := c.exchange(req, nil, head, retry && attempt == 0)
+		if !again {
+			return resp, err
+		}
+	}
+}
+
+// AppendRequest appends a request to dst as Do would send it, for RoundTrip. It fails with
+// ErrRequestTooLarge, appending nothing, if the request doesn't fit in cap(dst).
+func AppendRequest(dst []byte, method string, host string, path string, headers []Header, body []byte) ([]byte, error) {
+	out, err := appendHead(dst, method, host, path, headers, len(body))
+	if err != nil {
+		return dst, err
+	}
+	if method != "POST" && method != "PUT" && method != "PATCH" && len(body) == 0 {
+		return out, nil
+	}
+	if len(out)+len(body) > cap(out) {
+		return dst, ErrRequestTooLarge
+	}
+	return append(out, body...), nil
+}
+
+// appendHead appends the request line and headers (with a Content-Length when the request has a
+// body), or fails without appending.
+func appendHead(dst []byte, method string, host string, path string, headers []Header, bodyLen int) ([]byte, error) {
+	if !isToken(method) || len(path) == 0 || hasCtl(path) || strings.IndexByte(path, ' ') >= 0 || strings.IndexByte(path, '\t') >= 0 {
+		return dst, ErrInvalidRequest
+	}
+	for i := 0; i < len(headers); i++ {
+		if !isToken(headers[i].Name) {
+			return dst, ErrInvalidRequest
+		}
+	}
+	ok := true
+	b := dst
+	b, ok = put(b, method, ok)
+	b, ok = put(b, " ", ok)
+	b, ok = put(b, path, ok)
+	b, ok = put(b, " HTTP/1.1\r\nHost: ", ok)
+	b, ok = putValue(b, host, ok)
+	for i := 0; i < len(headers); i++ {
+		name := headers[i].Name
+		if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
+			continue
+		}
+		b, ok = put(b, "\r\n", ok)
+		b, ok = put(b, name, ok)
+		b, ok = put(b, ": ", ok)
+		b, ok = putValue(b, headers[i].Value, ok)
+	}
+	if bodyLen > 0 || method == "POST" || method == "PUT" || method == "PATCH" {
+		var num [24]byte
+		b, ok = put(b, "\r\nContent-Length: ", ok)
+		b, ok = put(b, string(appendDecimal(num[:0], bodyLen)), ok)
+	}
+	b, ok = put(b, "\r\n\r\n", ok)
+	if !ok {
+		return dst, ErrRequestTooLarge
+	}
+	return b, nil
+}
+
+// put appends s to dst if it fits in cap(dst) and ok is still true.
+func put(dst []byte, s string, ok bool) ([]byte, bool) {
+	if !ok || len(s) > cap(dst)-len(dst) {
+		return dst, false
+	}
+	return append(dst, s...), true
+}
+
+// putValue is put for a header value: a CR, LF or NUL becomes a space.
+func putValue(dst []byte, s string, ok bool) ([]byte, bool) {
+	start := len(dst)
+	dst, ok = put(dst, s, ok)
+	if ok {
+		for i := start; i < len(dst); i++ {
+			if dst[i] == '\r' || dst[i] == '\n' || dst[i] == 0 {
+				dst[i] = ' '
+			}
+		}
+	}
+	return dst, ok
+}
+
+func appendDecimal(dst []byte, v int) []byte {
+	var tmp [20]byte
+	i := len(tmp)
+	for {
+		i--
+		tmp[i] = byte('0' + v%10)
+		v /= 10
+		if v == 0 {
+			break
+		}
+	}
+	return append(dst, tmp[i:]...)
+}
+
+// connect dials if the connection has been closed.
+func (c *Client) connect() error {
+	if c.open {
+		return nil
+	}
+	if c.addr == "" {
+		return ErrClosed
+	}
+	conn, err := net.Dial(c.addr)
+	if err != nil {
+		return err
+	}
+	c.conn = conn
+	c.open = true
+	c.reused = false
+	c.r, c.n = 0, 0
+	return nil
+}
+
+// compact moves bytes read past the last response to the front of the buffer.
+func (c *Client) compact() {
+	if c.r > 0 {
+		copy(c.buf, c.buf[c.r:c.n])
+		c.n -= c.r
+		c.r = 0
+	}
+}
+
+// drop closes the connection after an error or a response that ends it.
+func (c *Client) drop() {
+	if c.open {
+		c.conn.Close()
+		c.open = false
+	}
+	c.r, c.n = 0, 0
+}
+
+// exchange writes a then b and reads the response. On an error it closes the connection, and
+// reports whether the request may be sent again on a new one: the old connection was reused, the
+// server sent nothing, and mayRetry says the request is idempotent.
+func (c *Client) exchange(a []byte, b []byte, head bool, mayRetry bool) (Response, bool, error) {
+	again := mayRetry && c.reused && c.addr != ""
+	if _, err := c.conn.Write2(a, b); err != nil {
+		c.drop()
+		return Response{}, again, err
+	}
+	resp, err := c.readResponse(head)
+	if err != nil {
+		again = again && !c.got && err != net.ErrTimeout
+		c.drop()
+		return resp, again, err
+	}
+	if resp.Close {
+		c.drop()
+	} else {
+		c.reused = true
+	}
+	return resp, false, nil
+}
+
+// Body framing (RFC 9112 section 6.3).
+const (
+	bodyNone = iota
+	bodyLength
+	bodyChunked
+	bodyToClose
+)
+
+// readResponse reads a response from c.buf[0:c.n] and the connection.
+func (c *Client) readResponse(head bool) (Response, error) {
+	var resp Response
+	deadline := time.Now().Add(c.Timeout)
+	c.got = c.n > 0
+	h0 := 0 // where the current response head starts (after interim responses)
+	for {
+		end, scan := headerEnd(c.buf[h0:c.n], 0)
+		for end == -1 {
+			if c.n == len(c.buf) {
+				return resp, ErrHeaderTooLarge
+			}
+			if err := c.fill(deadline); err != nil {
+				if err == io.EOF && c.got {
+					return resp, io.ErrUnexpectedEOF
+				}
+				return resp, err
+			}
+			end, scan = headerEnd(c.buf[h0:c.n], scan)
+		}
+		if end < 0 {
+			return resp, ErrMalformed
+		}
+		resp = Response{}
+		framing, err := parseResponse(string(c.buf[h0:h0+end]), &resp)
+		if err != nil {
+			return resp, err
+		}
+		c.r = h0 + end
+		if resp.StatusCode >= 200 || resp.StatusCode == 101 {
+			if head || resp.StatusCode < 200 || resp.StatusCode == 204 || resp.StatusCode == 304 {
+				framing = bodyNone
+			}
+			if resp.StatusCode == 101 {
+				resp.Close = true // the connection has switched protocols: this client is done with it
+			}
+			return c.readBody(resp, framing, deadline)
+		}
+		h0 = c.r // an interim response (100 Continue, 103 Early Hints): the real one follows
+	}
+}
+
+// readBody reads the body that follows resp's head (at c.r) and sets resp.Body.
+func (c *Client) readBody(resp Response, framing int, deadline time.Time) (Response, error) {
+	start := c.r
+	c.w = start
+	var err error
+	switch framing {
+	case bodyLength:
+		err = c.readFixed(resp.ContentLength, deadline)
+	case bodyChunked:
+		err = c.readChunked(deadline)
+	case bodyToClose:
+		resp.Close = true
+		for err == nil {
+			if c.r == c.n {
+				if err = c.fill(deadline); err == io.EOF {
+					err = nil
+					break
+				}
+			}
+			c.take(c.n - c.r)
+		}
+	}
+	resp.Body = c.buf[start:c.w]
+	return resp, err
+}
+
+// fill reads more input into the buffer. It first moves unconsumed input down to the end of the
+// body (c.w), reclaiming the room of chunk headers and of bytes already consumed.
+func (c *Client) fill(deadline time.Time) error {
+	if c.n == len(c.buf) && c.r > c.w {
+		copy(c.buf[c.w:], c.buf[c.r:c.n])
+		c.n -= c.r - c.w
+		c.r = c.w
+	}
+	if c.n == len(c.buf) {
+		return ErrBodyTooLarge
+	}
+	m := 0
+	var err error
+	if c.Timeout <= 0 {
+		m, err = c.conn.Read(c.buf[c.n:])
+	} else {
+		left := deadline.Sub(time.Now())
+		if left <= 0 {
+			return net.ErrTimeout
+		}
+		m, err = c.conn.ReadTimeout(c.buf[c.n:], left)
+	}
+	if err != nil {
+		return err
+	}
+	c.got = true
+	c.n += m
+	return nil
+}
+
+// take consumes k bytes of body at c.r, moving them to c.w (or dropping them with DiscardBody).
+func (c *Client) take(k int) {
+	if !c.DiscardBody {
+		if c.w != c.r {
+			copy(c.buf[c.w:c.w+k], c.buf[c.r:c.r+k])
+		}
+		c.w += k
+	}
+	c.r += k
+}
+
+// readFixed reads need bytes of body.
+func (c *Client) readFixed(need int, deadline time.Time) error {
+	for need > 0 {
+		if c.r == c.n {
+			if err := c.fill(deadline); err != nil {
+				if err == io.EOF {
+					return io.ErrUnexpectedEOF
+				}
+				return err
+			}
+		}
+		k := min(need, c.n-c.r)
+		c.take(k)
+		need -= k
+	}
+	return nil
+}
+
+// readLine consumes a CRLF-terminated line of a chunked body and returns it without the CRLF.
+func (c *Client) readLine(deadline time.Time) (string, error) {
+	scan := c.r
+	for {
+		i := strings.IndexByte(string(c.buf[scan:c.n]), '\n')
+		if i >= 0 {
+			end := scan + i
+			if end == c.r || c.buf[end-1] != '\r' {
+				return "", ErrMalformed
+			}
+			line := string(c.buf[c.r : end-1])
+			c.r = end + 1
+			return line, nil
+		}
+		scanned := c.n - c.r
+		if err := c.fill(deadline); err != nil {
+			if err == io.EOF {
+				return "", io.ErrUnexpectedEOF
+			}
+			return "", err
+		}
+		scan = c.r + scanned // fill may have moved the line down
+	}
+}
+
+// readChunked reads a chunked body, then its trailers (which are dropped).
+func (c *Client) readChunked(deadline time.Time) error {
+	for {
+		line, err := c.readLine(deadline)
+		if err != nil {
+			return err
+		}
+		size := parseChunkSize(line)
+		if size < 0 {
+			return ErrMalformed
+		}
+		if size == 0 {
+			break
+		}
+		if err := c.readFixed(size, deadline); err != nil {
+			return err
+		}
+		crlf, err := c.readLine(deadline)
+		if err != nil {
+			return err
+		}
+		if crlf != "" {
+			return ErrMalformed
+		}
+	}
+	for {
+		line, err := c.readLine(deadline)
+		if err != nil {
+			return err
+		}
+		if line == "" {
+			return nil
+		}
+	}
+}
+
+// parseChunkSize parses a chunk-size line (hex digits, then optional extensions after ';'). It
+// returns -1 if the line isn't one.
+func parseChunkSize(line string) int {
+	s, _, _ := strings.Cut(line, ";")
+	s = trimOWS(s)
+	if len(s) == 0 || len(s) > 15 { // 15 hex digits can't overflow an int
+		return -1
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		d := 0
+		switch {
+		case c >= '0' && c <= '9':
+			d = int(c - '0')
+		case c >= 'a' && c <= 'f':
+			d = int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			d = int(c-'A') + 10
+		default:
+			return -1
+		}
+		n = n*16 + d
+	}
+	return n
+}
+
+// parseResponse parses a response head (which headerEnd has checked for stray CRs and LFs) into
+// r, and returns how its body is framed.
+func parseResponse(head string, r *Response) (int, error) {
+	line, rest, _ := strings.Cut(head, "\r\n")
+	proto, after, ok := strings.Cut(line, " ")
+	code, reason, _ := strings.Cut(after, " ")
+	if !ok || len(proto) != 8 || !strings.HasPrefix(proto, "HTTP/1.") || proto[7] < '0' || proto[7] > '9' {
+		return bodyNone, ErrMalformed
+	}
+	if len(code) != 3 || hasCtl(reason) {
+		return bodyNone, ErrMalformed
+	}
+	status := 0
+	for i := 0; i < 3; i++ {
+		if code[i] < '0' || code[i] > '9' {
+			return bodyNone, ErrMalformed
+		}
+		status = status*10 + int(code[i]-'0')
+	}
+	if status < 100 {
+		return bodyNone, ErrMalformed
+	}
+	r.StatusCode = status
+	r.Reason = reason
+	r.Proto = proto
+	r.ContentLength = -1
+	r.Close = proto == "HTTP/1.0" // HTTP/1.0 closes unless the server says keep-alive
+	sawLength := false
+	chunked := false
+	coded := false // a Transfer-Encoding other than chunked: the body ends with the connection
+	for len(rest) > 0 {
+		hl, more, _ := strings.Cut(rest, "\r\n")
+		rest = more
+		if len(hl) == 0 {
+			break
+		}
+		name, value, ok := strings.Cut(hl, ":")
+		if !ok || !isToken(name) {
+			return bodyNone, ErrMalformed
+		}
+		value = trimOWS(value)
+		if hasCtl(value) {
+			return bodyNone, ErrMalformed
+		}
+		if r.nheaders < MaxHeaders {
+			r.headers[r.nheaders] = Header{Name: name, Value: value}
+			r.nheaders++
+		}
+		switch {
+		case strings.EqualFold(name, "Content-Length"):
+			cl := parseLength(value)
+			if cl < 0 || sawLength && cl != r.ContentLength {
+				return bodyNone, ErrMalformed
+			}
+			sawLength = true
+			r.ContentLength = cl
+		case strings.EqualFold(name, "Transfer-Encoding"):
+			// the final coding decides: chunked frames the body, anything else runs to the close
+			last := value
+			if i := strings.LastIndexByte(value, ','); i >= 0 {
+				last = value[i+1:]
+			}
+			chunked = strings.EqualFold(trimOWS(last), "chunked")
+			coded = !chunked
+		case strings.EqualFold(name, "Connection"):
+			if hasToken(value, "close") {
+				r.Close = true
+			} else if hasToken(value, "keep-alive") {
+				r.Close = false
+			}
+		}
+	}
+	switch {
+	case chunked:
+		r.ContentLength = -1
+		return bodyChunked, nil
+	case coded:
+		r.ContentLength = -1
+		return bodyToClose, nil
+	case sawLength:
+		return bodyLength, nil
+	}
+	return bodyToClose, nil
+}

@@ -5,6 +5,9 @@
 #   DURATION=3s RUNS=1 ./run.sh  quick run
 #   ONLY=http ./run.sh           just the HTTP server benchmarks (or ONLY=compute)
 #   CONC=256 IDLE=8000 ./run.sh  more load connections / idle connections
+#   LOADGEN=load ./run.sh        drive the servers with the Go load generator (bench/load) instead of
+#                                the squark one (bench/squark/load); the Go one also has -startup,
+#                                which launches a server process (squark can't start processes)
 set -e
 cd "$(dirname "$0")"
 ROOT=..
@@ -16,7 +19,7 @@ SQ=$ROOT/bin/squark
 
 echo "building squark programs..." >&2
 $SQ build -o bin/notes $ROOT/examples/notes
-for p in sieve nbody wordfreq jsonenc; do
+for p in sieve nbody wordfreq jsonenc load; do
 	$SQ build -o bin/sq-$p squark/$p
 done
 

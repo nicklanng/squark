@@ -1,0 +1,17 @@
+package main
+
+// time.Now and time.Since count nanoseconds: macOS's CLOCK_MONOTONIC has only microsecond
+// resolution, so every short duration measured with it was a whole number of microseconds.
+
+import "time"
+
+func main() {
+	fine := false
+	for i := 0; i < 1000 && !fine; i++ {
+		t0 := time.Now()
+		if d := time.Since(t0); d%time.Microsecond != 0 {
+			fine = true
+		}
+	}
+	println("sub-microsecond durations:", fine)
+}

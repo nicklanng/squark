@@ -539,6 +539,11 @@ func handle(w *http.ResponseWriter, r *http.Request) {
     w.WriteHeader(201)
     w.WriteString(`{"ok":true}`)
 }
+
+// HTTP client: responses are read into the caller's buffer, and the connection is kept alive
+var buf [64K]byte
+c := try http.Dial("127.0.0.1:8080", buf[:])
+resp := try c.Get("/notes/1")    // resp.Body and resp.HeaderValue(...) view buf until the next request
 ```
 
 ## 9. Runtime behaviour

@@ -347,8 +347,9 @@ func NextIdle() (net.Conn, int)
 // IdleCount reports how many connections are parked in the idle set.
 func IdleCount() int
 
-// Package http is an HTTP/1.1 server. Each connection runs in its own goroutine whose read and
-// write buffers live on that goroutine's (statically sized) stack: no allocation per request.
+// Package http is an HTTP/1.1 server and client. The server runs each connection in its own
+// goroutine, whose read and write buffers live on its (statically sized) stack: no allocation per
+// request. The client (Dial, Client) reads responses into a buffer the caller provides.
 package http
 
 // ReadBufferSize bounds request line + headers + body.
@@ -363,6 +364,8 @@ const MaxHeaders = 32
 const IdleRelease time.Duration = 100000000
 // MaxServers is how many Serve calls one process may run.
 const MaxServers = 16
+// ClientTimeout is a new Client's Timeout.
+const ClientTimeout time.Duration = 30000000000
 
 // ReadHeaderTimeout (5 seconds) is how long a client has to send a request's line and headers,
 // counted from when the request starts arriving. A connection that takes longer gets a 408 and is
@@ -373,6 +376,22 @@ var ReadHeaderTimeout time.Duration
 // counted the same way. A connection that takes longer gets a 408 and is closed.
 var ReadTimeout time.Duration
 const ErrTooManyServers = error(503, "http: too many servers in one process")
+// ErrMalformed means a response that isn't HTTP/1.x: a bad status line, header, Content-Length
+// or chunk.
+const ErrMalformed = error(-40, "http: malformed response")
+// ErrHeaderTooLarge means a response's status line and headers don't fit in the client's buffer.
+const ErrHeaderTooLarge = error(-41, "http: response header larger than the client's buffer")
+// ErrBodyTooLarge means a response's body doesn't fit in the rest of the client's buffer. The
+// Response returned with it has the status and headers, and the part of the body that fit.
+const ErrBodyTooLarge = error(-42, "http: response body larger than the client's buffer")
+// ErrRequestTooLarge means a request's line and headers don't fit in the buffer they are built in.
+const ErrRequestTooLarge = error(-43, "http: request larger than the buffer")
+// ErrInvalidRequest means a method or header name isn't an HTTP token, or the path is empty or
+// holds a space or control character.
+const ErrInvalidRequest = error(-44, "http: invalid method, path or header name")
+// ErrClosed is returned by a Client made with NewClient once its connection has been closed (a
+// Client from Dial dials again instead).
+const ErrClosed = error(-45, "http: client connection closed")
 
 type Header struct {
 	Name string
@@ -419,6 +438,65 @@ func (w *http.ResponseWriter) WriteInt(v int)
 func (w *http.ResponseWriter) Status() int
 // HandlerFunc handles one request.
 type HandlerFunc func(*http.ResponseWriter, *http.Request)
+// Response is a response read by a Client. Its strings and Body are views of the client's buffer,
+// valid until the client's next request.
+type Response struct {
+	StatusCode int
+	Reason string
+	Proto string
+	Body []byte
+
+	// ContentLength is the Content-Length header's value, or -1 without one (a chunked body or one
+	// that ends with the connection).
+	ContentLength int
+
+	// Close reports that the connection was closed after this response (the server asked for it,
+	// or the body ended with the connection). The client's next request dials again.
+	Close bool
+	// unexported fields
+}
+// HeaderValue returns the first value of the named header (case-insensitive), or "".
+func (r *http.Response) HeaderValue(name string) string from r
+// NumHeaders and HeaderAt iterate the response headers (the first MaxHeaders of them).
+func (r *http.Response) NumHeaders() int
+func (r *http.Response) HeaderAt(i int) http.Header from r
+// Client is an HTTP/1.1 client on one keep-alive connection. Responses are read into the buffer
+// given to Dial or NewClient: the status line, headers and body together must fit in it (bodies
+// are de-chunked in place), or the request fails with ErrHeaderTooLarge or ErrBodyTooLarge. The
+// request line and headers are built in the same buffer before the response arrives; a request
+// body is sent from the caller's memory. A Client is used by one goroutine at a time.
+//
+// After an error the connection is closed, since its state is unknown. A Client from Dial then
+// dials again for its next request; a GET or HEAD sent on a reused connection that the server had
+// closed meanwhile (nothing came back) is sent again on a new one, once.
+type Client struct {
+	// Timeout bounds the wait for each response, from when its request has been sent to the end
+	// of its body (ClientTimeout by default; 0 or less waits forever). A response that takes
+	// longer fails with net.ErrTimeout. Writes and dials aren't bounded.
+	Timeout time.Duration
+
+	// DiscardBody makes the client read response bodies and drop them: Body stays empty, and a
+	// body of any size fits.
+	DiscardBody bool
+	// unexported fields
+}
+// Conn returns the client's current connection.
+func (c *http.Client) Conn() net.Conn
+// Close closes the connection (a Client from Dial dials again if used afterwards).
+func (c *http.Client) Close() error
+// Get sends a GET request for path and reads the response.
+func (c *http.Client) Get(path string) (http.Response, error) from c
+// Post sends body to path with the given Content-Type and reads the response.
+func (c *http.Client) Post(path string, contentType string, body []byte) (http.Response, error) from c
+// Do sends a request and reads its response. The request carries the Host header, the given
+// headers and, if body isn't empty or the method is POST, PUT or PATCH, a Content-Length and the
+// body (Host, Content-Length and Transfer-Encoding in headers are ignored). A CR, LF or NUL in a
+// header value is sent as a space. A response to HEAD has no body, whatever its headers say;
+// interim 1xx responses are skipped.
+func (c *http.Client) Do(method string, path string, headers []http.Header, body []byte) (http.Response, error) from c
+// RoundTrip sends req, one complete request (from AppendRequest, say), as it is and reads the
+// response. A load generator can build its requests once and send them many times.
+func (c *http.Client) RoundTrip(req []byte) (http.Response, error) from c
 
 // ListenAndServe listens on addr and serves each connection in its own goroutine.
 func ListenAndServe(addr string, h http.HandlerFunc) error
@@ -432,6 +510,16 @@ func ListenAndServe(addr string, h http.HandlerFunc) error
 func Serve(l net.Listener, h http.HandlerFunc) error
 // StatusText returns the reason phrase for a status code.
 func StatusText(code int) string static
+// Dial connects to addr ("host:port"; host is an IPv4 address or localhost) and returns a Client
+// for it that reads responses into buf. Requests carry addr as their Host header. When the
+// connection closes, the next request dials again.
+func Dial(addr string, buf []byte) (http.Client, error) from addr, buf
+// NewClient returns a Client on an open connection, sending host as the Host header. Once the
+// connection closes, requests fail with ErrClosed.
+func NewClient(conn net.Conn, host string, buf []byte) http.Client from host, buf
+// AppendRequest appends a request to dst as Do would send it, for RoundTrip. It fails with
+// ErrRequestTooLarge, appending nothing, if the request doesn't fit in cap(dst).
+func AppendRequest(dst []byte, method string, host string, path string, headers []http.Header, body []byte) ([]byte, error) from dst
 
 // Package utf8 encodes and decodes UTF-8.
 package utf8

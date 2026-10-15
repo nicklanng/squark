@@ -889,6 +889,9 @@ HTTP throughput about 3–5% lower, nbody 3.5% slower, the notes binary 109 → 
 - [x] **Z5. gcc's AddressSanitizer loses the fake stack across goroutine switches** (tooling) —
   the ASan harness is clang-only (`needClangASan`); clang's needs no fiber annotations on macOS or
   Linux
+- [x] **Z6. `time.Now`/`time.Since` had microsecond resolution on macOS** (bug, found writing the
+  load generator: every latency was a whole µs) — fixed: `sq_nanotime` uses `CLOCK_MONOTONIC_RAW` on
+  macOS (nanoseconds; `CLOCK_MONOTONIC` counts whole µs there); test: `testdata/run/time_resolution.sq`
 
 ## Progress log
 

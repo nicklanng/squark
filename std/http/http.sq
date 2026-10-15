@@ -1,5 +1,6 @@
-// Package http is an HTTP/1.1 server. Each connection runs in its own goroutine whose read and
-// write buffers live on that goroutine's (statically sized) stack: no allocation per request.
+// Package http is an HTTP/1.1 server and client. The server runs each connection in its own
+// goroutine, whose read and write buffers live on its (statically sized) stack: no allocation per
+// request. The client (Dial, Client) reads responses into a buffer the caller provides.
 package http
 
 import (

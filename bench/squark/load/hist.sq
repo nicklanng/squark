@@ -1,0 +1,117 @@
+package main
+
+// Hist is a small HDR-style log-linear histogram of nanosecond latencies, the same as
+// bench/load/hist.go: each power-of-two range is split into 128 linear sub-buckets, so any
+// recorded value is reported with < 0.8% relative error.
+const (
+	subBits    = 7
+	subCount   = 1 << subBits
+	histBucket = (64-subBits)*subCount + subCount
+)
+
+type Hist struct {
+	counts [histBucket]uint64
+	n      uint64
+	sum    uint64
+	max    uint64
+	min    uint64
+}
+
+// len64 is Go's bits.Len64: the number of bits needed to represent x.
+func len64(x uint64) int {
+	n := 0
+	if x >= 1<<32 {
+		x >>= 32
+		n = 32
+	}
+	if x >= 1<<16 {
+		x >>= 16
+		n += 16
+	}
+	if x >= 1<<8 {
+		x >>= 8
+		n += 8
+	}
+	for x != 0 {
+		x >>= 1
+		n++
+	}
+	return n
+}
+
+func bucketOf(v uint64) int {
+	if v < 2*subCount {
+		return int(v)
+	}
+	exp := len64(v) - (subBits + 1)
+	return exp*subCount + int(v>>uint(exp))
+}
+
+// bucketMid returns a representative value (midpoint) for bucket i.
+func bucketMid(i int) uint64 {
+	if i < 2*subCount {
+		return uint64(i)
+	}
+	exp := i/subCount - 1
+	mant := uint64(i - exp*subCount)
+	lo := mant << uint(exp)
+	return lo + (uint64(1)<<uint(exp))/2
+}
+
+func (h *Hist) record(ns int) {
+	v := uint64(ns)
+	h.counts[bucketOf(v)]++
+	h.n++
+	h.sum += v
+	if v > h.max {
+		h.max = v
+	}
+	if h.min == 0 || v < h.min {
+		h.min = v
+	}
+}
+
+func (h *Hist) merge(o *Hist) {
+	for i := 0; i < histBucket; i++ {
+		h.counts[i] += o.counts[i]
+	}
+	h.n += o.n
+	h.sum += o.sum
+	if o.max > h.max {
+		h.max = o.max
+	}
+	if o.min != 0 && (h.min == 0 || o.min < h.min) {
+		h.min = o.min
+	}
+}
+
+// quantile returns the q-quantile in nanoseconds.
+func (h *Hist) quantile(q float64) int {
+	if h.n == 0 {
+		return 0
+	}
+	target := uint64(q*float64(h.n) + 0.5)
+	if target < 1 {
+		target = 1
+	}
+	var seen uint64
+	for i := 0; i < histBucket; i++ {
+		seen += h.counts[i]
+		if seen >= target {
+			v := bucketMid(i)
+			if v > h.max {
+				v = h.max
+			}
+			return int(v)
+		}
+	}
+	return int(h.max)
+}
+
+// mean returns the mean in nanoseconds.
+func (h *Hist) mean() int {
+	if h.n == 0 {
+		return 0
+	}
+	return int(h.sum / h.n)
+}

@@ -29,7 +29,17 @@ var (
 	idleN    = envInt("IDLE", 5000)
 	runs     = envInt("RUNS", 3)
 	only     = os.Getenv("ONLY") // "compute" or "http"
+	// loadgen is the load generator in bin: sq-load (bench/squark/load, the default) or load (the
+	// Go one in bench/load, which also has the -startup mode)
+	loadgen = envStr("LOADGEN", "sq-load")
 )
+
+func envStr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
 
 func envDur(k string, d time.Duration) time.Duration {
 	if v := os.Getenv(k); v != "" {
@@ -80,19 +90,20 @@ type ServerResult struct {
 }
 
 type Report struct {
-	Date     string          `json:"date"`
-	Machine  string          `json:"machine"`
-	Duration string          `json:"duration"`
-	Conc     int             `json:"connections"`
-	Compute  []ComputeResult `json:"compute"`
-	HTTP     []HTTPResult    `json:"http"`
-	Servers  []ServerResult  `json:"servers"`
+	Date     string           `json:"date"`
+	Machine  string           `json:"machine"`
+	Duration string           `json:"duration"`
+	Conc     int              `json:"connections"`
+	Compute  []ComputeResult  `json:"compute"`
+	HTTP     []HTTPResult     `json:"http"`
+	Servers  []ServerResult   `json:"servers"`
 	Sizes    map[string]int64 `json:"binary_sizes"`
+	LoadGen  string           `json:"load_generator"`
 }
 
 func main() {
 	raiseFDLimit()
-	rep := &Report{Date: time.Now().Format(time.RFC3339), Machine: machine(), Duration: duration.String(), Conc: conc, Sizes: map[string]int64{}}
+	rep := &Report{Date: time.Now().Format(time.RFC3339), Machine: machine(), Duration: duration.String(), Conc: conc, Sizes: map[string]int64{}, LoadGen: loadgen}
 	for _, b := range []string{"notes", "gonotes", "sq-sieve", "sq-nbody", "sq-wordfreq", "sq-jsonenc", "gocompute"} {
 		if st, err := os.Stat(filepath.Join(binDir, b)); err == nil {
 			rep.Sizes[b] = st.Size()
@@ -331,7 +342,7 @@ func httpBenchmarks(rep *Report) {
 			}
 			time.Sleep(100 * time.Millisecond)
 			args := append([]string{"-c", strconv.Itoa(conc), "-d", duration.String(), "-json"}, sc.args...)
-			out, err := exec.Command(filepath.Join(binDir, "load"), args...).Output()
+			out, err := exec.Command(filepath.Join(binDir, loadgen), args...).Output()
 			if err != nil {
 				fatal("load %s %s: %v", s.impl, sc.name, err)
 			}
@@ -415,7 +426,7 @@ func human(n int64) string {
 }
 
 func printReport(rep *Report) {
-	fmt.Printf("# squark vs Go\n\n%s, %s\nHTTP: %d keep-alive connections, %s per scenario; load generator on the same machine.\n\n", rep.Machine, rep.Date, rep.Conc, rep.Duration)
+	fmt.Printf("# squark vs Go\n\n%s, %s\nHTTP: %d keep-alive connections, %s per scenario; load generator (%s) on the same machine.\n\n", rep.Machine, rep.Date, rep.Conc, rep.Duration, rep.LoadGen)
 	if len(rep.Compute) > 0 {
 		fmt.Printf("## Compute (best of %d)\n\n| benchmark | Go time | squark time | Go peak RSS | squark peak RSS |\n|---|---:|---:|---:|---:|\n", runs)
 		for i := 0; i+1 < len(rep.Compute); i += 2 {
