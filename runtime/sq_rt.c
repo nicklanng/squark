@@ -1957,6 +1957,28 @@ int64_t sq_read(int64_t fd, sq_bytes b) {
 	}
 }
 
+// sq_read_timeout is sq_read that waits at most timeout_ns for input: it returns -SQ_ETIMEOUT if
+// none arrived by then. (SQ_ETIMEOUT is above every errno, so the caller can tell it apart.)
+#define SQ_ETIMEOUT 65536
+int64_t sq_read_timeout(int64_t fd, sq_bytes b, int64_t timeout_ns) {
+	int64_t deadline = sq_nanotime() + timeout_ns;
+	if (sq_self->cur_g && read_needs_poll((int)fd)) {
+		struct pollfd p = {(int)fd, POLLIN, 0};
+		if (poll(&p, 1, 0) == 0 && (timeout_ns <= 0 || sq_wait_idle(fd, timeout_ns))) return -SQ_ETIMEOUT;
+	}
+	for (;;) {
+		ssize_t r = read((int)fd, b.p, (size_t)b.len);
+		if (r >= 0) return r;
+		if (errno == EINTR) continue;
+		if (errno == EAGAIN && sq_self->cur_g) {
+			int64_t left = deadline - sq_nanotime();
+			if (left <= 0 || sq_wait_idle(fd, left)) return -SQ_ETIMEOUT;
+			continue; // readable, or closed meanwhile: the read reports which
+		}
+		return -errno;
+	}
+}
+
 static int64_t write_fd(int64_t fd, const uint8_t *p, int64_t n) {
 	int64_t done = 0;
 	if (fd == 1) sq_flush();

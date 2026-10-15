@@ -24,6 +24,16 @@ const (
 // connection moves to the runtime's idle set (where it costs no stack until its next request).
 const IdleRelease = 100 * time.Millisecond
 
+// ReadHeaderTimeout (5 seconds) is how long a client has to send a request's line and headers,
+// counted from when the request starts arriving. A connection that takes longer gets a 408 and is
+// closed, so slow clients can't hold connection goroutines. Set it in main before serving (with
+// threads, each scheduler thread runs main and sets its own copy).
+var ReadHeaderTimeout = 5 * time.Second
+
+// ReadTimeout (10 seconds) is how long a client has to send a whole request, headers and body,
+// counted the same way. A connection that takes longer gets a 408 and is closed.
+var ReadTimeout = 10 * time.Second
+
 type Header struct {
 	Name  string
 	Value string
@@ -45,6 +55,8 @@ type Request struct {
 	headers   [MaxHeaders]Header
 	nheaders  int
 	keepAlive bool
+	http10    bool
+	expect100 bool
 }
 
 // HeaderValue returns the first value of the named header (case-insensitive), or "".
@@ -92,32 +104,60 @@ type ResponseWriter struct {
 	head        bool
 	failed      bool
 	hasType     bool
+	http10      bool // an HTTP/1.0 request: no chunked encoding
 	crlf        bool // a chunk's data went out; its closing CRLF leads the next write
-	dropped     int  // HEAD: body bytes counted for Content-Length but not sent
+	dropped     int  // body bytes not sent: HEAD (counted for Content-Length) or a status without a body
 }
 
-// SetHeader adds a response header. Content-Length, Date and Connection are managed for you.
+// SetHeader adds a response header. Content-Length, Transfer-Encoding and Date are managed for
+// you and ignored here, as is a name that isn't an HTTP token. "Connection: close" closes the
+// connection after the response. A CR, LF or NUL in value is sent as a space, so a value (say,
+// echoed from the request) can't start a header of its own.
 func (w *ResponseWriter) SetHeader(name, value string) {
-	if w.wroteHeader {
+	if w.wroteHeader || !isToken(name) {
 		return
 	}
-	if strings.EqualFold(name, "Content-Type") {
+	switch {
+	case strings.EqualFold(name, "Content-Type"):
 		w.hasType = true
+	case strings.EqualFold(name, "Content-Length"), strings.EqualFold(name, "Transfer-Encoding"), strings.EqualFold(name, "Date"):
+		return
+	case strings.EqualFold(name, "Connection"):
+		if hasToken(value, "close") {
+			w.keepAlive = false
+		}
+		return
 	}
 	if len(w.hdr)+len(name)+len(value)+4 > cap(w.hdr) {
 		return
 	}
 	w.hdr = append(w.hdr, name...)
 	w.hdr = append(w.hdr, ':', ' ')
-	w.hdr = append(w.hdr, value...)
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c == '\r' || c == '\n' || c == 0 {
+			c = ' '
+		}
+		w.hdr = append(w.hdr, c)
+	}
 	w.hdr = append(w.hdr, '\r', '\n')
 }
 
-// WriteHeader sets the status code (it is sent with the first flush).
+// WriteHeader sets the status code (it is sent with the first flush). A code outside 100..999 is
+// sent as 500. Once part of the body has been flushed, the status can't change.
 func (w *ResponseWriter) WriteHeader(code int) {
-	if !w.wroteHeader {
-		w.status = code
+	if w.wroteHeader || w.dropped > 0 {
+		return
 	}
+	if code < 100 || code > 999 {
+		code = 500
+	}
+	w.status = code
+}
+
+// bodyless reports whether the status forbids a body (1xx, 204 and 304).
+func (w *ResponseWriter) bodyless() bool {
+	return w.status < 200 || w.status == 204 || w.status == 304
 }
 
 func (w *ResponseWriter) Write(p []byte) (int, error) {
@@ -176,16 +216,19 @@ func (w *ResponseWriter) statusLine(dst []byte) []byte {
 	dst = append(dst, "\r\n"...)
 	if !w.keepAlive {
 		dst = append(dst, "Connection: close\r\n"...)
+	} else if w.http10 {
+		dst = append(dst, "Connection: keep-alive\r\n"...) // HTTP/1.0 closes without it
 	}
-	if !w.hasType && w.status != 204 && w.status != 304 {
+	if !w.hasType && !w.bodyless() {
 		dst = append(dst, "Content-Type: text/plain; charset=utf-8\r\n"...)
 	}
 	return dst
 }
 
-// spill empties a full w.buf: it sends it as a chunk, or for HEAD, which has no body, only counts it.
+// spill empties a full w.buf: it sends it as a chunk, or, when the response has no body (HEAD, or
+// a status like 204), only counts it.
 func (w *ResponseWriter) spill() {
-	if w.head {
+	if w.head || w.bodyless() {
 		w.dropped += len(w.buf)
 		w.buf = w.buf[:0]
 		return
@@ -193,22 +236,30 @@ func (w *ResponseWriter) spill() {
 	w.flushChunk()
 }
 
-// flushChunk sends the buffered body as a chunk, switching to chunked encoding if needed.
+// flushChunk sends the buffered body as a chunk, switching to chunked encoding if needed. An
+// HTTP/1.0 client doesn't know chunks: its body is sent as is, and ends when the connection closes.
 func (w *ResponseWriter) flushChunk() {
 	var head [headerBufferSize + 256]byte
 	h := head[:0]
 	if !w.wroteHeader {
 		w.wroteHeader = true
-		w.chunked = true
+		if w.http10 {
+			w.keepAlive = false
+		} else {
+			w.chunked = true
+		}
 		h = w.statusLine(h)
 		h = append(h, w.hdr...)
-		h = append(h, "Transfer-Encoding: chunked\r\n\r\n"...)
+		if w.chunked {
+			h = append(h, "Transfer-Encoding: chunked\r\n"...)
+		}
+		h = append(h, "\r\n"...)
 	}
 	if w.crlf {
 		h = append(h, "\r\n"...)
 		w.crlf = false
 	}
-	if len(w.buf) > 0 {
+	if len(w.buf) > 0 && w.chunked {
 		// w.buf may be full, so the chunk's CRLF is sent with the next write instead
 		h = appendHex(h, len(w.buf))
 		h = append(h, "\r\n"...)
@@ -237,6 +288,14 @@ func appendHex(dst []byte, v int) []byte {
 
 // finish sends whatever remains of the response.
 func (w *ResponseWriter) finish() {
+	if w.wroteHeader && !w.chunked { // HTTP/1.0, unframed: the rest of the body, then close
+		if len(w.buf) > 0 {
+			if _, err := w.conn.Write(w.buf); err != nil {
+				w.failed = true
+			}
+		}
+		return
+	}
 	if w.chunked {
 		const term = "\r\n0\r\n\r\n"
 		if len(w.buf) > 0 && cap(w.buf)-len(w.buf) < len(term) {
@@ -263,7 +322,7 @@ func (w *ResponseWriter) finish() {
 	h := w.statusLine(head[:0])
 	h = append(h, w.hdr...)
 	body := w.buf
-	if w.status == 204 || w.status == 304 {
+	if w.bodyless() {
 		body = w.buf[:0]
 	} else {
 		h = append(h, "Content-Length: "...)
@@ -300,6 +359,13 @@ const ErrTooManyServers = error(503, "http: too many servers in one process")
 var handlers [..MaxServers]HandlerFunc
 var wakerStarted bool
 
+// Serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
+// a CR or LF outside a CRLF, a header name that isn't a token (`Name : v`, folded lines), a
+// Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
+// get a 400 and a closed connection. `Expect: 100-continue` is answered before the body is read;
+// other expectations get a 417. HTTP/1.0 clients get `Connection: keep-alive` when they ask for it,
+// and a body too long to buffer is sent unframed, ending with the connection, since HTTP/1.0 has
+// no chunked encoding.
 func Serve(l net.Listener, h HandlerFunc) error {
 	if len(handlers) == MaxServers {
 		return ErrTooManyServers
@@ -322,10 +388,34 @@ func Serve(l net.Listener, h HandlerFunc) error {
 	}
 }
 
+// writeError answers a request that won't be served with status and closes the sending side.
 func writeError(c net.Conn, status string) {
-	c.WriteString("HTTP/1.1 ")
-	c.WriteString(status)
-	c.WriteString("\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	var b [128]byte
+	m := append(b[:0], "HTTP/1.1 "...)
+	m = append(m, status...)
+	m = append(m, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"...)
+	c.Write(m)
+	c.CloseWrite()
+}
+
+// errorLinger is how long a rejected request's connection stays open to read what the client is
+// still sending: closing a socket with unread input resets it, and the client could miss the answer.
+const errorLinger = 500 * time.Millisecond
+
+// reject answers with status, then reads and drops the client's input for up to errorLinger
+// (at most 1 MiB) before the caller closes the connection.
+func reject(c net.Conn, status string, rbuf []byte) {
+	writeError(c, status)
+	start := time.Now()
+	for i := 0; i < (1<<20)/len(rbuf); i++ {
+		left := errorLinger - time.Since(start)
+		if left <= 0 {
+			return
+		}
+		if m, err := c.ReadTimeout(rbuf, left); err != nil || m == 0 {
+			return
+		}
+	}
 }
 
 // wakeIdle restarts connections from the idle set when they have a new request.
@@ -358,49 +448,74 @@ task serveConn(c net.Conn, id int) pool 10000 {
 	}
 }
 
+// readMore reads into rbuf[n:] until start+limit. It returns how many bytes it read, or 0 if the
+// connection is done (an error, EOF, or the deadline, which gets a 408).
+func readMore(c net.Conn, rbuf []byte, n int, start time.Time, limit time.Duration) int {
+	left := limit - time.Since(start)
+	m := 0
+	err := net.ErrTimeout
+	if left > 0 {
+		m, err = c.ReadTimeout(rbuf[n:], left)
+	}
+	if err == net.ErrTimeout {
+		writeError(c, "408 Request Timeout")
+	}
+	if err != nil {
+		return 0
+	}
+	return m
+}
+
 // serveRequest serves one request whose first n bytes are already in rbuf. It returns how many
 // bytes of the next (pipelined) request remain buffered, and whether to keep the connection.
 //
 //squark:noinline
 func serveRequest(c net.Conn, h HandlerFunc, rbuf []byte, n int, wbuf []byte) (int, bool) {
 	var hbuf [headerBufferSize]byte
-	end := -1
-	for {
-		end = headerEnd(rbuf[:n])
-		if end >= 0 {
-			break
-		}
+	start := time.Now() // the request has started arriving: its read deadlines count from here
+	end, scan := headerEnd(rbuf[:n], 0)
+	for end == -1 {
 		if n == len(rbuf) {
-			writeError(c, "431 Request Header Fields Too Large")
+			reject(c, "431 Request Header Fields Too Large", rbuf)
 			return 0, false
 		}
-		m, err := c.Read(rbuf[n:])
-		if err != nil || m == 0 {
+		m := readMore(c, rbuf, n, start, ReadHeaderTimeout)
+		if m == 0 {
 			return 0, false
 		}
 		n += m
+		end, scan = headerEnd(rbuf[:n], scan)
+	}
+	if end < 0 {
+		reject(c, "400 Bad Request", rbuf)
+		return 0, false
 	}
 	arena scratch RequestArenaSize {
 		var req Request
 		req.Arena = scratch
-		if !parseRequest(string(rbuf[:end]), &req) {
-			writeError(c, "400 Bad Request")
+		if status := parseRequest(string(rbuf[:end]), &req); status != "" {
+			reject(c, status, rbuf)
 			return 0, false
 		}
 		if req.ContentLength > len(rbuf)-end { // not end+ContentLength: that can overflow
-			writeError(c, "413 Request Entity Too Large")
+			reject(c, "413 Request Entity Too Large", rbuf)
 			return 0, false
 		}
 		total := end + req.ContentLength
+		if n < total && req.expect100 {
+			if _, err := c.WriteString("HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
+				return 0, false
+			}
+		}
 		for n < total {
-			m, err := c.Read(rbuf[n:])
-			if err != nil || m == 0 {
+			m := readMore(c, rbuf, n, start, ReadTimeout)
+			if m == 0 {
 				return 0, false
 			}
 			n += m
 		}
 		req.Body = rbuf[end:total]
-		w := ResponseWriter{conn: c, buf: wbuf[:0], hdr: hbuf[:0], status: 200, keepAlive: req.keepAlive, head: req.Method == "HEAD"}
+		w := ResponseWriter{conn: c, buf: wbuf[:0], hdr: hbuf[:0], status: 200, keepAlive: req.keepAlive, http10: req.http10, head: req.Method == "HEAD"}
 		h(&w, &req)
 		w.finish()
 		if !w.keepAlive || w.failed {
@@ -412,66 +527,172 @@ func serveRequest(c net.Conn, h HandlerFunc, rbuf []byte, n int, wbuf []byte) (i
 	}
 }
 
-// headerEnd returns the index just past "\r\n\r\n", or -1.
-func headerEnd(b []byte) int {
-	for i := 3; i < len(b); i++ {
-		if b[i] == '\n' && b[i-1] == '\r' && b[i-2] == '\n' && b[i-3] == '\r' {
-			return i + 1
+// headerEnd scans b from i for the blank line that ends a request head. It returns the index just
+// past it; or -1, and where to go on once more input has arrived; or -2 if b has a CR or LF that
+// isn't part of a CRLF (the request line and headers can't contain one).
+func headerEnd(b []byte, i int) (int, int) {
+	for i < len(b) {
+		switch b[i] {
+		case '\r':
+			if i+1 == len(b) {
+				return -1, i
+			}
+			if b[i+1] != '\n' {
+				return -2, 0
+			}
+			if i >= 2 && b[i-1] == '\n' && b[i-2] == '\r' {
+				return i + 2, 0
+			}
+			i += 2
+		case '\n':
+			return -2, 0
+		default:
+			i++
 		}
 	}
-	return -1
+	return -1, i
 }
 
-func parseRequest(head string, r *Request) bool {
+// isToken reports whether s is an HTTP token (a method or header name).
+func isToken(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasCtl reports whether s has a control character other than tab.
+func hasCtl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < ' ' && s[i] != '\t' || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// trimOWS trims the spaces and tabs around a header value.
+func trimOWS(s string) string {
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
+		s = s[1:]
+	}
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// hasToken reports whether the comma-separated list v contains tok (case-insensitive).
+func hasToken(v, tok string) bool {
+	for len(v) > 0 {
+		item, rest, _ := strings.Cut(v, ",")
+		if strings.EqualFold(trimOWS(item), tok) {
+			return true
+		}
+		v = rest
+	}
+	return false
+}
+
+// parseLength parses a Content-Length: decimal digits only. It returns -1 if s isn't one.
+func parseLength(s string) int {
+	if len(s) == 0 {
+		return -1
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		d := int(s[i]) - '0'
+		if d < 0 || d > 9 || n > (9223372036854775807-d)/10 {
+			return -1
+		}
+		n = n*10 + d
+	}
+	return n
+}
+
+const badRequest = "400 Bad Request"
+
+// parseRequest parses a request head (which headerEnd has checked for stray CRs and LFs). It returns
+// "", or the status to answer with if the request can't be served.
+func parseRequest(head string, r *Request) string {
 	line, rest, ok := strings.Cut(head, "\r\n")
 	if !ok {
-		return false
+		return badRequest
 	}
 	method, line2, ok1 := strings.Cut(line, " ")
 	target, proto, ok2 := strings.Cut(line2, " ")
-	if !ok1 || !ok2 || len(method) == 0 || len(target) == 0 {
-		return false
+	if !ok1 || !ok2 || !isToken(method) || len(target) == 0 || hasCtl(target) {
+		return badRequest
+	}
+	switch {
+	case proto == "HTTP/1.1":
+		r.keepAlive = true
+	case proto == "HTTP/1.0":
+		r.http10 = true
+	case len(proto) == 8 && strings.HasPrefix(proto, "HTTP/") && proto[6] == '.' && proto[5] >= '0' && proto[5] <= '9' && proto[7] >= '0' && proto[7] <= '9':
+		if proto[5] != '1' {
+			return "505 HTTP Version Not Supported"
+		}
+		r.keepAlive = true // a later HTTP/1.x: served as 1.1
+	default:
+		return badRequest
 	}
 	r.Method = method
 	r.Proto = proto
 	path, query, _ := strings.Cut(target, "?")
 	r.Path = path
 	r.Query = query
-	r.keepAlive = proto == "HTTP/1.1"
 	r.ContentLength = 0
+	sawLength := false
 	for len(rest) > 0 {
 		hl, more, _ := strings.Cut(rest, "\r\n")
 		rest = more
 		if len(hl) == 0 {
 			break
 		}
+		// "Name : v" and folded lines (" v") are errors, so a header is never misread as another
 		name, value, ok := strings.Cut(hl, ":")
-		if !ok {
-			return false
+		if !ok || !isToken(name) {
+			return badRequest
 		}
-		value = strings.TrimSpace(value)
+		value = trimOWS(value)
+		if hasCtl(value) {
+			return badRequest
+		}
 		if r.nheaders < MaxHeaders {
 			r.headers[r.nheaders] = Header{Name: name, Value: value}
 			r.nheaders++
 		}
 		switch {
 		case strings.EqualFold(name, "Content-Length"):
-			cl, err := strconv.Atoi(value)
-			if err != nil || cl < 0 {
-				return false
+			cl := parseLength(value)
+			if cl < 0 || sawLength && cl != r.ContentLength {
+				return badRequest // also two different lengths: which one is meant is ambiguous
 			}
+			sawLength = true
 			r.ContentLength = cl
 		case strings.EqualFold(name, "Connection"):
-			if strings.EqualFold(value, "close") {
+			if hasToken(value, "close") {
 				r.keepAlive = false
-			} else if strings.EqualFold(value, "keep-alive") {
+			} else if hasToken(value, "keep-alive") {
 				r.keepAlive = true
 			}
 		case strings.EqualFold(name, "Transfer-Encoding"):
-			return false // chunked request bodies are not supported
+			return badRequest // chunked request bodies are not supported
+		case strings.EqualFold(name, "Expect"):
+			if !strings.EqualFold(value, "100-continue") {
+				return "417 Expectation Failed"
+			}
+			r.expect100 = !r.http10
 		}
 	}
-	return true
+	return ""
 }
 
 // StatusText returns the reason phrase for a status code.

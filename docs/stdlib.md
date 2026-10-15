@@ -275,6 +275,7 @@ func After(d time.Duration) chan time.Time static
 package net
 
 const ErrBadAddress = error(22, "invalid address (want host:port)")
+const ErrTimeout = error(-20, "i/o timeout")
 
 type Listener struct {
 	// unexported fields
@@ -288,6 +289,9 @@ type Conn struct {
 }
 func (c net.Conn) Fd() int
 func (c net.Conn) Read(p []byte) (int, error)
+// ReadTimeout is Read that waits at most d for input: if nothing arrives in time it returns 0 and
+// ErrTimeout. Input that is already waiting is read at once, whatever d is.
+func (c net.Conn) ReadTimeout(p []byte, d time.Duration) (int, error)
 func (c net.Conn) Write(p []byte) (int, error)
 func (c net.Conn) WriteString(s string) (int, error)
 // Write2 writes a then b, using a single writev where possible.
@@ -331,6 +335,14 @@ const IdleRelease time.Duration = 100000000
 // MaxServers is how many Serve calls one process may run.
 const MaxServers = 16
 
+// ReadHeaderTimeout (5 seconds) is how long a client has to send a request's line and headers,
+// counted from when the request starts arriving. A connection that takes longer gets a 408 and is
+// closed, so slow clients can't hold connection goroutines. Set it in main before serving (with
+// threads, each scheduler thread runs main and sets its own copy).
+var ReadHeaderTimeout time.Duration
+// ReadTimeout (10 seconds) is how long a client has to send a whole request, headers and body,
+// counted the same way. A connection that takes longer gets a 408 and is closed.
+var ReadTimeout time.Duration
 const ErrTooManyServers = error(503, "http: too many servers in one process")
 
 type Header struct {
@@ -359,9 +371,13 @@ func (r *http.Request) QueryValue(key string) string from r
 type ResponseWriter struct {
 	// unexported fields
 }
-// SetHeader adds a response header. Content-Length, Date and Connection are managed for you.
+// SetHeader adds a response header. Content-Length, Transfer-Encoding and Date are managed for
+// you and ignored here, as is a name that isn't an HTTP token. "Connection: close" closes the
+// connection after the response. A CR, LF or NUL in value is sent as a space, so a value (say,
+// echoed from the request) can't start a header of its own.
 func (w *http.ResponseWriter) SetHeader(name string, value string)
-// WriteHeader sets the status code (it is sent with the first flush).
+// WriteHeader sets the status code (it is sent with the first flush). A code outside 100..999 is
+// sent as 500. Once part of the body has been flushed, the status can't change.
 func (w *http.ResponseWriter) WriteHeader(code int)
 func (w *http.ResponseWriter) Write(p []byte) (int, error)
 func (w *http.ResponseWriter) WriteString(s string) (int, error)
@@ -374,6 +390,13 @@ type HandlerFunc func(*http.ResponseWriter, *http.Request)
 
 // ListenAndServe listens on addr and serves each connection in its own goroutine.
 func ListenAndServe(addr string, h http.HandlerFunc) error
+// Serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
+// a CR or LF outside a CRLF, a header name that isn't a token (`Name : v`, folded lines), a
+// Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
+// get a 400 and a closed connection. `Expect: 100-continue` is answered before the body is read;
+// other expectations get a 417. HTTP/1.0 clients get `Connection: keep-alive` when they ask for it,
+// and a body too long to buffer is sent unframed, ending with the connection, since HTTP/1.0 has
+// no chunked encoding.
 func Serve(l net.Listener, h http.HandlerFunc) error
 // StatusText returns the reason phrase for a status code.
 func StatusText(code int) string static

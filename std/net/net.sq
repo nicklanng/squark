@@ -30,6 +30,8 @@ extern "sq_dial_tcp" func dialTCP(host string, port int) int stack 8K
 
 extern "sq_read" func sysRead(fd int, b []byte) int stack 8K
 
+extern "sq_read_timeout" func sysReadTimeout(fd int, b []byte, timeoutNs int) int stack 8K
+
 extern "sq_write" func sysWrite(fd int, b []byte) int stack 8K
 
 extern "sq_write_str" func sysWriteStr(fd int, s string) int stack 8K
@@ -47,6 +49,11 @@ extern "sq_next_idle" func nextIdle() int stack 8K
 extern "sq_idle_count" func idleCount() int stack 8K
 
 const ErrBadAddress = error(22, "invalid address (want host:port)")
+
+// ErrTimeout is returned by ReadTimeout when nothing arrived in time.
+const ErrTimeout = error(-20, "i/o timeout")
+
+const sqETimeout = 65536 // sq_read_timeout returns -sqETimeout for a timeout
 
 func splitHostPort(addr string) (string, int, error) {
 	i := strings.LastIndexByte(addr, ':')
@@ -112,6 +119,22 @@ func (c Conn) Fd() int { return c.fd }
 
 func (c Conn) Read(p []byte) (int, error) {
 	n := sysRead(c.fd, p)
+	if n < 0 {
+		return 0, os.Errno(-n)
+	}
+	if n == 0 && len(p) > 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+// ReadTimeout is Read that waits at most d for input: if nothing arrives in time it returns 0 and
+// ErrTimeout. Input that is already waiting is read at once, whatever d is.
+func (c Conn) ReadTimeout(p []byte, d time.Duration) (int, error) {
+	n := sysReadTimeout(c.fd, p, int(d))
+	if n == -sqETimeout {
+		return 0, ErrTimeout
+	}
 	if n < 0 {
 		return 0, os.Errno(-n)
 	}
