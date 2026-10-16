@@ -282,6 +282,16 @@ func (d *Decoder) String(buf []byte) (string, bool) from buf {
 	}
 	out := buf[:0]
 	for {
+		// a run of bytes that are their own characters (special finds the next that may not be)
+		if j := special(string(d.data), d.pos); j > d.pos {
+			if k := cap(out) - len(out); k < j-d.pos {
+				d.pos += k + 1 // just after the first byte that doesn't fit, as below
+				d.fail(ErrBuffer)
+				return "", false
+			}
+			out = append(out, d.data[d.pos:j]...)
+			d.pos = j
+		}
 		r, n := d.char()
 		if n < 0 {
 			if d.Err != nil {
@@ -338,6 +348,15 @@ func (d *Decoder) TextMax(max int) (string, bool) from d {
 	}
 	n := 0 // a first pass measures the decoded string, up to max
 	for {
+		if j := special(string(d.data), d.pos); j > d.pos {
+			n += j - d.pos
+			d.pos = j
+			if n > max {
+				d.pos = start
+				d.fail(ErrTooLong)
+				return "", false
+			}
+		}
 		r, k := d.char()
 		if k < 0 {
 			break
@@ -737,6 +756,9 @@ func (d *Decoder) skipKey() bool {
 func (d *Decoder) skipString() bool {
 	d.pos++
 	for d.pos < len(d.data) {
+		if d.pos = special(string(d.data), d.pos); d.pos >= len(d.data) {
+			break
+		}
 		c := d.data[d.pos]
 		d.pos++
 		if c == '"' {

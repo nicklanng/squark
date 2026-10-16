@@ -228,6 +228,19 @@ func kernel(name string, reps int) {
 			check += int64(b.Len() - 1) // Encode adds a newline
 			u8c[r%(kn-64)] = 'a' + byte(r%26)
 		}
+	case "json-decode":
+		setupText()
+		u8c[0] = '"'
+		for i := 63; i < kn-1; i += 64 {
+			u8c[i-1], u8c[i] = '\\', 'n'
+		}
+		u8c[kn-1] = '"'
+		for r := 0; r < reps; r++ {
+			var s string
+			json.Unmarshal(u8c[:], &s)
+			check += int64(len(s))
+			u8c[1+r%(kn-80)] = 'a' + byte(r%26)
+		}
 	case "index-byte":
 		u8c[kn-5] = 255
 		for r := 0; r < reps; r++ {

@@ -258,6 +258,21 @@ func main() {
 			check += int64(len(json.AppendString(out[:0], string(u8c[:]))))
 			u8c[r%(n-64)] = 'a' + byte(r%26)
 		}
+	case "json-decode":
+		// json.Decoder.String of a 16 KiB JSON string with an escape every 64 bytes
+		setupText()
+		u8c[0] = '"'
+		for i := 63; i < n-1; i += 64 {
+			u8c[i-1], u8c[i] = '\\', 'n'
+		}
+		u8c[n-1] = '"'
+		var out [n]byte
+		for r := 0; r < reps; r++ {
+			d := json.NewDecoder(u8c[:])
+			s, _ := d.String(out[:])
+			check += int64(len(s))
+			u8c[1+r%(n-80)] = 'a' + byte(r%26)
+		}
 	case "index-byte":
 		setupIndex()
 		for r := 0; r < reps; r++ {
