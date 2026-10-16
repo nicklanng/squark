@@ -1,0 +1,28 @@
+uint64: 12966619160104079557
+uint64: 9600361134598540522
+uint64: 10590380919521690900
+uint64: 7218738570589545383
+seed 0: 11091344671253066420
+int63: 773499382201279371 int: 3495475846482271551
+intn 1 0
+intn 2 1
+intn 6 5
+intn 1000 769
+intn 1024 434
+intn 1099511627776 291720528007
+intn 6917529027641081856 5266829381509629359
+float64: 0.5833493097373993
+float64: 0.6824528696125193
+float64: 0.29067776176424165
+perm: 8 9 7 4 6 5 2 3 1 0
+shuffle: h d g a c b e f
+shuffle vector: 30 10 40 50 20
+copy repeats: true true
+faces: 10094 10190 9784 9876 9953 10103
+fair: true
+big halves: 5007 4993
+float64 range ok: true true mean near 1/2: true
+perms ok: true
+package-level in bounds: true varies: true
+package-level perm ok: true
+package-level shuffle kept 8 letters

@@ -1,6 +1,8 @@
 // Package strings provides string helpers. Results are views of their inputs; nothing is copied.
 package strings
 
+import "utf8"
+
 func HasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
@@ -99,6 +101,17 @@ func CutSuffix(s, suffix string) (string, bool) from s {
 func AppendRepeat(dst []byte, s string, n int) []byte from dst {
 	for i := 0; i < n; i++ {
 		dst = append(dst, s...)
+	}
+	return dst
+}
+
+// AppendPadRight appends s and then pad until s fills width characters, counted in runes as
+// Go's fmt counts a width (%-*s), so "crème" takes 5; a longer s is appended whole. For padding
+// on the left, strconv.AppendIntPad and AppendUintPad pad numbers, and AppendRepeat anything.
+func AppendPadRight(dst []byte, s string, width int, pad byte) []byte from dst {
+	dst = append(dst, s...)
+	for n := utf8.RuneCountInString(s); n < width; n++ {
+		dst = append(dst, pad)
 	}
 	return dst
 }

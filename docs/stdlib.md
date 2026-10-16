@@ -19,6 +19,22 @@ const ErrUnexpectedEOF = error(-4, "unexpected EOF")
 // ErrTooLarge means the input doesn't fit in the caller's buffer.
 const ErrTooLarge = error(-5, "input larger than the buffer")
 
+// Package utf8 encodes and decodes UTF-8.
+package utf8
+
+const RuneError = 65533
+const MaxRune = 1114111
+
+// AppendRune appends the UTF-8 encoding of r to dst.
+func AppendRune(dst []byte, r int32) []byte from dst
+// RuneLen returns the number of bytes needed to encode r.
+func RuneLen(r int32) int
+// DecodeRuneInString returns the first rune of s and its width in bytes. Invalid UTF-8 gives
+// (RuneError, 1); an empty string gives (RuneError, 0).
+func DecodeRuneInString(s string) (int32, int)
+// RuneCountInString counts the runes in s.
+func RuneCountInString(s string) int
+
 // Package strings provides string helpers. Results are views of their inputs; nothing is copied.
 package strings
 
@@ -39,6 +55,10 @@ func CutPrefix(s string, prefix string) (string, bool) from s
 func CutSuffix(s string, suffix string) (string, bool) from s
 // AppendRepeat appends n copies of s (Go's Repeat, into the caller's memory).
 func AppendRepeat(dst []byte, s string, n int) []byte from dst
+// AppendPadRight appends s and then pad until s fills width characters, counted in runes as
+// Go's fmt counts a width (%-*s), so "crème" takes 5; a longer s is appended whole. For padding
+// on the left, strconv.AppendIntPad and AppendUintPad pad numbers, and AppendRepeat anything.
+func AppendPadRight(dst []byte, s string, width int, pad byte) []byte from dst
 // EqualFold reports ASCII case-insensitive equality.
 func EqualFold(a string, b string) bool
 // AppendLower appends the ASCII-lowercased s to dst.
@@ -69,11 +89,13 @@ type Reader struct {
 // Buffered returns how many bytes have been read from the source but not returned yet.
 func (r *bufio.Reader) Buffered() int
 // ReadLine returns the next line from src, without its "\n" or "\r\n", as a view of the buffer
-// that stays valid until the next call. A last line without a newline is returned before the
-// source's error (io.EOF at the end of the input), without a final "\r" (as Go's bufio.Scanner).
-// A line longer than the buffer (not counting its "\n" or "\r\n") is skipped and reported as
-// ErrTooLong; the next call reads the line after it. A line that fills the buffer exactly is
-// followed by one or two 1-byte reads to find its end.
+// that stays valid until the next call. Lines complete before the source's error come first.
+// At the end of the input (io.EOF) a last line without a newline is returned, without a final
+// "\r", as Go's bufio.Scanner does. On any other error (a timeout, a reset) a partial last line is
+// dropped, unlike Go's Scanner, so a line protocol never acts on a line cut short. The error is
+// then returned, and again on every later call. A line longer than the buffer (not counting its
+// "\n" or "\r\n") is skipped and reported as ErrTooLong; the next call reads the line after it.
+// A line that fills the buffer exactly is followed by one or two 1-byte reads to find its end.
 func (r *bufio.Reader) ReadLine(src anytype) (string, error) from r
 
 // NewReader returns a Reader that buffers into storage (its capacity is the longest line, not
@@ -151,6 +173,9 @@ func AppendUintBase(dst []byte, v uint64, base int) []byte from dst
 // AppendIntPad appends v in decimal, padded on the left with pad to at least width bytes
 // (AppendIntPad(dst, 7, 3, '0') appends "007"; a zero-padded negative number keeps its sign first).
 func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst
+// AppendUintPad appends v in base 2 to 36, padded on the left with pad to at least width bytes
+// (AppendUintPad(dst, 0xbeef, 16, 8, '0') appends "0000beef").
+func AppendUintPad(dst []byte, v uint64, base int, width int, pad byte) []byte from dst
 // FormatInt writes v in decimal into buf and returns it as a string view of buf.
 func FormatInt(buf []byte, v int) string from buf
 // AppendFloat appends v with prec digits after the decimal point, like Go's
@@ -215,21 +240,174 @@ func WithCode(code int, msg static string) error
 // Is reports whether err is target.
 func Is(err error, target error) bool
 
-// Package utf8 encodes and decodes UTF-8.
-package utf8
+// Package os is a thin, heap-free interface to the operating system.
+package os
 
-const RuneError = 65533
-const MaxRune = 1114111
+const O_RDONLY = 0
+const O_WRONLY = 1
+const O_RDWR = 2
+const O_CREATE = 64
+const O_TRUNC = 512
+const O_APPEND = 1024
 
-// AppendRune appends the UTF-8 encoding of r to dst.
-func AppendRune(dst []byte, r int32) []byte from dst
-// RuneLen returns the number of bytes needed to encode r.
-func RuneLen(r int32) int
-// DecodeRuneInString returns the first rune of s and its width in bytes. Invalid UTF-8 gives
-// (RuneError, 1); an empty string gives (RuneError, 0).
-func DecodeRuneInString(s string) (int32, int)
-// RuneCountInString counts the runes in s.
-func RuneCountInString(s string) int
+var Stdin os.File
+var Stdout os.File
+var Stderr os.File
+
+// File is an open file descriptor. It is a plain value; copying it does not duplicate the descriptor.
+type File struct {
+	// unexported fields
+}
+func (f os.File) Fd() int
+func (f os.File) Read(p []byte) (int, error)
+func (f os.File) Write(p []byte) (int, error)
+func (f os.File) WriteString(s string) (int, error)
+func (f os.File) Close() error
+// ReadFull reads into p until it is full, returning how many bytes it read. If the file ends
+// first, the error is io.EOF if nothing was read and io.ErrUnexpectedEOF otherwise, as with Go's
+// io.ReadFull.
+func (f os.File) ReadFull(p []byte) (int, error)
+
+extern func Exit(code int) stack 8192
+// Getpid returns the process id (with workers N, each worker has its own).
+extern func Getpid() int stack 1024
+extern func Getenv(name string) string static stack 8192
+// Errno converts a positive errno value into an error.
+func Errno(n int) error
+// NArgs returns the number of command-line arguments, including the program name.
+func NArgs() int
+// Arg returns command-line argument i ("" if out of range). Arg(0) is the program name.
+func Arg(i int) string static
+func Open(path string) (os.File, error)
+func Create(path string) (os.File, error)
+func OpenFile(path string, flag int, perm int) (os.File, error)
+// FromFd wraps an existing descriptor.
+func FromFd(fd int) os.File
+// ReadFile reads the whole file at path into buf and returns the part it fills. A file that
+// doesn't fit is io.ErrTooLarge (buf then holds its beginning).
+func ReadFile(path string, buf []byte) ([]byte, error) from buf
+
+// Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
+// runs its own copy of main, with its own package variables and goroutines.
+package runtime
+
+// Shard returns the index of the calling goroutine's scheduler thread, from 0 to Shards()-1.
+extern func Shard() int stack 1024
+// Shards returns the number of scheduler threads in this process (threads N; 1 by default).
+extern func Shards() int stack 1024
+// Gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
+// Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
+extern func Gosched() stack 1024
+
+// Package time measures and waits.
+package time
+
+const Nanosecond time.Duration = 1
+const Microsecond time.Duration = 1000
+const Millisecond time.Duration = 1000000
+const Second time.Duration = 1000000000
+const Minute time.Duration = 60000000000
+const Hour time.Duration = 3600000000000
+
+// ErrDuration is ParseDuration's error for any string that isn't a duration (Go's messages name
+// the string; a squark error's message is constant).
+const ErrDuration = error(22, "time: invalid duration")
+
+type Duration int
+func (d time.Duration) Nanoseconds() int
+func (d time.Duration) Microseconds() int
+func (d time.Duration) Milliseconds() int
+func (d time.Duration) Seconds() float64
+// String writes d as Go's Duration.String does ("1h2m3.5s", "1.5ms", "0s") into buf and returns
+// it as a view of buf. 32 bytes hold any duration; a shorter buf gets the beginning.
+func (d time.Duration) String(buf []byte) string from buf
+// Time is a monotonic instant plus the wall clock reading when it was taken.
+type Time struct {
+	// unexported fields
+}
+func (t time.Time) Sub(u time.Time) time.Duration
+func (t time.Time) Unix() int
+func (t time.Time) UnixNano() int
+func (t time.Time) Add(d time.Duration) time.Time
+func (t time.Time) Before(u time.Time) bool
+
+func Now() time.Time
+func Since(t time.Time) time.Duration
+// Sleep parks the calling goroutine for at least d.
+func Sleep(d time.Duration)
+// After is for select only: `case <-time.After(d):` runs if no other case is ready within d.
+// (squark has no heap to make a channel per call, so the compiler turns the case into a timer;
+// anywhere else, After is an error.)
+func After(d time.Duration) chan time.Time static
+// ParseDuration parses a duration as Go's time.ParseDuration does: a signed sequence of decimal
+// numbers, each with an optional fraction and a unit ("300ms", "-1.5h", "2h45m"). The units are
+// "ns", "us" (or "µs"), "ms", "s", "m" and "h". A malformed, unitless (except "0") or
+// out-of-range string is ErrDuration.
+func ParseDuration(s string) (time.Duration, error)
+
+// Package flag parses command-line flags, as Go's flag package does for its default set
+// (flag.CommandLine, which exits on an error). Define flags, call Parse, then read them:
+//
+// 	port := flag.Int("port", 8080, "port to listen on")
+// 	flag.Parse()
+// 	serve(*port)
+//
+// The values live in the package's storage, not on a heap: at most MaxFlags flags, and the
+// pointers that Int, String, Bool and Duration return point into it. Names, usage texts and
+// default strings must be constant data (string constants, as usual); a String flag's value is a
+// view of the program's arguments.
+//
+// Parse accepts -name, --name, -name=value and -name value (not for bool flags, which take
+// -name or -name=false); flag parsing stops at the first argument that isn't a flag, or after
+// "--". -h and -help, unless defined, print the usage to stderr and exit 0. An undefined flag, a
+// missing value or a bad value prints Go's message ("flag provided but not defined: -x",
+// `invalid value "abc" for flag -port: parse error`) and the usage to stderr and exits 2.
+//
+// With threads N every scheduler thread runs main, so each parses into its own copy of the
+// package: they all see the same arguments, and only the first prints a usage message.
+package flag
+
+// MaxFlags is how many flags can be defined. Defining more panics.
+const MaxFlags = 32
+// MaxArgs is how many positional arguments Args can return; NArg and Arg have no limit.
+const MaxArgs = 1024
+
+// Usage prints the usage message to stderr: by default "Usage of <program>:" and PrintDefaults.
+// Parse calls it on -h or an error; set it to a function of your own to print something else.
+var Usage func()
+
+// Int defines an int flag. Its value is read as Go's strconv.ParseInt(s, 0, 64) reads it:
+// decimal, or with a 0x, 0o, 0b or 0 (octal) prefix, and _ between digits.
+func Int(name static string, value int, usage static string) *int static
+// String defines a string flag.
+func String(name static string, value static string, usage static string) *string static
+// Bool defines a bool flag: -name sets it, -name=false clears it (values as strconv.ParseBool).
+func Bool(name static string, value bool, usage static string) *bool static
+// Duration defines a time.Duration flag, read by time.ParseDuration ("30s", "1h30m").
+func Duration(name static string, value time.Duration, usage static string) *time.Duration static
+// Parse parses the command-line flags (os.Arg(1) on). Call it after defining the flags and
+// before reading them. On -h, -help or an error it prints to stderr and exits (see the package
+// comment).
+func Parse()
+// Parsed reports whether Parse has been called.
+func Parsed() bool
+// NFlag returns the number of flags set on the command line.
+func NFlag() int
+// NArg returns the number of arguments left after the flags (0 before Parse).
+func NArg() int
+// Arg returns argument i of those left after the flags, or "" if there is no such argument.
+func Arg(i int) string static
+// Args returns the arguments left after the flags, as a view of the package's storage. More than
+// MaxArgs of them panics: use NArg and Arg.
+func Args() []string static
+// PrintDefaults prints, to stderr, each flag's name, type, usage and default (unless it is the
+// zero value), sorted by name, in Go's format:
+//
+// 	  -port int
+// 	    	port to listen on (default 8080)
+//
+// A name in back quotes in the usage ("a `file` to read") is shown as the type: "-db file".
+func PrintDefaults()
 
 // Package json writes and reads JSON without allocating: encoding appends to caller buffers (an
 // Encoder adds the commas and nesting), decoding is a pull parser whose strings are views of the
@@ -249,6 +427,7 @@ const ErrMisuse = error(5, "json: encoder call out of place")
 const ErrDepth = error(6, "json: nested too deeply")
 const ErrFloat = error(7, "json: NaN or infinity has no JSON form")
 const ErrNoArena = error(8, "json: decoder has no arena")
+const ErrTooLong = error(9, "json: string longer than the limit")
 
 // Encoder writes one JSON value, usually an object or an array, adding the commas, colons and
 // quotes itself. Object and Array open a container and End closes the innermost one; inside an
@@ -280,6 +459,9 @@ const ErrNoArena = error(8, "json: decoder has no arena")
 // call e.Clear() whenever it fills: Clear empties the buffer but keeps the nesting and comma state,
 // so the next call continues the same document. A call that fails with ErrFull can be retried
 // after draining: set e.Err = nil first.
+//
+// The output is compact unless SetIndent is called first: then it is laid out as Go's
+// json.MarshalIndent lays out the same value, a member or element per line.
 type Encoder struct {
 	Err error
 	// unexported fields
@@ -290,6 +472,14 @@ func (e *json.Encoder) Bytes() []byte from e
 // comma comes next, Err), so the calls after it continue the same document: write e.Bytes()
 // somewhere, then call e.Clear(), to stream a large document through a small buffer.
 func (e *json.Encoder) Clear()
+// SetIndent lays out the rest of the output as Go's json.MarshalIndent(v, prefix, indent) lays out
+// the same value: each member or element of a non-empty object or array starts a new line holding
+// prefix and then indent once per level of nesting, the closing bracket starts a line one level
+// out, a colon is followed by a space, and empty objects and arrays stay {} and []. The first line
+// has no prefix and the last no line break, as with MarshalIndent. Raw values are laid out the same
+// way (as Go lays out a json.RawMessage). Call it before the first value: afterwards it sets
+// ErrMisuse.
+func (e *json.Encoder) SetIndent(prefix string into e, indent string into e)
 // Finish returns Err, after setting it to ErrMisuse if the document isn't complete: nothing was
 // written, or an array or object is still open.
 func (e *json.Encoder) Finish() error
@@ -315,13 +505,16 @@ func (e *json.Encoder) Bool(v bool)
 func (e *json.Encoder) Null()
 // Raw writes b, one complete JSON value encoded already (from another Encoder, a database, a
 // file), as the next value. It is checked as Decoder.Skip checks a value: invalid JSON sets
-// ErrSyntax and writes nothing.
+// ErrSyntax and writes nothing. It is written as it is, whitespace and all (Go's Marshal compacts
+// a json.RawMessage), unless SetIndent was called: then its whitespace is replaced by the layout's.
 func (e *json.Encoder) Raw(b []byte)
 // RawStart is Raw for a value the caller writes itself, for one too large to go through the
-// buffer: it writes what comes before a value here (a comma or nothing) and counts the value as
-// written. The caller then writes exactly one complete JSON value straight after e.Bytes() (drain
-// the buffer and Clear, then json.WriteString(w, s) for a long string, say); it isn't checked.
-// False, writing nothing, if a value can't come next (Err is set).
+// buffer: it writes what comes before a value here (a comma, a line break and indentation, or
+// nothing) and counts the value as written. The caller then writes exactly one complete JSON value
+// straight after e.Bytes() (drain the buffer and Clear, then json.WriteString(w, s) for a long
+// string, say); it isn't checked, nor laid out by SetIndent (to lay out an object or array as Raw
+// would, write it with an Encoder whose prefix is this one's followed by its indent once per open
+// object or array). False, writing nothing, if a value can't come next (Err is set).
 func (e *json.Encoder) RawStart() bool
 // Decoder pulls values out of a JSON document. The first error is kept in Err, and every call
 // after it fails.
@@ -347,8 +540,13 @@ func (d *json.Decoder) String(buf []byte) (string, bool) from buf
 // Text decodes a JSON string, as String does, into the decoder's arena (NewDecoderIn) at its exact
 // size (see NewDecoderIn for how long it may be kept). ErrNoArena on a decoder from NewDecoder,
 // ErrBuffer if the arena is full; the decoded string is measured first, so a full arena uses none
-// of it.
+// of it. TextMax also bounds the length.
 func (d *json.Decoder) Text() (string, bool) from d
+// TextMax is Text for a string of at most max bytes, decoded (as UTF-8, invalid bytes counting as
+// the 3 of U+FFFD): a longer one sets ErrTooLong and uses none of the arena, so one string in
+// untrusted input can't fill it. After ErrTooLong or ErrBuffer the decoder is at the string's
+// opening quote (Line and Offset point at it).
+func (d *json.Decoder) TextMax(max int) (string, bool) from d
 // Int decodes an integer. A number with a fraction or exponent is ErrType (it is consumed).
 func (d *json.Decoder) Int() (int, bool)
 // Float decodes a number as the nearest float64 (an integer too). Too large for a float64 is
@@ -399,87 +597,6 @@ func NewDecoder(data []byte) json.Decoder from data
 // a package variable. String and Field work as with NewDecoder.
 func NewDecoderIn(data []byte, a arena) json.Decoder from data, a
 
-// Package os is a thin, heap-free interface to the operating system.
-package os
-
-const O_RDONLY = 0
-const O_WRONLY = 1
-const O_RDWR = 2
-const O_CREATE = 64
-const O_TRUNC = 512
-const O_APPEND = 1024
-
-var Stdin os.File
-var Stdout os.File
-var Stderr os.File
-
-// File is an open file descriptor. It is a plain value; copying it does not duplicate the descriptor.
-type File struct {
-	// unexported fields
-}
-func (f os.File) Fd() int
-func (f os.File) Read(p []byte) (int, error)
-func (f os.File) Write(p []byte) (int, error)
-func (f os.File) WriteString(s string) (int, error)
-func (f os.File) Close() error
-// ReadFull reads into p until it is full, returning how many bytes it read. If the file ends
-// first, the error is io.EOF if nothing was read and io.ErrUnexpectedEOF otherwise, as with Go's
-// io.ReadFull.
-func (f os.File) ReadFull(p []byte) (int, error)
-
-extern func Exit(code int) stack 8192
-// Getpid returns the process id (with workers N, each worker has its own).
-extern func Getpid() int stack 1024
-extern func Getenv(name string) string static stack 8192
-// Errno converts a positive errno value into an error.
-func Errno(n int) error
-// NArgs returns the number of command-line arguments, including the program name.
-func NArgs() int
-// Arg returns command-line argument i ("" if out of range). Arg(0) is the program name.
-func Arg(i int) string static
-func Open(path string) (os.File, error)
-func Create(path string) (os.File, error)
-func OpenFile(path string, flag int, perm int) (os.File, error)
-// FromFd wraps an existing descriptor.
-func FromFd(fd int) os.File
-// ReadFile reads the whole file at path into buf and returns the part it fills. A file that
-// doesn't fit is io.ErrTooLarge (buf then holds its beginning).
-func ReadFile(path string, buf []byte) ([]byte, error) from buf
-
-// Package time measures and waits.
-package time
-
-const Nanosecond time.Duration = 1
-const Microsecond time.Duration = 1000
-const Millisecond time.Duration = 1000000
-const Second time.Duration = 1000000000
-const Minute time.Duration = 60000000000
-const Hour time.Duration = 3600000000000
-
-type Duration int
-func (d time.Duration) Nanoseconds() int
-func (d time.Duration) Microseconds() int
-func (d time.Duration) Milliseconds() int
-func (d time.Duration) Seconds() float64
-// Time is a monotonic instant plus the wall clock reading when it was taken.
-type Time struct {
-	// unexported fields
-}
-func (t time.Time) Sub(u time.Time) time.Duration
-func (t time.Time) Unix() int
-func (t time.Time) UnixNano() int
-func (t time.Time) Add(d time.Duration) time.Time
-func (t time.Time) Before(u time.Time) bool
-
-func Now() time.Time
-func Since(t time.Time) time.Duration
-// Sleep parks the calling goroutine for at least d.
-func Sleep(d time.Duration)
-// After is for select only: `case <-time.After(d):` runs if no other case is ready within d.
-// (squark has no heap to make a channel per call, so the compiler turns the case into a timer;
-// anywhere else, After is an error.)
-func After(d time.Duration) chan time.Time static
-
 // Package net provides TCP listeners and connections. Blocking calls park only the calling
 // goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
 package net
@@ -501,8 +618,13 @@ type Conn struct {
 func (c net.Conn) Fd() int
 func (c net.Conn) Read(p []byte) (int, error)
 // ReadTimeout is Read that waits at most d for input: if nothing arrives in time it returns 0 and
-// ErrTimeout. Input that is already waiting is read at once, whatever d is.
+// ErrTimeout. Input that is already waiting is read at once, whatever d is. d <= 0 means no
+// deadline (a plain Read), so a caller counting down to a deadline checks there is time left.
 func (c net.Conn) ReadTimeout(p []byte, d time.Duration) (int, error)
+// WithTimeout returns c as a source whose Read is c.ReadTimeout(p, d), for readers that take
+// anything with a Read method: r.ReadLine(c.WithTimeout(idle)) returns ErrTimeout when no input
+// comes for d. The limit applies to each read, not to a whole line. d <= 0 means no deadline.
+func (c net.Conn) WithTimeout(d time.Duration) net.TimedConn
 func (c net.Conn) Write(p []byte) (int, error)
 func (c net.Conn) WriteString(s string) (int, error)
 // Write2 writes a then b, using a single writev where possible.
@@ -520,7 +642,17 @@ func (c net.Conn) ParkIdle(tag int)
 // lost to a reset when unread input remains.
 func (c net.Conn) CloseWrite() error
 func (c net.Conn) Close() error
+// TimedConn is a Conn whose reads time out: see Conn.WithTimeout.
+type TimedConn struct {
+	// unexported fields
+}
+// Read is ReadTimeout with t's limit.
+func (t net.TimedConn) Read(p []byte) (int, error)
 
+// AppendHostPort appends "host:port" to dst, as Go's JoinHostPort: a host containing ':' (an IPv6
+// literal) is put in brackets, "[::1]:80". An empty host gives ":port", which Listen takes as
+// every interface. (Listen and Dial take IPv4 addresses and "localhost" only.)
+func AppendHostPort(dst []byte, host string, port int) []byte from dst
 // Listen opens a TCP listener on addr ("host:port" or ":port").
 func Listen(addr string) (net.Listener, error)
 // Dial connects to a TCP address.
@@ -798,17 +930,54 @@ func Error(w *http.ResponseWriter, code int)
 // a buffer the next call reuses.
 func Port(n int) string static
 
-// Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
-// runs its own copy of main, with its own package variables and goroutines.
-package runtime
+// Package rand generates pseudo-random numbers with xoshiro256** (Blackman and Vigna), seeded
+// through splitmix64. It is fast and statistically good, but predictable: not for keys, tokens
+// or anything an attacker must not guess.
+//
+// A Rand is a plain value (32 bytes of state, no references): keep one in a variable, a struct
+// or a package variable; a copy carries on from the same point in the sequence. New(seed) gives
+// the same sequence on every run and platform. The package-level functions use one generator per
+// scheduler thread, seeded from the clock, the process id and the thread index at its first use;
+// as in Go 1.20 and later there is no Seed function: use New(seed) for a repeatable sequence.
+package rand // import "math/rand"
 
-// Shard returns the index of the calling goroutine's scheduler thread, from 0 to Shards()-1.
-extern func Shard() int stack 1024
-// Shards returns the number of scheduler threads in this process (threads N; 1 by default).
-extern func Shards() int stack 1024
-// Gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
-// Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
-extern func Gosched() stack 1024
+// Rand is a xoshiro256** generator. Make one with New: the zero value yields only zeros.
+type Rand struct {
+	// unexported fields
+}
+// Uint64 returns a uniformly distributed 64-bit value.
+func (r *rand.Rand) Uint64() uint64
+// Int63 returns a non-negative value below 1<<63.
+func (r *rand.Rand) Int63() int64
+// Int returns a non-negative int.
+func (r *rand.Rand) Int() int
+// Intn returns a value in [0, n), without modulo bias. It panics if n <= 0, as Go's does.
+func (r *rand.Rand) Intn(n int) int
+// Float64 returns a value in [0, 1): one of the 2^53 multiples of 2^-53, uniformly.
+func (r *rand.Rand) Float64() float64
+// Perm fills dst with a random permutation of 0 .. len(dst)-1 and returns it (Go's Perm(n),
+// into the caller's memory).
+func (r *rand.Rand) Perm(dst []int) []int from dst
+// Shuffle puts the elements of s ([]T for any T; a slice of an array or vector) in a random
+// order, each order equally likely. Go's Shuffle(n, swap) needs a closure; this takes the slice.
+func (r *rand.Rand) Shuffle(s anytype)
+
+// New returns a generator seeded with seed. Every seed, 0 included, gives a good state.
+func New(seed uint64) rand.Rand
+// Uint64 returns a uniformly distributed 64-bit value from this thread's generator.
+func Uint64() uint64
+// Int63 returns a non-negative value below 1<<63 from this thread's generator.
+func Int63() int64
+// Int returns a non-negative int from this thread's generator.
+func Int() int
+// Intn returns a value in [0, n) from this thread's generator. It panics if n <= 0.
+func Intn(n int) int
+// Float64 returns a value in [0, 1) from this thread's generator.
+func Float64() float64
+// Perm fills dst with a random permutation of 0 .. len(dst)-1 from this thread's generator.
+func Perm(dst []int) []int from dst
+// Shuffle puts the elements of s ([]T for any T) in a random order, from this thread's generator.
+func Shuffle(s anytype)
 
 // Package sort sorts slices of any element type in place. less(a, b) reports whether a goes
 // before b. Heap sort: O(n log n) comparisons, no extra memory, no recursion; not stable (equal
@@ -863,12 +1032,28 @@ func (s sqlite.Stmt) Step() (bool, error)
 // Reset makes the statement ready to run again, clears its bindings and gives back the
 // connection.
 func (s sqlite.Stmt) Reset() error
+// Exec runs the statement once with args bound to its parameters in order (?1, ?2, ...): it
+// resets it, binds args, steps it to the end (skipping any rows it returns), reads the Result and
+// resets it again. The statement holds the connection only during the call, so there is no Reset
+// to defer.
+func (s sqlite.Stmt) Exec(args ...sqlite.Value) (sqlite.Result, error)
 func (s sqlite.Stmt) Finalize() error
 func (s sqlite.Stmt) ColumnCount() int
 func (s sqlite.Stmt) ColumnType(i int) int
 func (s sqlite.Stmt) ColumnInt(i int) int
 // ColumnText copies column i (0-based) into buf and returns it as a view of buf.
 func (s sqlite.Stmt) ColumnText(i int, buf []byte) (string, error) from buf
+// Value is an argument to Exec: Int(v), Text(s) or Null() (the zero Value).
+type Value struct {
+	// unexported fields
+}
+// Result is what Exec reports, as SQLite does after the statement: LastInsertRowID and Changes,
+// which an INSERT, UPDATE or DELETE sets (after another statement they still hold the
+// connection's last such values).
+type Result struct {
+	LastInsertID int
+	RowsAffected int
+}
 
 // Open opens (creating if needed) a database file. When the file is locked by another connection
 // (another thread or process, e.g. with threads N or workers N), statements wait up to 5 seconds
@@ -876,7 +1061,13 @@ func (s sqlite.Stmt) ColumnText(i int, buf []byte) (string, error) from buf
 //
 // A connection serves one goroutine at a time: a statement holds it from its first Bind or Step
 // until Reset (so start with `defer st.Reset()`), and other goroutines that use the connection
-// meanwhile wait for it. Exec, Prepare, Changes and LastInsertRowID hold it for the call (or join
-// the statement the goroutine is running: call Changes and LastInsertRowID before Reset).
+// meanwhile wait for it. Stmt.Exec runs a statement from start to end in one call and gives the
+// connection back before it returns. DB.Exec, Prepare, Changes and LastInsertRowID hold it for
+// the call (or join the statement the goroutine is running: call Changes and LastInsertRowID
+// before Reset).
 func Open(path string) (sqlite.DB, error)
+// Int, Text and Null make Exec's arguments (SQLite copies Text's string when it is bound).
+func Int(v int) sqlite.Value static
+func Text(s string) sqlite.Value from s
+func Null() sqlite.Value static
 ```

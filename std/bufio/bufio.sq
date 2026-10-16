@@ -28,11 +28,13 @@ func NewReader(storage []byte) Reader from storage {
 func (r *Reader) Buffered() int { return r.end - r.start }
 
 // ReadLine returns the next line from src, without its "\n" or "\r\n", as a view of the buffer
-// that stays valid until the next call. A last line without a newline is returned before the
-// source's error (io.EOF at the end of the input), without a final "\r" (as Go's bufio.Scanner).
-// A line longer than the buffer (not counting its "\n" or "\r\n") is skipped and reported as
-// ErrTooLong; the next call reads the line after it. A line that fills the buffer exactly is
-// followed by one or two 1-byte reads to find its end.
+// that stays valid until the next call. Lines complete before the source's error come first.
+// At the end of the input (io.EOF) a last line without a newline is returned, without a final
+// "\r", as Go's bufio.Scanner does. On any other error (a timeout, a reset) a partial last line is
+// dropped, unlike Go's Scanner, so a line protocol never acts on a line cut short. The error is
+// then returned, and again on every later call. A line longer than the buffer (not counting its
+// "\n" or "\r\n") is skipped and reported as ErrTooLong; the next call reads the line after it.
+// A line that fills the buffer exactly is followed by one or two 1-byte reads to find its end.
 func (r *Reader) ReadLine(src anytype) (string, error) from r {
 	for {
 		if i := strings.IndexByte(string(r.buf[r.start:r.end]), '\n'); i >= 0 {
@@ -53,7 +55,7 @@ func (r *Reader) ReadLine(src anytype) (string, error) from r {
 				r.start = r.end
 				return "", ErrTooLong
 			}
-			if r.start < r.end {
+			if r.start < r.end && r.err == io.EOF {
 				line := r.buf[r.start:r.end]
 				r.start = r.end
 				if line[len(line)-1] == '\r' { // as Go's Scanner: a last line drops a final "\r"
@@ -61,6 +63,7 @@ func (r *Reader) ReadLine(src anytype) (string, error) from r {
 				}
 				return string(line), nil
 			}
+			r.start = r.end // a line cut short by a failure is dropped
 			return "", r.err
 		}
 		if r.start > 0 { // make room
@@ -84,6 +87,10 @@ func (r *Reader) ReadLine(src anytype) (string, error) from r {
 					err = io.EOF
 				}
 				r.err = err
+				if n == 0 && err != io.EOF { // the source failed before the line's end: drop it
+					r.start = r.end
+					return "", err
+				}
 				if n == 0 || next[0] == '\n' { // the line's end, or the source's
 					line := r.buf[:r.end]
 					r.start = r.end

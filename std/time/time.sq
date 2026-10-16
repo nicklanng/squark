@@ -49,3 +49,214 @@ func (d Duration) Nanoseconds() int    { return int(d) }
 func (d Duration) Microseconds() int   { return int(d) / 1000 }
 func (d Duration) Milliseconds() int   { return int(d) / 1000000 }
 func (d Duration) Seconds() float64    { return float64(d) / 1e9 }
+
+// ErrDuration is ParseDuration's error for any string that isn't a duration (Go's messages name
+// the string; a squark error's message is constant).
+const ErrDuration = error(22, "time: invalid duration")
+
+// String writes d as Go's Duration.String does ("1h2m3.5s", "1.5ms", "0s") into buf and returns
+// it as a view of buf. 32 bytes hold any duration; a shorter buf gets the beginning.
+func (d Duration) String(buf []byte) string from buf {
+	var arr [32]byte
+	w := len(arr)
+	u := uint64(d)
+	neg := d < 0
+	if neg {
+		u = 0 - u
+	}
+	if u < uint64(Second) {
+		// under a second: a smaller unit, so 1.5ms rather than 0.0015s
+		prec := 0
+		w--
+		arr[w] = 's'
+		w--
+		switch {
+		case u == 0:
+			arr[w] = '0'
+			return string(buf[:copy(buf, arr[w:])])
+		case u < uint64(Microsecond):
+			arr[w] = 'n'
+		case u < uint64(Millisecond):
+			prec = 3
+			w-- // the micro sign is two bytes
+			copy(arr[w:], "µ")
+		default:
+			prec = 6
+			arr[w] = 'm'
+		}
+		w, u = fmtFrac(arr[:w], u, prec)
+		w = fmtInt(arr[:w], u)
+	} else {
+		w--
+		arr[w] = 's'
+		w, u = fmtFrac(arr[:w], u, 9)
+		w = fmtInt(arr[:w], u%60)
+		u /= 60
+		if u > 0 {
+			w--
+			arr[w] = 'm'
+			w = fmtInt(arr[:w], u%60)
+			u /= 60
+			if u > 0 {
+				w--
+				arr[w] = 'h'
+				w = fmtInt(arr[:w], u)
+			}
+		}
+	}
+	if neg {
+		w--
+		arr[w] = '-'
+	}
+	return string(buf[:copy(buf, arr[w:])])
+}
+
+// fmtFrac writes the fraction of v/10^prec, without trailing zeros, at the end of buf, and returns
+// where it starts and v/10^prec.
+func fmtFrac(buf []byte, v uint64, prec int) (int, uint64) {
+	w := len(buf)
+	print := false
+	for i := 0; i < prec; i++ {
+		digit := v % 10
+		print = print || digit != 0
+		if print {
+			w--
+			buf[w] = byte(digit) + '0'
+		}
+		v /= 10
+	}
+	if print {
+		w--
+		buf[w] = '.'
+	}
+	return w, v
+}
+
+// fmtInt writes v at the end of buf and returns where it starts.
+func fmtInt(buf []byte, v uint64) int {
+	w := len(buf)
+	if v == 0 {
+		w--
+		buf[w] = '0'
+		return w
+	}
+	for v > 0 {
+		w--
+		buf[w] = byte(v%10) + '0'
+		v /= 10
+	}
+	return w
+}
+
+// ParseDuration parses a duration as Go's time.ParseDuration does: a signed sequence of decimal
+// numbers, each with an optional fraction and a unit ("300ms", "-1.5h", "2h45m"). The units are
+// "ns", "us" (or "µs"), "ms", "s", "m" and "h". A malformed, unitless (except "0") or
+// out-of-range string is ErrDuration.
+func ParseDuration(s string) (Duration, error) {
+	var d uint64
+	neg := false
+	if s != "" && (s[0] == '-' || s[0] == '+') {
+		neg = s[0] == '-'
+		s = s[1:]
+	}
+	if s == "0" {
+		return 0, nil
+	}
+	if s == "" {
+		return 0, ErrDuration
+	}
+	for s != "" {
+		if !(s[0] == '.' || '0' <= s[0] && s[0] <= '9') {
+			return 0, ErrDuration
+		}
+		// [0-9]*
+		var v uint64
+		i := 0
+		for ; i < len(s) && '0' <= s[i] && s[i] <= '9'; i++ {
+			if v > 1<<63/10 {
+				return 0, ErrDuration
+			}
+			v = v*10 + uint64(s[i]-'0')
+			if v > 1<<63 {
+				return 0, ErrDuration
+			}
+		}
+		pre := i > 0
+		s = s[i:]
+		// (\.[0-9]*)?
+		var f uint64
+		scale := 1.0
+		post := false
+		if s != "" && s[0] == '.' {
+			s = s[1:]
+			overflow := false
+			i = 0
+			for ; i < len(s) && '0' <= s[i] && s[i] <= '9'; i++ {
+				if overflow {
+					continue
+				}
+				if f > (1<<63-1)/10 {
+					overflow = true // stop gaining precision
+					continue
+				}
+				y := f*10 + uint64(s[i]-'0')
+				if y > 1<<63 {
+					overflow = true
+					continue
+				}
+				f = y
+				scale *= 10
+			}
+			post = i > 0
+			s = s[i:]
+		}
+		if !pre && !post {
+			return 0, ErrDuration // no digits (".s")
+		}
+		// the unit
+		i = 0
+		for i < len(s) && s[i] != '.' && !('0' <= s[i] && s[i] <= '9') {
+			i++
+		}
+		var unit uint64
+		switch s[:i] {
+		case "ns":
+			unit = uint64(Nanosecond)
+		case "us", "µs", "μs": // the micro sign U+00B5, or the Greek mu U+03BC
+			unit = uint64(Microsecond)
+		case "ms":
+			unit = uint64(Millisecond)
+		case "s":
+			unit = uint64(Second)
+		case "m":
+			unit = uint64(Minute)
+		case "h":
+			unit = uint64(Hour)
+		default:
+			return 0, ErrDuration // a missing or unknown unit
+		}
+		s = s[i:]
+		if v > 1<<63/unit {
+			return 0, ErrDuration
+		}
+		v *= unit
+		if f > 0 {
+			// float64 keeps fractions of hours accurate to the nanosecond
+			v += uint64(float64(f) * (float64(unit) / scale))
+			if v > 1<<63 {
+				return 0, ErrDuration
+			}
+		}
+		d += v
+		if d > 1<<63 {
+			return 0, ErrDuration
+		}
+	}
+	if neg {
+		return Duration(0 - d), nil
+	}
+	if d > 1<<63-1 {
+		return 0, ErrDuration
+	}
+	return Duration(d), nil
+}

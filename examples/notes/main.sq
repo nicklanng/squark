@@ -12,15 +12,16 @@
 //   - requests served without a heap: buffers on the connection goroutine's proven stack
 //   - a memory budget the build checks, with the connection pool sized to fit it
 //   - http.HandleFunc routing, w.JSON() and a JSON request body decoded into r.Arena
-//   - SQLite prepared statements, one connection per scheduler thread (thread var)
+//   - SQLite prepared statements (Exec to write, Step to read rows), one connection per
+//     scheduler thread (thread var)
 package main
 
 import (
+	"flag"
 	"http"
 	"json"
 	"os"
 	"sqlite"
-	"strconv"
 )
 
 // At most 512 connections are served at once (more wait for a slot; idle keep-alive
@@ -44,8 +45,8 @@ const (
 )
 
 // Store holds the connection and prepared statements. A statement holds the connection from its
-// first Bind or Step until Reset (hence `defer st.Reset()`), so other requests that use it wait
-// meanwhile: it is never used by two requests at once.
+// first Bind or Step until Reset (hence `defer st.Reset()`; Exec does all three in one call), so
+// other requests that use it wait meanwhile: it is never used by two requests at once.
 type Store struct {
 	db     sqlite.DB
 	insert sqlite.Stmt
@@ -68,16 +69,6 @@ func openStore(path string) error {
 	store.list = try db.Prepare(sqlList)
 	store.del = try db.Prepare(sqlDelete)
 	return nil
-}
-
-// insertNote adds a note and returns its id.
-func insertNote(title, body string) (int, error) {
-	st := store.insert
-	defer st.Reset()
-	try st.BindText(1, title)
-	try st.BindText(2, body)
-	try st.Step()
-	return store.db.LastInsertRowID(), nil // read before Reset gives the connection back
 }
 
 // ---- responses ----
@@ -180,18 +171,18 @@ func createNote(w *http.ResponseWriter, r *http.Request) {
 		}
 		switch k {
 		case "title":
-			title, _ = d.Text()
+			title, _ = d.TextMax(maxTitle) // a longer one is an error (json.ErrTooLong)
 		case "body":
-			body, _ = d.Text()
+			body, _ = d.TextMax(maxBody)
 		default:
 			d.Skip()
 		}
 	}
-	if d.Err != nil || !d.End() || title == "" || len(title) > maxTitle || len(body) > maxBody {
+	if d.Err != nil || !d.End() || title == "" {
 		fail(w, 400, "bad request")
 		return
 	}
-	id, err := insertNote(title, body)
+	res, err := store.insert.Exec(sqlite.Text(title), sqlite.Text(body))
 	if err != nil {
 		internalError(w, err)
 		return
@@ -200,7 +191,7 @@ func createNote(w *http.ResponseWriter, r *http.Request) {
 	j := w.JSON()
 	j.Object()
 	j.Key("id")
-	j.Int(id)
+	j.Int(res.LastInsertID)
 	j.End()
 }
 
@@ -211,14 +202,12 @@ func deleteNote(w *http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "not found")
 		return
 	}
-	st := store.del
-	defer st.Reset()
-	st.BindInt(1, id)
-	if _, err := st.Step(); err != nil {
+	res, err := store.del.Exec(sqlite.Int(id))
+	if err != nil {
 		internalError(w, err)
 		return
 	}
-	if store.db.Changes() == 0 {
+	if res.RowsAffected == 0 {
 		fail(w, 404, "not found")
 		return
 	}
@@ -226,19 +215,10 @@ func deleteNote(w *http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	port := 8080
-	dbPath := "notes.db"
-	for i := 1; i < os.NArgs(); i++ {
-		switch os.Arg(i) {
-		case "-port", "--port":
-			i++
-			port, _ = strconv.Atoi(os.Arg(i))
-		case "-db", "--db":
-			i++
-			dbPath = os.Arg(i)
-		}
-	}
-	if err := openStore(dbPath); err != nil {
+	port := flag.Int("port", 8080, "port to listen on")
+	dbPath := flag.String("db", "notes.db", "the SQLite database `file`")
+	flag.Parse()
+	if err := openStore(*dbPath); err != nil {
 		println("cannot open database:", err.Error())
 		os.Exit(1)
 	}
@@ -247,8 +227,8 @@ func main() {
 	http.HandleFunc("POST /notes", createNote)
 	http.HandleFunc("GET /notes/{id}", getNote)
 	http.HandleFunc("DELETE /notes/{id}", deleteNote)
-	println("squark notes listening on port", port, "db", dbPath)
-	if err := http.ListenAndServe(http.Port(port), nil); err != nil {
+	println("squark notes listening on port", *port, "db", *dbPath)
+	if err := http.ListenAndServe(http.Port(*port), nil); err != nil {
 		println("serve:", err.Error())
 		os.Exit(1)
 	}

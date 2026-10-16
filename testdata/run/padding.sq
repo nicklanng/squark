@@ -1,0 +1,41 @@
+// strconv.AppendUintPad (any base, left padding) and strings.AppendPadRight (right padding,
+// counted in runes).
+package main
+
+import (
+	"strconv"
+	"strings"
+)
+
+func main() {
+	var buf [96]byte
+	println(string(strconv.AppendUintPad(buf[:0], 0xbeef, 16, 8, '0')))
+	line := strconv.AppendUintPad(append(buf[:0], '['), 0xdeadbeef, 16, 8, '0') // exactly width
+	line = strconv.AppendUintPad(append(line, ' '), 0x1_2345_6789, 16, 8, '0') // wider: whole
+	line = strconv.AppendUintPad(append(line, ' '), 0, 16, 4, '0')
+	line = strconv.AppendUintPad(append(line, ' '), 5, 2, 8, '0')
+	line = strconv.AppendUintPad(append(line, ' '), 42, 10, 6, ' ')
+	line = strconv.AppendUintPad(append(line, ' '), 35, 36, 3, '_')
+	line = strconv.AppendUintPad(append(line, ' '), 7, 10, 0, '0')
+	line = strconv.AppendUintPad(append(line, ' '), 7, 10, -3, '0')
+	line = strconv.AppendUintPad(append(line, ' '), 0xffffffffffffffff, 16, 20, '0')
+	println(string(append(line, ']')))
+
+	line = strings.AppendPadRight(append(buf[:0], '['), "ab", 5, '.')
+	line = strings.AppendPadRight(append(line, '|'), "abcdef", 3, '.') // longer: whole
+	line = strings.AppendPadRight(append(line, '|'), "", 3, ' ')
+	line = strings.AppendPadRight(append(line, '|'), "crème", 7, '.') // 5 runes, 6 bytes
+	line = strings.AppendPadRight(append(line, '|'), "日本", 4, '-')
+	line = strings.AppendPadRight(append(line, '|'), "x", -1, '-')
+	println(string(append(line, ']')))
+
+	// a table: names padded right, numbers padded left
+	names := [3]string{"apples", "kiwis", "crème brûlée"}
+	counts := [3]uint64{12, 7, 1024}
+	for i, name := range names {
+		row := strings.AppendPadRight(buf[:0], name, 14, ' ')
+		row = strconv.AppendUintPad(row, counts[i], 10, 5, ' ')
+		row = strconv.AppendUintPad(append(row, "  0x"...), counts[i], 16, 4, '0')
+		println(string(row))
+	}
+}

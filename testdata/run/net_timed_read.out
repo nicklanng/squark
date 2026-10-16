@@ -1,0 +1,14 @@
+WithTimeout(short), nothing sent -> i/o timeout
+ReadTimeout(short), nothing sent -> i/o timeout
+WithTimeout(0), a late write -> 4 bytes
+  waited for it: true
+ReadTimeout(-1s), a late write -> 5 bytes
+WithTimeout(short), input waiting -> 5 bytes
+eof: [one] [two] [thr] <EOF> <EOF>
+timeout: [one] [two] <i/o timeout> <i/o timeout>
+eof: [one] [two] <EOF> <EOF>
+timeout: [one] <i/o timeout> <i/o timeout>
+eof: [abcd] [wxyz] <EOF> <EOF>
+timeout: [abcd] <i/o timeout> <i/o timeout>
+eof: [abcd] [wxyz] <EOF> <EOF>
+timeout: [abcd] <i/o timeout> <i/o timeout>

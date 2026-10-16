@@ -98,7 +98,7 @@ population: 12 20 17 30 20 28 34 38 26 17 16 22 24
 points inside: 304, area estimate: 1.59, symmetric: yes
 
 == soup census ==
-soups: 400, died out: 46
-by period (0 = still changing): 5 250 145 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-longest-lived: soup 23, settled at generation 638
+soups: 400, died out: 50
+by period (0 = still changing): 6 242 152 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+longest-lived: soup 373, settled at generation 722
 ticker saw the census mid-run: yes

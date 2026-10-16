@@ -5,7 +5,7 @@
 //	squark run examples/jsonq [FILE]     (no FILE: a built-in sample with bad records)
 //
 // It shows:
-//   - the json pull decoder, decoding strings straight into an arena (NewDecoderIn, Text)
+//   - the json pull decoder, decoding strings straight into an arena (NewDecoderIn, TextMax)
 //   - one arena holding every decoded string and item slice, sized from the input
 //   - json.Encoder writing JSON without hand-placed quotes and commas
 //   - error values with codes, and try
@@ -19,7 +19,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"utf8"
 )
 
 const (
@@ -147,9 +146,13 @@ func number(d *json.Decoder) (int, error) {
 	return n, nil
 }
 
-// text decodes a string into the decoder's arena, at its exact size.
+// text decodes a string of at most maxName bytes into the decoder's arena, at its exact size; a
+// longer one is ErrLongName, and takes no room in the arena.
 func text(d *json.Decoder) (string, error) {
-	s, ok := d.Text()
+	s, ok := d.TextMax(maxName)
+	if d.Err == json.ErrTooLong {
+		return "", ErrLongName
+	}
 	if !ok {
 		return "", d.Err
 	}
@@ -236,8 +239,6 @@ func validate(o *Order, seen map[int]bool) error {
 		return ErrDupID
 	case o.Customer == "":
 		return ErrNoName
-	case len(o.Customer) > maxName:
-		return ErrLongName
 	case len(o.Items) == 0:
 		return ErrNoItems
 	case o.Status < 0:
@@ -249,9 +250,6 @@ func validate(o *Order, seen map[int]bool) error {
 		}
 		if it.Price < 0 {
 			return ErrBadPrice
-		}
-		if len(it.SKU) > maxName {
-			return ErrLongName
 		}
 	}
 	return nil
@@ -345,24 +343,19 @@ func appendCents(dst []byte, c int) []byte {
 	return strconv.AppendIntPad(append(dst, '.'), c%100, 2, '0')
 }
 
-// appendPadded appends s padded with spaces to width characters (not bytes).
-func appendPadded(dst []byte, s string, width int) []byte {
-	return strings.AppendRepeat(append(dst, s...), " ", width-utf8.RuneCountInString(s))
-}
-
 func printTallies(title string, ts []Tally, unit string) {
 	println(title)
 	var line [128]byte
 	for _, t := range ts {
-		out := appendPadded(append(line[:0], "  "...), t.Key, 14)
-		out = appendPadded(strconv.AppendInt(out, t.Count), unit, 9)
+		out := strings.AppendPadRight(append(line[:0], "  "...), t.Key, 14, ' ')
+		out = strings.AppendPadRight(strconv.AppendInt(out, t.Count), unit, 9, ' ')
 		os.Stdout.Write(append(appendCents(out, t.Amount), '\n'))
 	}
 }
 
 // emitJSON writes the settled orders of at least bigOrder cents as a JSON array, one order per
 // line. An Encoder writes each order; the array around them is written by hand, since an Encoder
-// writes no line breaks.
+// writes either no line breaks or (with SetIndent) one before every member.
 func emitJSON(orders []Order) error {
 	var buf [8K]byte // the largest order: 17 strings of maxName bytes, escaped 6 bytes to one
 	os.Stdout.WriteString("[")
@@ -420,7 +413,7 @@ func report(data []byte, a arena) error {
 	println("orders by status:")
 	var line [64]byte
 	for i, name := range statuses {
-		out := appendPadded(append(line[:0], "  "...), name, 14)
+		out := strings.AppendPadRight(append(line[:0], "  "...), name, 14, ' ')
 		os.Stdout.Write(append(strconv.AppendInt(out, byStatus[i]), '\n'))
 	}
 	println()

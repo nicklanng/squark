@@ -1,0 +1,122 @@
+package main
+
+// Reading a connection with a timeout. Conn.WithTimeout(d) is a source whose reads give up with
+// net.ErrTimeout after d without input; d <= 0 means no deadline, for it and for ReadTimeout
+// (which used to time out at once). bufio.Reader.ReadLine returns a partial last line at io.EOF,
+// but drops it when the source fails otherwise (a timeout), in both the ordinary path and the one
+// for a line that fills the buffer exactly.
+
+import (
+	"bufio"
+	"net"
+	"time"
+)
+
+const short = 30 * time.Millisecond
+
+var l net.Listener
+
+// pair returns the two ends of a new connection: the client's, then the server's.
+func pair() (net.Conn, net.Conn) {
+	var b [32]byte
+	c, err := net.Dial(string(net.AppendHostPort(b[:0], "127.0.0.1", l.Port())))
+	if err != nil {
+		panic(err)
+	}
+	s, err := l.Accept()
+	if err != nil {
+		panic(err)
+	}
+	return c, s
+}
+
+// late writes text to s after a delay longer than short.
+task late(s net.Conn, text static string) pool 2 {
+	time.Sleep(3 * short)
+	s.WriteString(text)
+}
+
+func show(what string, n int, err error) {
+	if err != nil {
+		println(what, "->", err.Error())
+		return
+	}
+	println(what, "->", n, "bytes")
+}
+
+// lines reads lines from src until an error, which it repeats once to show it sticks.
+func lines(what string, r *bufio.Reader, src anytype) {
+	print(what, ":")
+	for {
+		line, err := r.ReadLine(src)
+		if err != nil {
+			_, again := r.ReadLine(src)
+			print(" <", err.Error(), "> <", again.Error(), ">\n")
+			return
+		}
+		print(" [", line, "]")
+	}
+}
+
+func timeouts() {
+	c, s := pair()
+	var buf [16]byte
+	n, err := c.WithTimeout(short).Read(buf[:])
+	show("WithTimeout(short), nothing sent", n, err)
+	n, err = c.ReadTimeout(buf[:], short)
+	show("ReadTimeout(short), nothing sent", n, err)
+
+	go late(s, "late")
+	start := time.Now()
+	n, err = c.WithTimeout(0).Read(buf[:])
+	show("WithTimeout(0), a late write", n, err)
+	println("  waited for it:", time.Since(start) >= 2*short)
+	go late(s, "later")
+	n, err = c.ReadTimeout(buf[:], -time.Second)
+	show("ReadTimeout(-1s), a late write", n, err)
+
+	s.WriteString("ready")
+	n, err = c.WithTimeout(short).Read(buf[:])
+	show("WithTimeout(short), input waiting", n, err)
+	c.Close()
+	s.Close()
+}
+
+// partial sends text, then either closes the connection (EOF) or leaves it open (a timeout), and
+// reads it back in lines through a buffer of size bytes.
+func partial(text string, size int, eof bool) {
+	c, s := pair()
+	s.WriteString(text)
+	if eof {
+		s.Close()
+	}
+	var store [8]byte
+	r := bufio.NewReader(store[:size])
+	what := "timeout"
+	if eof {
+		what = "eof"
+	}
+	lines(what, &r, c.WithTimeout(short))
+	c.Close()
+	if !eof {
+		s.Close()
+	}
+}
+
+func main() {
+	var err error
+	l, err = net.Listen("127.0.0.1:0")
+	if err != nil {
+		panic(err)
+	}
+	timeouts()
+
+	partial("one\ntwo\nthr", 8, true)
+	partial("one\ntwo\nthr", 8, false)
+	partial("one\r\ntwo\r", 8, true)
+	partial("one\r\ntwo\r", 8, false)
+	partial("abcd\nwxyz", 4, true) // a last line that fills the buffer
+	partial("abcd\nwxyz", 4, false)
+	partial("abcd\nwxyz\r", 4, true)
+	partial("abcd\nwxyz\r", 4, false)
+}

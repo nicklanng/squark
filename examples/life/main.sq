@@ -14,8 +14,10 @@ package main
 import (
 	"bytes"
 	"math"
+	"math/rand"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -74,9 +76,6 @@ type Census struct {
 	periods              [maxPeriod + 1]int
 	longest, longestSeed int
 }
-
-// rng is xorshift64*: deterministic, so every run sees the same soups.
-type rng struct{ s uint64 }
 
 type Complex struct{ Re, Im float64 }
 
@@ -182,14 +181,13 @@ func (b Board) Population() int {
 // renderFrames draws boards side by side, each captioned with its generation.
 func renderFrames(frames []Board, out *bytes.Buffer) {
 	var num [20]byte
+	var caption [cols + 2]byte
 	for i, f := range frames {
 		label := strconv.AppendInt(append(num[:0], "gen "...), f.gen)
-		out.Write(label)
 		if i < len(frames)-1 {
-			for pad := len(label); pad < cols+2; pad++ {
-				out.WriteByte(' ')
-			}
+			label = strings.AppendPadRight(caption[:0], string(label), cols+2, ' ')
 		}
+		out.Write(label)
 	}
 	out.WriteByte('\n')
 	for r := 0; r < rows; r++ {
@@ -277,21 +275,14 @@ func demo(name string, gens, every int, out *bytes.Buffer) {
 
 // ---- the soup census ----
 
-func (r *rng) next() uint64 {
-	r.s ^= r.s >> 12
-	r.s ^= r.s << 25
-	r.s ^= r.s >> 27
-	return r.s * 2685821657736338717
-}
-
-// runSoup fills soup[0] from seed and steps it until a board repeats. It returns the generation
-// the cycle was found at (soupGens if none), its period and the final population.
+// runSoup fills soup[0] at random from seed and steps it until a board repeats. It returns the
+// generation the cycle was found at (soupGens if none), its period and the final population. A
+// generator made with rand.New(seed) is deterministic, so every run sees the same soups.
 func runSoup(seed uint64) (int, int, int) {
-	r := rng{seed}
+	r := rand.New(seed)
 	soup[0].Reset(ruleConway)
 	for i := 0; i < rows*cols*3/10; i++ {
-		v := r.next()
-		soup[0].Set(int(v%rows), int(v/rows%cols))
+		soup[0].Set(r.Intn(rows), r.Intn(cols))
 	}
 	var recent [..maxPeriod][rows][cols]uint8 // the latest grids, oldest first
 	cur := 0
@@ -328,7 +319,7 @@ func (c *Census) add(seed, gen, period, pop int) {
 // for a time slice, in its own loops and in those of everything it calls.
 task runCensus() pool 1 preemptible {
 	for s := 1; s <= soups; s++ {
-		gen, period, pop := runSoup(uint64(s) * 0x9E3779B97F4A7C15)
+		gen, period, pop := runSoup(uint64(s))
 		census.add(s, gen, period, pop)
 		progress = s
 	}

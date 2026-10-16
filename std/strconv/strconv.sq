@@ -76,6 +76,17 @@ func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst {
 	return append(dst, digits...)
 }
 
+// AppendUintPad appends v in base 2 to 36, padded on the left with pad to at least width bytes
+// (AppendUintPad(dst, 0xbeef, 16, 8, '0') appends "0000beef").
+func AppendUintPad(dst []byte, v uint64, base, width int, pad byte) []byte from dst {
+	var tmp [64]byte
+	digits := AppendUintBase(tmp[:0], v, base)
+	for n := len(digits); n < width; n++ {
+		dst = append(dst, pad)
+	}
+	return append(dst, digits...)
+}
+
 // FormatInt writes v in decimal into buf and returns it as a string view of buf.
 func FormatInt(buf []byte, v int) string {
 	return string(AppendInt(buf[:0], v))

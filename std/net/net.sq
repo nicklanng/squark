@@ -71,6 +71,18 @@ func splitHostPort(addr string) (string, int, error) {
 	return host, port, nil
 }
 
+// AppendHostPort appends "host:port" to dst, as Go's JoinHostPort: a host containing ':' (an IPv6
+// literal) is put in brackets, "[::1]:80". An empty host gives ":port", which Listen takes as
+// every interface. (Listen and Dial take IPv4 addresses and "localhost" only.)
+func AppendHostPort(dst []byte, host string, port int) []byte from dst {
+	if strings.IndexByte(host, ':') >= 0 {
+		dst = append(append(append(dst, '['), host...), ']')
+	} else {
+		dst = append(dst, host...)
+	}
+	return strconv.AppendInt(append(dst, ':'), port)
+}
+
 // Listen opens a TCP listener on addr ("host:port" or ":port").
 func Listen(addr string) (Listener, error) {
 	host, port, err := splitHostPort(addr)
@@ -129,8 +141,12 @@ func (c Conn) Read(p []byte) (int, error) {
 }
 
 // ReadTimeout is Read that waits at most d for input: if nothing arrives in time it returns 0 and
-// ErrTimeout. Input that is already waiting is read at once, whatever d is.
+// ErrTimeout. Input that is already waiting is read at once, whatever d is. d <= 0 means no
+// deadline (a plain Read), so a caller counting down to a deadline checks there is time left.
 func (c Conn) ReadTimeout(p []byte, d time.Duration) (int, error) {
+	if d <= 0 {
+		return c.Read(p)
+	}
 	n := sysReadTimeout(c.fd, p, int(d))
 	if n == -sqETimeout {
 		return 0, ErrTimeout
@@ -143,6 +159,20 @@ func (c Conn) ReadTimeout(p []byte, d time.Duration) (int, error) {
 	}
 	return n, nil
 }
+
+// TimedConn is a Conn whose reads time out: see Conn.WithTimeout.
+type TimedConn struct {
+	c Conn
+	d time.Duration
+}
+
+// WithTimeout returns c as a source whose Read is c.ReadTimeout(p, d), for readers that take
+// anything with a Read method: r.ReadLine(c.WithTimeout(idle)) returns ErrTimeout when no input
+// comes for d. The limit applies to each read, not to a whole line. d <= 0 means no deadline.
+func (c Conn) WithTimeout(d time.Duration) TimedConn { return TimedConn{c: c, d: d} }
+
+// Read is ReadTimeout with t's limit.
+func (t TimedConn) Read(p []byte) (int, error) { return t.c.ReadTimeout(p, t.d) }
 
 func (c Conn) Write(p []byte) (int, error) {
 	n := sysWrite(c.fd, p)

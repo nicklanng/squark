@@ -897,23 +897,51 @@ HTTP throughput about 3–5% lower, nbody 3.5% slower, the notes binary 109 → 
 
 Not bugs: things the examples had to hand-write. Each is a small, self-contained addition.
 
-- [ ] **S1. `bufio.Reader` can't read with a timeout.** kv and chat each define the same
-  `timedConn{c net.Conn; d time.Duration}` wrapper whose `Read` calls `ReadTimeout`. A
-  `ReadLineTimeout`, or a timed-reader method on `net.Conn`, would remove both.
-- [ ] **S2. `net.Conn.ReadTimeout(p, 0)` times out at once;** there is no "no deadline" value, so
-  callers branch to `Read` themselves. Make `d <= 0` mean no deadline (document it).
-- [ ] **S3. `bufio.Reader` returns a partial last line when its source fails** (EOF or a timeout),
-  as Go's Scanner does; a line protocol wants to drop it. An option, or a separate error.
-- [ ] **S4. No `host:port` helper in `net`** (`http.Port` exists): kv and chat build addresses
-  with `strconv.AppendInt`.
-- [ ] **S5. No `flag` package:** notes and kv parse `-port`/`-db`/`-idle` by hand.
-- [ ] **S6. No `math/rand`:** life and jobs carry their own xorshift.
-- [ ] **S7. No zero-padded hex or right-padding:** `strconv.AppendIntPad` is decimal and
-  left-padding only (jobs' `appendHex`, life's caption padding).
-- [ ] **S8. `json.Decoder.Text()` has no length limit;** callers must check (jsonq's `maxName`).
-- [ ] **S9. `json.Encoder` has no indentation,** so line-per-element output is framed by hand.
-- [ ] **S10. No sqlite "bind, step, reset" call** (like `Exec` with arguments): notes needs a
-  helper for each insert.
+- [x] **S1. `bufio.Reader` can't read with a timeout.** kv and chat each defined the same
+  `timedConn` wrapper — fixed: `net.Conn.WithTimeout(d)` returns a `TimedConn` whose `Read` is
+  `ReadTimeout(p, d)` (the limit is per read); both wrappers are gone; test:
+  `testdata/run/net_timed_read.sq`
+- [x] **S2. `net.Conn.ReadTimeout(p, 0)` timed out at once** — fixed: `d <= 0` means no deadline
+  (a plain Read), documented; the http server and client already skip the call when no time is
+  left; test: `net_timed_read.sq`
+- [x] **S3. `bufio.Reader` returned a partial last line when its source failed** — fixed: a
+  partial last line is returned only at io.EOF (as Go's Scanner); on any other error (a timeout, a
+  reset) it is dropped and the error returned, on every later call too. Unlike Go's Scanner, which
+  returns it on any error; documented on ReadLine; test: `net_timed_read.sq` (to EOF and to a
+  timeout, for a plain last line, one ending in "\r", and ones that fill the buffer)
+- [x] **S4. No `host:port` helper in `net`** — fixed: `net.AppendHostPort(dst, host, port)`
+  (brackets a host with ':' as Go's JoinHostPort; Listen and Dial still take IPv4 and "localhost"
+  only); kv and chat use it; test: `testdata/run/net_hostport.sq`
+- [x] **S5. No `flag` package** — fixed: new `std/flag` with Go's API and messages (`Int`, `String`,
+  `Bool`, `Duration` returning pointers into fixed package storage, `MaxFlags` 32; `Parse`, `Args`,
+  `NArg`, `Arg`, `PrintDefaults`, replaceable `Usage`; ExitOnError behaviour), plus
+  `time.ParseDuration` and `Duration.String(buf)`; notes and kv use it (kv's `-idle` is now a
+  duration, `-idle 30s`). Not in Go's shape: no `*Var`/FlagSet/Float64; under `threads N` only
+  thread 0 prints usage and exits; under `workers N` each process prints it. Test: `TestFlag`
+  (internal/driver/flag_test.go, 18 command lines at 1 and 4 threads, byte-compared with Go's flag
+  output); `TestNoHeapAtRuntime` runs `flag.Parse`
+- [x] **S6. No `math/rand`** — fixed: new `math/rand` (xoshiro256** seeded through splitmix64):
+  `rand.New(seed) Rand` with `Uint64`, `Int63`, `Int`, `Intn` (unbiased), `Float64`, `Perm(dst)`,
+  `Shuffle(s)` (takes the slice: no closures), and package functions on a per-thread generator
+  seeded at first use. life and jobs use it (their RNG-derived expected.out lines changed);
+  `squark doc std` now walks nested std packages. Test: `testdata/run/rand.sq`,
+  `panic_rand_intn.sq`
+- [x] **S7. No zero-padded hex or right-padding** — fixed: `strconv.AppendUintPad(dst, v, base,
+  width, pad)` and `strings.AppendPadRight(dst, s, width, pad)` (width in runes, as fmt's `%-*s`);
+  jobs' `appendHex`, jsonq's `appendPadded` and life's caption padding are gone; test:
+  `testdata/run/padding.sq`
+- [x] **S8. `json.Decoder.Text()` had no length limit** — fixed: `d.TextMax(max)` fails a longer
+  string with `json.ErrTooLong` before using the arena (`Text` is `TextMax` without a limit); jsonq
+  and notes use it; test: `testdata/run/json_textmax.sq`, TestNotes (200- and 201-byte titles)
+- [x] **S9. `json.Encoder` had no indentation** — fixed: `e.SetIndent(prefix, indent)` lays the
+  output out as Go's MarshalIndent (Raw values re-laid out as a RawMessage; RawStart's doc says how
+  to indent a value written by hand); jsonq's one-order-per-line framing is not MarshalIndent's
+  layout, so it stays; test: `TestJSONEncoderRandom` compares indented output with Go's
+  `json.Indent`, `testdata/run/json_indent.sq`
+- [x] **S10. No sqlite "bind, step, reset" call** — fixed: `Stmt.Exec(args ...Value) (Result,
+  error)` with `sqlite.Int`/`Text`/`Null`; it binds, steps to the end, reads `LastInsertID` and
+  `RowsAffected` while holding the connection, and resets; notes' insert and delete use it; test:
+  `testdata/run/sqlite_exec.sq`, TestNotes
 
 ## Progress log
 
@@ -946,3 +974,4 @@ Append one line per work session: date, items closed, anything left half-done.
 - 2026-10-15: a package map or channel view that nothing gives storage but the program uses is now a compile error (`NoStorageErrors`); maps reached only through views are still checked at run time.
 - 2026-10-15: second whole-project review logged as section F (F1–F56, all open). Start with P0: F1–F16.
 - 2026-10-15: section F closed (F1–F56): compiler items fixed directly; stdlib/HTTP and runtime/CLI items fixed in parallel worktrees and merged. Go divergences F53–F56 and parts of F46 documented in the spec rather than changed. Whole suite passes on macOS and on Linux (Docker, arm64). Nothing committed.
+- 2026-10-16: section S closed (S1–S10): new packages `flag` and `math/rand`, plus `net.WithTimeout`/`AppendHostPort`, `json` TextMax/SetIndent, `sqlite` Stmt.Exec, padding helpers; examples use them. Done in parallel worktrees and merged.

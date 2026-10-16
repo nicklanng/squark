@@ -289,7 +289,11 @@ func DocPackage(p *Package, all bool) string {
 		}
 	}
 	b.WriteString(docText(pkgDoc))
-	fmt.Fprintf(&b, "package %s\n", p.Name)
+	if p.Std && p.Path != p.Name {
+		fmt.Fprintf(&b, "package %s // import %q\n", p.Name, p.Path) // a nested path: math/rand
+	} else {
+		fmt.Fprintf(&b, "package %s\n", p.Name)
+	}
 	for _, group := range [][]entry{consts, vars, types, funcs} {
 		if len(group) == 0 {
 			continue

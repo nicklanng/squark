@@ -53,12 +53,12 @@ thread var closed chan connStats cap 8 // the server reports each finished conne
 
 func dial(port int, buf []byte) (client, error) from buf {
 	var addr [32]byte
-	c := try net.Dial(string(strconv.AppendInt(append(addr[:0], "127.0.0.1:"...), port)))
+	c := try net.Dial(string(net.AppendHostPort(addr[:0], "127.0.0.1", port)))
 	return client{c: c, r: bufio.NewReader(buf)}, nil
 }
 
 func (cl *client) readLine() (string, error) from cl {
-	return cl.r.ReadLine(timedConn{cl.c, clientTimeout})
+	return cl.r.ReadLine(cl.c.WithTimeout(clientTimeout))
 }
 
 // readReply reads one reply (a *n reply is followed by n lines) and prints it.

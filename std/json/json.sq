@@ -16,6 +16,7 @@ const ErrMisuse = error(5, "json: encoder call out of place")
 const ErrDepth = error(6, "json: nested too deeply")
 const ErrFloat = error(7, "json: NaN or infinity has no JSON form")
 const ErrNoArena = error(8, "json: decoder has no arena")
+const ErrTooLong = error(9, "json: string longer than the limit")
 
 const hex = "0123456789abcdef"
 
@@ -297,8 +298,19 @@ func (d *Decoder) String(buf []byte) (string, bool) from buf {
 // Text decodes a JSON string, as String does, into the decoder's arena (NewDecoderIn) at its exact
 // size (see NewDecoderIn for how long it may be kept). ErrNoArena on a decoder from NewDecoder,
 // ErrBuffer if the arena is full; the decoded string is measured first, so a full arena uses none
-// of it.
+// of it. TextMax also bounds the length.
 func (d *Decoder) Text() (string, bool) from d {
+	return d.TextMax(maxText)
+}
+
+// maxText is Text's limit: more than any string in memory could hold.
+const maxText = 1 << 62
+
+// TextMax is Text for a string of at most max bytes, decoded (as UTF-8, invalid bytes counting as
+// the 3 of U+FFFD): a longer one sets ErrTooLong and uses none of the arena, so one string in
+// untrusted input can't fill it. After ErrTooLong or ErrBuffer the decoder is at the string's
+// opening quote (Line and Offset point at it).
+func (d *Decoder) TextMax(max int) (string, bool) from d {
 	if d.Err != nil {
 		return "", false
 	}
@@ -306,11 +318,12 @@ func (d *Decoder) Text() (string, bool) from d {
 		d.fail(ErrNoArena)
 		return "", false
 	}
+	d.ws()
 	start := d.pos
 	if !d.quote() {
 		return "", false
 	}
-	n := 0 // a first pass measures the decoded string
+	n := 0 // a first pass measures the decoded string, up to max
 	for {
 		r, k := d.char()
 		if k < 0 {
@@ -320,6 +333,11 @@ func (d *Decoder) Text() (string, bool) from d {
 			n += k
 		} else {
 			n += utf8.RuneLen(r)
+		}
+		if n > max {
+			d.pos = start
+			d.fail(ErrTooLong)
+			return "", false
 		}
 	}
 	if d.Err != nil {

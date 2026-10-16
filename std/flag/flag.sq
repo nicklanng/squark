@@ -1,0 +1,625 @@
+// Package flag parses command-line flags, as Go's flag package does for its default set
+// (flag.CommandLine, which exits on an error). Define flags, call Parse, then read them:
+//
+//	port := flag.Int("port", 8080, "port to listen on")
+//	flag.Parse()
+//	serve(*port)
+//
+// The values live in the package's storage, not on a heap: at most MaxFlags flags, and the
+// pointers that Int, String, Bool and Duration return point into it. Names, usage texts and
+// default strings must be constant data (string constants, as usual); a String flag's value is a
+// view of the program's arguments.
+//
+// Parse accepts -name, --name, -name=value and -name value (not for bool flags, which take
+// -name or -name=false); flag parsing stops at the first argument that isn't a flag, or after
+// "--". -h and -help, unless defined, print the usage to stderr and exit 0. An undefined flag, a
+// missing value or a bad value prints Go's message ("flag provided but not defined: -x",
+// `invalid value "abc" for flag -port: parse error`) and the usage to stderr and exits 2.
+//
+// With threads N every scheduler thread runs main, so each parses into its own copy of the
+// package: they all see the same arguments, and only the first prints a usage message.
+package flag
+
+import (
+	"os"
+	"runtime"
+	"time"
+)
+
+// MaxFlags is how many flags can be defined. Defining more panics.
+const MaxFlags = 32
+
+// MaxArgs is how many positional arguments Args can return; NArg and Arg have no limit.
+const MaxArgs = 1024
+
+const (
+	kindInt = iota
+	kindString
+	kindBool
+	kindDuration
+)
+
+// a defined flag: its value and its default
+type entry struct {
+	name  string
+	usage string
+	kind  int
+	set   bool // set on the command line
+	i     int
+	s     string
+	b     bool
+	d     time.Duration
+	defI  int
+	defS  string
+	defB  bool
+	defD  time.Duration
+}
+
+var flags [..MaxFlags]entry
+
+var parsed bool
+
+// first is the index (in os.Arg numbering) of the first argument after the flags.
+var first int
+
+var rest [..MaxArgs]string
+
+// Usage prints the usage message to stderr: by default "Usage of <program>:" and PrintDefaults.
+// Parse calls it on -h or an error; set it to a function of your own to print something else.
+var Usage = defaultUsage
+
+func defaultUsage() {
+	put("Usage of ")
+	put(os.Arg(0))
+	put(":\n")
+	PrintDefaults()
+}
+
+func define(name static string, usage static string, kind int) *entry {
+	if name == "" || name[0] == '-' {
+		panic("flag: a flag's name can't be empty or begin with -")
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] == '=' {
+			panic("flag: a flag's name can't contain =")
+		}
+	}
+	if lookup(name) >= 0 {
+		var buf [128]byte
+		msg := append(append(buf[:0], "flag redefined: "...), name...)
+		panic(string(msg))
+	}
+	if len(flags) == MaxFlags {
+		panic("flag: more than MaxFlags flags defined")
+	}
+	flags.Push(entry{name: name, usage: usage, kind: kind})
+	return &flags[len(flags)-1]
+}
+
+func lookup(name string) int {
+	for i := 0; i < len(flags); i++ {
+		if flags[i].name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// Int defines an int flag. Its value is read as Go's strconv.ParseInt(s, 0, 64) reads it:
+// decimal, or with a 0x, 0o, 0b or 0 (octal) prefix, and _ between digits.
+func Int(name static string, value int, usage static string) *int {
+	e := define(name, usage, kindInt)
+	e.i = value
+	e.defI = value
+	return &e.i
+}
+
+// String defines a string flag.
+func String(name static string, value static string, usage static string) *string {
+	e := define(name, usage, kindString)
+	e.s = value
+	e.defS = value
+	return &e.s
+}
+
+// Bool defines a bool flag: -name sets it, -name=false clears it (values as strconv.ParseBool).
+func Bool(name static string, value bool, usage static string) *bool {
+	e := define(name, usage, kindBool)
+	e.b = value
+	e.defB = value
+	return &e.b
+}
+
+// Duration defines a time.Duration flag, read by time.ParseDuration ("30s", "1h30m").
+func Duration(name static string, value time.Duration, usage static string) *time.Duration {
+	e := define(name, usage, kindDuration)
+	e.d = value
+	e.defD = value
+	return &e.d
+}
+
+// Parse parses the command-line flags (os.Arg(1) on). Call it after defining the flags and
+// before reading them. On -h, -help or an error it prints to stderr and exits (see the package
+// comment).
+func Parse() {
+	parsed = true
+	i := 1
+	n := os.NArgs()
+	for i < n {
+		s := os.Arg(i)
+		if len(s) < 2 || s[0] != '-' {
+			break // the first positional argument
+		}
+		name := s[1:]
+		if s[1] == '-' {
+			if len(s) == 2 {
+				i++ // "--" ends the flags
+				break
+			}
+			name = s[2:]
+		}
+		i++
+		if len(name) == 0 || name[0] == '-' || name[0] == '=' {
+			failf("bad flag syntax: ", s, "", "")
+		}
+		value := ""
+		hasValue := false
+		for j := 1; j < len(name); j++ {
+			if name[j] == '=' {
+				value = name[j+1:]
+				hasValue = true
+				name = name[:j]
+				break
+			}
+		}
+		k := lookup(name)
+		if k < 0 {
+			if name == "help" || name == "h" {
+				exit(0)
+			}
+			failf("flag provided but not defined: -", name, "", "")
+		}
+		e := &flags[k]
+		if e.kind == kindBool {
+			if hasValue {
+				if !setValue(e, value) {
+					failq("invalid boolean value ", value, " for -", name)
+				}
+			} else {
+				e.b = true
+			}
+		} else {
+			if !hasValue && i < n {
+				value = os.Arg(i)
+				hasValue = true
+				i++
+			}
+			if !hasValue {
+				failf("flag needs an argument: -", name, "", "")
+			}
+			if !setValue(e, value) {
+				failq("invalid value ", value, " for flag -", name)
+			}
+		}
+		e.set = true
+	}
+	first = i
+}
+
+// errText is why the last setValue failed: Go's "parse error" or "value out of range".
+var errText = ""
+
+// setValue sets e from s; on a bad value it sets errText and returns false.
+func setValue(e *entry, s static string) bool {
+	switch e.kind {
+	case kindInt:
+		v, ok := parseInt(s)
+		e.i = v
+		return ok
+	case kindString:
+		e.s = s
+	case kindBool:
+		switch s {
+		case "1", "t", "T", "TRUE", "true", "True":
+			e.b = true
+		case "0", "f", "F", "FALSE", "false", "False":
+			e.b = false
+		default:
+			errText = "parse error"
+			return false
+		}
+	case kindDuration:
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			errText = "parse error"
+			return false
+		}
+		e.d = d
+	}
+	return true
+}
+
+// parseInt reads s as Go's strconv.ParseInt(s, 0, 64) does: an optional sign, then decimal, or
+// a 0b, 0o, 0x or 0 (octal) prefix, with '_' allowed between digits. A bad value sets errText.
+func parseInt(s string) (int, bool) {
+	errText = "parse error"
+	t := s
+	neg := false
+	if t != "" && (t[0] == '+' || t[0] == '-') {
+		neg = t[0] == '-'
+		t = t[1:]
+	}
+	if t == "" {
+		return 0, false
+	}
+	base := uint64(10)
+	if t[0] == '0' {
+		base = 8
+		t = t[1:]
+		if len(t) >= 2 {
+			switch t[0] | 0x20 {
+			case 'b':
+				base = 2
+				t = t[1:]
+			case 'o':
+				t = t[1:]
+			case 'x':
+				base = 16
+				t = t[1:]
+			}
+		}
+	}
+	cutoff := (1<<64-1)/base + 1
+	var u uint64
+	underscores := false
+	for k := 0; k < len(t); k++ {
+		c := t[k]
+		var d uint64
+		switch {
+		case c == '_':
+			underscores = true
+			continue
+		case '0' <= c && c <= '9':
+			d = uint64(c - '0')
+		case 'a' <= c|0x20 && c|0x20 <= 'z':
+			d = uint64(c|0x20-'a') + 10
+		default:
+			return 0, false
+		}
+		if d >= base {
+			return 0, false
+		}
+		if u >= cutoff {
+			return outOfRange(neg)
+		}
+		u *= base
+		if u+d < u {
+			return outOfRange(neg)
+		}
+		u += d
+	}
+	if underscores && !underscoreOK(s) {
+		return 0, false
+	}
+	if !neg && u > 1<<63-1 || neg && u > 1<<63 {
+		return outOfRange(neg)
+	}
+	if neg {
+		return int(0 - u), true
+	}
+	return int(u), true
+}
+
+func outOfRange(neg bool) (int, bool) {
+	errText = "value out of range"
+	return 0, false
+}
+
+// underscoreOK reports whether the '_'s in s are between digits (or after a base prefix), as in
+// Go's strconv.
+func underscoreOK(s string) bool {
+	saw := byte('^') // the last thing seen: ^ the start, 0 a digit or prefix, _ an underscore, ! other
+	i := 0
+	if len(s) >= 1 && (s[0] == '-' || s[0] == '+') {
+		s = s[1:]
+	}
+	hex := false
+	if len(s) >= 2 && s[0] == '0' && (s[1]|0x20 == 'b' || s[1]|0x20 == 'o' || s[1]|0x20 == 'x') {
+		i = 2
+		saw = '0'
+		hex = s[1]|0x20 == 'x'
+	}
+	for ; i < len(s); i++ {
+		if '0' <= s[i] && s[i] <= '9' || hex && 'a' <= s[i]|0x20 && s[i]|0x20 <= 'f' {
+			saw = '0'
+			continue
+		}
+		if s[i] == '_' {
+			if saw != '0' {
+				return false
+			}
+			saw = '_'
+			continue
+		}
+		if saw == '_' {
+			return false
+		}
+		saw = '!'
+	}
+	return saw != '_'
+}
+
+// failf prints a+b+c+d as the error, then the usage, and exits 2.
+func failf(a string, b string, c string, d string) {
+	put(a)
+	put(b)
+	put(c)
+	put(d)
+	put("\n")
+	exit(2)
+}
+
+// failq prints Go's bad-value message, with the value quoted, and exits 2.
+func failq(a string, value string, c string, name string) {
+	put(a)
+	putQuoted(value)
+	put(c)
+	put(name)
+	put(": ")
+	put(errText)
+	put("\n")
+	exit(2)
+}
+
+// exit prints the usage and exits. With threads only the first scheduler thread prints and exits;
+// the others (which parse the same arguments) wait for it.
+func exit(code int) {
+	if runtime.Shard() != 0 {
+		out.Clear()
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	flush() // the message, before a Usage of the program's own writes
+	Usage()
+	flush()
+	os.Exit(code)
+}
+
+// Parsed reports whether Parse has been called.
+func Parsed() bool { return parsed }
+
+// NFlag returns the number of flags set on the command line.
+func NFlag() int {
+	n := 0
+	for i := 0; i < len(flags); i++ {
+		if flags[i].set {
+			n++
+		}
+	}
+	return n
+}
+
+// NArg returns the number of arguments left after the flags (0 before Parse).
+func NArg() int {
+	if !parsed {
+		return 0
+	}
+	return os.NArgs() - first
+}
+
+// Arg returns argument i of those left after the flags, or "" if there is no such argument.
+func Arg(i int) string static {
+	if i < 0 || i >= NArg() {
+		return ""
+	}
+	return os.Arg(first + i)
+}
+
+// Args returns the arguments left after the flags, as a view of the package's storage. More than
+// MaxArgs of them panics: use NArg and Arg.
+func Args() []string {
+	rest.Clear()
+	for i := 0; i < NArg(); i++ {
+		if !rest.TryPush(os.Arg(first + i)) {
+			panic("flag.Args: more than MaxArgs arguments (use NArg and Arg)")
+		}
+	}
+	return rest[:]
+}
+
+// PrintDefaults prints, to stderr, each flag's name, type, usage and default (unless it is the
+// zero value), sorted by name, in Go's format:
+//
+//	  -port int
+//	    	port to listen on (default 8080)
+//
+// A name in back quotes in the usage ("a `file` to read") is shown as the type: "-db file".
+func PrintDefaults() {
+	var order [MaxFlags]int
+	for i := 0; i < len(flags); i++ {
+		j := i
+		for j > 0 && flags[order[j-1]].name > flags[i].name {
+			order[j] = order[j-1]
+			j--
+		}
+		order[j] = i
+	}
+	for k := 0; k < len(flags); k++ {
+		printFlag(&flags[order[k]])
+	}
+	flush()
+}
+
+func printFlag(e *entry) {
+	var buf [32]byte
+	put("  -")
+	put(e.name)
+	// a back-quoted name in the usage, or the type, is shown after the flag
+	usage := e.usage
+	tname := ""
+	q1, q2 := -1, -1
+	for i := 0; i < len(usage); i++ {
+		if usage[i] == '`' {
+			if q1 < 0 {
+				q1 = i
+			} else {
+				q2 = i
+				break
+			}
+		}
+	}
+	if q2 >= 0 {
+		tname = usage[q1+1 : q2]
+	} else {
+		switch e.kind {
+		case kindInt:
+			tname = "int"
+		case kindString:
+			tname = "string"
+		case kindDuration:
+			tname = "duration"
+		}
+	}
+	if tname != "" {
+		put(" ")
+		put(tname)
+	}
+	if tname == "" && len(e.name) == 1 {
+		put("\t") // a one-letter bool flag: the usage goes on the same line
+	} else {
+		put("\n    \t")
+	}
+	if q2 >= 0 {
+		putUsage(usage[:q1])
+		putUsage(tname)
+		putUsage(usage[q2+1:])
+	} else {
+		putUsage(usage)
+	}
+	switch e.kind {
+	case kindInt:
+		if e.defI != 0 {
+			put(" (default ")
+			n := len(fmtIntTo(buf[:], e.defI))
+			put(string(buf[:n]))
+			put(")")
+		}
+	case kindString:
+		if e.defS != "" {
+			put(" (default ")
+			putQuoted(e.defS)
+			put(")")
+		}
+	case kindBool:
+		if e.defB {
+			put(" (default true)")
+		}
+	case kindDuration:
+		if e.defD != 0 {
+			put(" (default ")
+			put(e.defD.String(buf[:]))
+			put(")")
+		}
+	}
+	put("\n")
+}
+
+// putUsage writes s with each newline followed by the usage indent.
+func putUsage(s string) {
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			put(s[start : i+1])
+			put("    \t")
+			start = i + 1
+		}
+	}
+	put(s[start:])
+}
+
+func fmtIntTo(buf []byte, v int) []byte from buf {
+	var arr [24]byte
+	w := len(arr)
+	u := uint64(v)
+	if v < 0 {
+		u = 0 - u
+	}
+	for {
+		w--
+		arr[w] = byte(u%10) + '0'
+		u /= 10
+		if u == 0 {
+			break
+		}
+	}
+	if v < 0 {
+		w--
+		arr[w] = '-'
+	}
+	return buf[:copy(buf, arr[w:])]
+}
+
+// out buffers what goes to stderr.
+var out [..512]byte
+
+func put(s string) {
+	if !out.TryAppend(s) {
+		flush()
+		if !out.TryAppend(s) {
+			os.Stderr.WriteString(s)
+		}
+	}
+}
+
+func flush() {
+	if len(out) > 0 {
+		os.Stderr.Write(out[:])
+		out.Clear()
+	}
+}
+
+// putQuoted writes s in double quotes with Go's escapes for quotes, backslashes and control
+// characters (bytes from 0x80 up are written as they are).
+func putQuoted(s string) {
+	const hex = "0123456789abcdef"
+	put("\"")
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x20 && c != 0x7f && c != '"' && c != '\\' {
+			continue
+		}
+		put(s[start:i])
+		start = i + 1
+		switch c {
+		case '"':
+			put("\\\"")
+		case '\\':
+			put("\\\\")
+		case '\a':
+			put("\\a")
+		case '\b':
+			put("\\b")
+		case '\f':
+			put("\\f")
+		case '\n':
+			put("\\n")
+		case '\r':
+			put("\\r")
+		case '\t':
+			put("\\t")
+		case '\v':
+			put("\\v")
+		default:
+			var esc [4]byte
+			esc[0] = '\\'
+			esc[1] = 'x'
+			esc[2] = hex[c>>4]
+			esc[3] = hex[c&15]
+			put(string(esc[:]))
+		}
+	}
+	put(s[start:])
+	put("\"")
+}

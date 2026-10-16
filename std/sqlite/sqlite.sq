@@ -91,8 +91,10 @@ func check(rc int) error {
 //
 // A connection serves one goroutine at a time: a statement holds it from its first Bind or Step
 // until Reset (so start with `defer st.Reset()`), and other goroutines that use the connection
-// meanwhile wait for it. Exec, Prepare, Changes and LastInsertRowID hold it for the call (or join
-// the statement the goroutine is running: call Changes and LastInsertRowID before Reset).
+// meanwhile wait for it. Stmt.Exec runs a statement from start to end in one call and gives the
+// connection back before it returns. DB.Exec, Prepare, Changes and LastInsertRowID hold it for
+// the call (or join the statement the goroutine is running: call Changes and LastInsertRowID
+// before Reset).
 func Open(path string) (DB, error) {
 	for i := 0; i < len(path); i++ {
 		if path[i] == 0 { // C would stop at the NUL and open another file
@@ -149,6 +151,58 @@ func (s Stmt) Step() (bool, error) {
 // Reset makes the statement ready to run again, clears its bindings and gives back the
 // connection.
 func (s Stmt) Reset() error { return check(reset(s.h)) }
+
+// Value is an argument to Exec: Int(v), Text(s) or Null() (the zero Value).
+type Value struct {
+	kind int // 0 null, 1 int, 2 text
+	i    int
+	s    string
+}
+
+// Int, Text and Null make Exec's arguments (SQLite copies Text's string when it is bound).
+func Int(v int) Value            { return Value{kind: 1, i: v} }
+func Text(s string) Value from s { return Value{kind: 2, s: s} }
+func Null() Value                { return Value{} }
+
+// Result is what Exec reports, as SQLite does after the statement: LastInsertRowID and Changes,
+// which an INSERT, UPDATE or DELETE sets (after another statement they still hold the
+// connection's last such values).
+type Result struct {
+	LastInsertID int // the rowid of the last row inserted
+	RowsAffected int // how many rows were inserted, updated or deleted
+}
+
+// Exec runs the statement once with args bound to its parameters in order (?1, ?2, ...): it
+// resets it, binds args, steps it to the end (skipping any rows it returns), reads the Result and
+// resets it again. The statement holds the connection only during the call, so there is no Reset
+// to defer.
+func (s Stmt) Exec(args ...Value) (Result, error) {
+	s.Reset()
+	err := s.run(args)
+	var res Result
+	if err == nil {
+		res = Result{LastInsertID: lastInsertRowID(s.db), RowsAffected: changes(s.db)}
+	}
+	s.Reset()
+	return res, err
+}
+
+// run binds args and steps the statement to its end.
+func (s Stmt) run(args []Value) error {
+	for i, v := range args {
+		switch v.kind {
+		case 1:
+			try s.BindInt(i+1, v.i)
+		case 2:
+			try s.BindText(i+1, v.s)
+		default:
+			try s.BindNull(i + 1)
+		}
+	}
+	for try s.Step() {
+	}
+	return nil
+}
 
 func (s Stmt) Finalize() error {
 	dbUse(s.db)

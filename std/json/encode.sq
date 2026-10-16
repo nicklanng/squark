@@ -35,16 +35,22 @@ import (
 // call e.Clear() whenever it fills: Clear empties the buffer but keeps the nesting and comma state,
 // so the next call continues the same document. A call that fails with ErrFull can be retried
 // after draining: set e.Err = nil first.
+//
+// The output is compact unless SetIndent is called first: then it is laid out as Go's
+// json.MarshalIndent lays out the same value, a member or element per line.
 type Encoder struct {
-	buf   []byte
-	a     arena                 // grows buf; nil from NewEncoder
-	top   int                   // a.Used() when buf was last grown: buf ends there while it still is
-	objs  [MaxDepth / 64]uint64 // bit i: level i is an object (else an array)
-	depth int
-	first bool // nothing written yet in the innermost container
-	key   bool // a Key was written: its value is next
-	done  bool // the top-level value has been started
-	Err   error
+	buf    []byte
+	a      arena                 // grows buf; nil from NewEncoder
+	top    int                   // a.Used() when buf was last grown: buf ends there while it still is
+	objs   [MaxDepth / 64]uint64 // bit i: level i is an object (else an array)
+	depth  int
+	first  bool // nothing written yet in the innermost container
+	key    bool // a Key was written: its value is next
+	done   bool // the top-level value has been started
+	indent bool // SetIndent was called: line breaks and indentation
+	prefix string
+	unit   string // the indentation for one level
+	Err    error
 }
 
 // NewEncoder appends to dst, up to its capacity (ErrFull beyond it).
@@ -66,6 +72,26 @@ func (e *Encoder) Bytes() []byte from e { return e.buf }
 // comma comes next, Err), so the calls after it continue the same document: write e.Bytes()
 // somewhere, then call e.Clear(), to stream a large document through a small buffer.
 func (e *Encoder) Clear() { e.buf = e.buf[:0] }
+
+// SetIndent lays out the rest of the output as Go's json.MarshalIndent(v, prefix, indent) lays out
+// the same value: each member or element of a non-empty object or array starts a new line holding
+// prefix and then indent once per level of nesting, the closing bracket starts a line one level
+// out, a colon is followed by a space, and empty objects and arrays stay {} and []. The first line
+// has no prefix and the last no line break, as with MarshalIndent. Raw values are laid out the same
+// way (as Go lays out a json.RawMessage). Call it before the first value: afterwards it sets
+// ErrMisuse.
+func (e *Encoder) SetIndent(prefix, indent string) {
+	if e.Err != nil {
+		return
+	}
+	if e.done {
+		e.fail(ErrMisuse)
+		return
+	}
+	e.indent = true
+	e.prefix = prefix
+	e.unit = indent
+}
 
 // Finish returns Err, after setting it to ErrMisuse if the document isn't complete: nothing was
 // written, or an array or object is still open.
@@ -91,10 +117,18 @@ func (e *Encoder) End() {
 		e.fail(ErrMisuse)
 		return
 	}
-	if !e.room(1) {
+	nl := e.indent && !e.first // a non-empty container closes on a line of its own
+	n := 1
+	if nl {
+		n += e.lineLen(e.depth - 1)
+	}
+	if !e.room(n) {
 		return
 	}
 	e.depth--
+	if nl {
+		e.newline(e.depth)
+	}
 	if e.inObject(e.depth) {
 		e.buf = append(e.buf, '}')
 	} else {
@@ -116,14 +150,24 @@ func (e *Encoder) Key(name string) {
 	if e.first {
 		comma = 0
 	}
-	if !e.room(comma + quotedLen(name) + 1) {
+	n := comma + quotedLen(name) + 1
+	if e.indent {
+		n += e.lineLen(e.depth) + 1 // the line break before it, the space after the colon
+	}
+	if !e.room(n) {
 		return
 	}
 	if comma == 1 {
 		e.buf = append(e.buf, ',')
 	}
+	if e.indent {
+		e.newline(e.depth)
+	}
 	e.buf = AppendString(e.buf, name)
 	e.buf = append(e.buf, ':')
+	if e.indent {
+		e.buf = append(e.buf, ' ')
+	}
 	e.first = false
 	e.key = true
 }
@@ -176,7 +220,8 @@ func (e *Encoder) Null() { e.literal("null") }
 
 // Raw writes b, one complete JSON value encoded already (from another Encoder, a database, a
 // file), as the next value. It is checked as Decoder.Skip checks a value: invalid JSON sets
-// ErrSyntax and writes nothing.
+// ErrSyntax and writes nothing. It is written as it is, whitespace and all (Go's Marshal compacts
+// a json.RawMessage), unless SetIndent was called: then its whitespace is replaced by the layout's.
 func (e *Encoder) Raw(b []byte) {
 	if e.Err != nil {
 		return
@@ -186,17 +231,121 @@ func (e *Encoder) Raw(b []byte) {
 		e.fail(ErrSyntax)
 		return
 	}
-	if e.value(len(b)) {
-		e.buf = append(e.buf, b...)
+	if !e.indent {
+		if e.value(len(b)) {
+			e.buf = append(e.buf, b...)
+		}
+		return
+	}
+	if e.value(e.layout(b, false)) {
+		e.layout(b, true)
 	}
 }
 
 // RawStart is Raw for a value the caller writes itself, for one too large to go through the
-// buffer: it writes what comes before a value here (a comma or nothing) and counts the value as
-// written. The caller then writes exactly one complete JSON value straight after e.Bytes() (drain
-// the buffer and Clear, then json.WriteString(w, s) for a long string, say); it isn't checked.
-// False, writing nothing, if a value can't come next (Err is set).
+// buffer: it writes what comes before a value here (a comma, a line break and indentation, or
+// nothing) and counts the value as written. The caller then writes exactly one complete JSON value
+// straight after e.Bytes() (drain the buffer and Clear, then json.WriteString(w, s) for a long
+// string, say); it isn't checked, nor laid out by SetIndent (to lay out an object or array as Raw
+// would, write it with an Encoder whose prefix is this one's followed by its indent once per open
+// object or array). False, writing nothing, if a value can't come next (Err is set).
 func (e *Encoder) RawStart() bool { return e.value(0) }
+
+// lineLen is the length of a line break and the indentation of a line at nesting level.
+func (e *Encoder) lineLen(level int) int {
+	return 1 + len(e.prefix) + level*len(e.unit)
+}
+
+// newline writes a line break and the indentation of a line at nesting level (room checked).
+func (e *Encoder) newline(level int) {
+	e.buf = append(e.buf, '\n')
+	e.buf = append(e.buf, e.prefix...)
+	for i := 0; i < level; i++ {
+		e.buf = append(e.buf, e.unit...)
+	}
+}
+
+// layout returns the length of b, a valid JSON value, laid out for SetIndent as a value at the
+// current nesting level (its own whitespace dropped, as Go's json.Indent drops it), and writes it
+// too if write is set (room checked).
+func (e *Encoder) layout(b []byte, write bool) int {
+	n := 0
+	level := e.depth
+	i := 0
+	for i < len(b) {
+		c := b[i]
+		j := i + 1 // the end of the token at i, copied as it is unless the case continues
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			i = j
+			continue
+		case '"':
+			for b[j] != '"' {
+				if b[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			j++
+		case '{', '[':
+			k := j
+			for b[k] == ' ' || b[k] == '\t' || b[k] == '\n' || b[k] == '\r' {
+				k++
+			}
+			if b[k] == '}' || b[k] == ']' { // empty: {} or [] as it is
+				j = k + 1
+				n += 2
+				if write {
+					e.buf = append(e.buf, c, b[k])
+				}
+				i = j
+				continue
+			}
+			level++
+			n += 1 + e.lineLen(level)
+			if write {
+				e.buf = append(e.buf, c)
+				e.newline(level)
+			}
+			i = j
+			continue
+		case '}', ']':
+			level--
+			n += e.lineLen(level) + 1
+			if write {
+				e.newline(level)
+				e.buf = append(e.buf, c)
+			}
+			i = j
+			continue
+		case ',':
+			n += 1 + e.lineLen(level)
+			if write {
+				e.buf = append(e.buf, ',')
+				e.newline(level)
+			}
+			i = j
+			continue
+		case ':':
+			n += 2
+			if write {
+				e.buf = append(e.buf, ':', ' ')
+			}
+			i = j
+			continue
+		default: // a number or literal: up to the next delimiter
+			for j < len(b) && b[j] != ' ' && b[j] != '\t' && b[j] != '\n' && b[j] != '\r' && b[j] != ',' && b[j] != ']' && b[j] != '}' {
+				j++
+			}
+		}
+		n += j - i
+		if write {
+			e.buf = append(e.buf, b[i:j]...)
+		}
+		i = j
+	}
+	return n
+}
 
 func (e *Encoder) fail(err error) {
 	if e.Err == nil {
@@ -242,6 +391,7 @@ func (e *Encoder) value(n int) bool {
 		return false
 	}
 	comma := 0
+	nl := false // an array element starts a line with SetIndent
 	if e.depth == 0 {
 		if e.done {
 			e.fail(ErrMisuse)
@@ -252,14 +402,24 @@ func (e *Encoder) value(n int) bool {
 			e.fail(ErrMisuse)
 			return false
 		}
-	} else if !e.first {
-		comma = 1
+	} else {
+		if !e.first {
+			comma = 1
+		}
+		nl = e.indent
 	}
-	if !e.room(comma + n) {
+	sep := comma
+	if nl {
+		sep += e.lineLen(e.depth)
+	}
+	if !e.room(sep + n) {
 		return false
 	}
 	if comma == 1 {
 		e.buf = append(e.buf, ',')
+	}
+	if nl {
+		e.newline(e.depth)
 	}
 	e.first = false
 	e.key = false

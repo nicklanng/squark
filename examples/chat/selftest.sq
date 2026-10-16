@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -54,7 +53,7 @@ task listen(i int) pool 5 {
 
 func connect(i int, name static string, port int) {
 	var buf [32]byte
-	c, err := net.Dial(string(strconv.AppendInt(append(buf[:0], "127.0.0.1:"...), port)))
+	c, err := net.Dial(string(net.AppendHostPort(buf[:0], "127.0.0.1", port)))
 	if err != nil {
 		panic(err)
 	}

@@ -62,7 +62,7 @@ current.
 package main
 
 import (
-    "http"          // standard library packages are imported by name
+    "http"          // standard library packages are imported by path: "http", "math/rand"
     "./mylib"       // packages in your project by relative path
 )
 
@@ -491,6 +491,12 @@ var data [1M]byte
 f := try os.Open(path)
 n, _ := f.ReadFull(data[:])
 
+// command-line flags: Go's flag API, the values kept in the package's fixed storage
+port := flag.Int("port", 8080, "port to listen on")   // names and usage: constant strings
+idle := flag.Duration("idle", 30*time.Second, "idle timeout")
+flag.Parse()                     // -h prints the usage; a bad flag prints Go's message and exits 2
+serve(*port, *idle, flag.Args()) // flag.Arg(i) and flag.NArg() for the positional arguments
+
 // a function returning a new slice: take the output buffer
 func Squares(n int, out []int) []int {
     out = out[:0]
@@ -551,10 +557,11 @@ func main() {
     http.ListenAndServe(http.Port(8080), nil)   // nil: the HandleFunc patterns
 }
 
-// JSON request body: strings decoded into the request's arena, no buffers to size
+// JSON request body: strings decoded into the request's arena, no buffers to size (TextMax: a
+// string over 200 bytes sets json.ErrTooLong in d.Err; Text has no limit)
 d := json.NewDecoderIn(r.Body, r.Arena)
 for k, ok := d.Key(); ok; k, ok = d.Key() {
-    if k == "title" { title, _ = d.Text() } else { d.Skip() }   // lives until the response is done
+    if k == "title" { title, _ = d.TextMax(200) } else { d.Skip() }   // lives until the response is done
 }
 // json.NewEncoder(buf) / NewEncoderIn(nil, a) build JSON outside a handler the same way
 

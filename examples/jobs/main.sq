@@ -14,6 +14,7 @@
 package main
 
 import (
+	"math/rand"
 	"os"
 	"runtime"
 	"sort"
@@ -155,16 +156,13 @@ func countPrimes(lo, hi int) int {
 	return n
 }
 
-// checksum CRCs blockRounds blocks of xorshift output seeded by seed.
+// checksum CRCs blockRounds blocks of random bytes, from a generator seeded by seed.
 func checksum(seed int, buf []byte) int {
-	x := uint64(seed)*0x9E3779B97F4A7C15 + 1
+	r := rand.New(uint64(seed))
 	crc := uint32(0)
-	for r := 0; r < blockRounds; r++ {
+	for round := 0; round < blockRounds; round++ {
 		for i := range buf {
-			x ^= x << 13
-			x ^= x >> 7
-			x ^= x << 17
-			buf[i] = byte(x >> 32)
+			buf[i] = byte(r.Uint64())
 		}
 		crc = crc32(crc, buf)
 	}
@@ -262,24 +260,15 @@ func byValueDesc(a, b Result) bool {
 	return a.ID < b.ID
 }
 
-// appendHex appends v as 8 hex digits (strconv.AppendUintBase doesn't pad).
-func appendHex(dst []byte, v uint32) []byte {
-	const digits = "0123456789abcdef"
-	for shift := 28; shift >= 0; shift -= 4 {
-		dst = append(dst, digits[(v>>uint(shift))&0xF])
-	}
-	return dst
-}
-
 func printRow(r Result) {
 	name := kindNames[r.Kind]
 	var buf [80]byte
 	line := strconv.AppendIntPad(append(buf[:0], "  job "...), r.ID, 2, ' ')
-	line = strings.AppendRepeat(append(append(line, ' '), name...), " ", 9-len(name))
+	line = strings.AppendPadRight(append(line, ' '), name, 9, ' ')
 	if r.Kind == KindPrimes {
 		line = strconv.AppendInt(line, r.Value)
 	} else {
-		line = appendHex(append(line, "0x"...), uint32(r.Value))
+		line = strconv.AppendUintPad(append(line, "0x"...), uint64(uint32(r.Value)), 16, 8, '0')
 	}
 	os.Stdout.Write(append(line, '\n'))
 }
@@ -326,7 +315,7 @@ func report(start time.Time) {
 		printRow(cs[i])
 	}
 	var hex [8]byte
-	println("combined:", string(appendHex(hex[:0], combined)))
+	println("combined:", string(strconv.AppendUintPad(hex[:0], uint64(combined), 16, 8, '0')))
 	println("jobs overlapped (busy time > wall time):", busy > time.Since(start).Microseconds())
 }
 

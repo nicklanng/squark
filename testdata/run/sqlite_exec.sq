@@ -1,0 +1,54 @@
+package main
+
+// sqlite.Stmt.Exec: binds Int, Text and Null in order, runs the statement to its end and reports
+// LastInsertID and RowsAffected; the statement is reset afterwards (other statements and a second
+// Exec run without a Reset), also after a failed bind or step; rows a statement returns are
+// skipped
+
+import "sqlite"
+
+func run() error {
+	db := try sqlite.Open(":memory:")
+	try db.Exec("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT, n INTEGER UNIQUE)")
+	ins := try db.Prepare("INSERT INTO t(name, n) VALUES(?, ?)")
+	res := try ins.Exec(sqlite.Text("a"), sqlite.Int(1))
+	println("insert:", res.LastInsertID, res.RowsAffected)
+	res = try ins.Exec(sqlite.Null(), sqlite.Int(2))
+	println("insert null:", res.LastInsertID, res.RowsAffected)
+	res = try ins.Exec(sqlite.Text("c"), sqlite.Int(3))
+	println("insert:", res.LastInsertID, res.RowsAffected)
+
+	// a constraint failure is the step's error, and the statement is usable afterwards
+	_, err := ins.Exec(sqlite.Text("dup"), sqlite.Int(3))
+	println("duplicate:", err != nil, err.Code(), err.Error())
+	// too many arguments: the bind's error
+	_, err = ins.Exec(sqlite.Text("x"), sqlite.Int(9), sqlite.Int(10))
+	println("too many args:", err != nil, err.Code())
+	res = try ins.Exec(sqlite.Text("d"))
+	println("missing arg is null:", res.LastInsertID, res.RowsAffected)
+
+	upd := try db.Prepare("UPDATE t SET name = ? WHERE id > ?")
+	res = try upd.Exec(sqlite.Text("z"), sqlite.Int(2))
+	println("update:", res.RowsAffected)
+	del := try db.Prepare("DELETE FROM t WHERE id = ?")
+	res = try del.Exec(sqlite.Int(42))
+	println("delete none:", res.RowsAffected)
+
+	// a statement with rows: Exec skips them
+	sel := try db.Prepare("SELECT id FROM t")
+	_ = try sel.Exec()
+
+	// the statements were reset: rows can be read with Step
+	q := try db.Prepare("SELECT id, name IS NULL, n IS NULL FROM t ORDER BY id")
+	defer q.Reset()
+	for try q.Step() {
+		println("row:", q.ColumnInt(0), q.ColumnInt(1), q.ColumnInt(2))
+	}
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		println("error:", err.Error())
+	}
+}

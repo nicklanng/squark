@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -618,16 +619,26 @@ func Doc(dir, pkg string) (string, error) {
 			return "", err
 		}
 		defer os.RemoveAll(tmp)
-		ents, err := fs.ReadDir(squark.Files, "std")
+		// every directory holding .sq files is a package, nested ones (math/rand) included
+		var paths []string
+		seen := map[string]bool{}
+		err = fs.WalkDir(squark.Files, "std", func(p string, e fs.DirEntry, err error) error {
+			if err == nil && !e.IsDir() && strings.HasSuffix(p, ".sq") {
+				dir := strings.TrimPrefix(path.Dir(p), "std/")
+				if !seen[dir] {
+					seen[dir] = true
+					paths = append(paths, dir)
+				}
+			}
+			return err
+		})
 		if err != nil {
 			return "", err
 		}
 		var src strings.Builder
 		src.WriteString("package main\n\nimport (\n")
-		for _, e := range ents {
-			if e.IsDir() {
-				fmt.Fprintf(&src, "\t_%s %q\n", e.Name(), e.Name())
-			}
+		for _, p := range paths {
+			fmt.Fprintf(&src, "\t_%s %q\n", strings.ReplaceAll(p, "/", "_"), p)
 		}
 		src.WriteString(")\n\nfunc main() {}\n")
 		if err := os.WriteFile(filepath.Join(tmp, "main.sq"), []byte(src.String()), 0o644); err != nil {
@@ -654,7 +665,7 @@ func Doc(dir, pkg string) (string, error) {
 		case pkg == "*":
 		case pkg == "" && p != prog.Main:
 			continue
-		case pkg != "" && p.Name != pkg:
+		case pkg != "" && p.Name != pkg && p.Path != pkg:
 			continue
 		}
 		parts = append(parts, compiler.DocPackage(p, p == prog.Main))

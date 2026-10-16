@@ -666,11 +666,21 @@ func TestNotes(t *testing.T) {
 	if code, body := do("GET", "/notes/1", ""); code != 200 || !strings.Contains(body, `"title":"hi"`) || !strings.Contains(body, `first \"note\"`) {
 		t.Errorf("get: %d %q", code, body)
 	}
+	if code, body := do("POST", "/notes", `{"title": "`+strings.Repeat("t", 201)+`", "body": ""}`); code != 400 {
+		t.Errorf("create with a title over 200 bytes: %d %q", code, body)
+	}
 	if code, _ := do("DELETE", "/notes/1", ""); code != 204 {
 		t.Errorf("delete: %d", code)
 	}
 	if code, _ := do("GET", "/notes/1", ""); code != 404 {
 		t.Errorf("get after delete: %d", code)
+	}
+	if code, _ := do("DELETE", "/notes/1", ""); code != 404 {
+		t.Errorf("delete again: %d", code)
+	}
+	code, body = do("POST", "/notes", `{"title": "`+strings.Repeat("t", 200)+`", "body": "second"}`)
+	if code != 201 || !strings.Contains(body, `"id":1`) { // the table was empty: SQLite reuses rowid 1
+		t.Errorf("create with a 200-byte title: %d %q", code, body)
 	}
 }
 

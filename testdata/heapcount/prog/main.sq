@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"flag"
 	"http"
 	"json"
 	"math"
@@ -105,6 +106,13 @@ func get(addr, req string, buf []byte) int {
 
 func main() {
 	time.Sleep(400 * time.Millisecond) // startup count is read here
+	verbose := flag.Bool("v", false, "verbose")
+	every := flag.Duration("every", time.Second, "how often")
+	flag.Parse() // the four arguments are positional
+	if *verbose || flag.NArg() != 4 || flag.Arg(3) != os.Arg(4) || len(flag.Args()) != 4 {
+		panic("flag.Parse")
+	}
+	sum += int(*every)
 	go serve(os.Arg(2))
 	l, err := net.Listen(os.Arg(1))
 	if err != nil {
@@ -177,6 +185,9 @@ func main() {
 			sum++
 		}
 		sum += int(time.Since(time.Now()).Nanoseconds() & 1)
+		if d, err := time.ParseDuration("1h2m3.5s"); err == nil {
+			sum += len(d.String(buf[:]))
+		}
 		c.WriteString("ping")
 		n, _ := c.Read(buf[:])
 		sum += n

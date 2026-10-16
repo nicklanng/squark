@@ -1,0 +1,28 @@
+package main
+
+// Run by TestFlag with several command lines: it prints the parsed flags and the arguments left.
+
+import (
+	"flag"
+	"time"
+)
+
+func main() {
+	port := flag.Int("port", 8080, "port to listen on")
+	db := flag.String("db", "notes.db", "a `file` to keep the notes in")
+	verbose := flag.Bool("v", false, "verbose")
+	idle := flag.Duration("idle", 30*time.Second, "close a connection idle\nfor this long")
+	name := flag.String("name", "", "who to greet")
+	count := flag.Int("count", 0, "how many")
+	color := flag.Bool("color", true, "color the output")
+	before := flag.Parsed()
+	flag.Parse()
+	var buf [32]byte
+	println("port", *port, "db", *db, "v", *verbose, "idle", idle.String(buf[:]))
+	println("name", *name, "count", *count, "color", *color)
+	println("parsed", before, flag.Parsed(), "nflag", flag.NFlag(), "narg", flag.NArg())
+	for i, a := range flag.Args() {
+		println("arg", i, a, flag.Arg(i))
+	}
+	println("out of range:", flag.Arg(-1) == "", flag.Arg(flag.NArg()) == "")
+}

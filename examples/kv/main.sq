@@ -9,7 +9,7 @@
 //
 // Errors are lines starting with -ERR. A connection that sends nothing for a while is closed.
 //
-// Run: squark run examples/kv -port 6380 [-idle ms], then try: nc localhost 6380
+// Run: squark run examples/kv -port 6380 [-idle 30s], then try: nc localhost 6380
 // With no arguments it tests itself: a scripted client over real TCP (selftest.sq).
 //
 // It shows:
@@ -21,6 +21,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"net"
 	"os"
 	"runtime"
@@ -59,13 +60,6 @@ type entry struct {
 type connStats struct {
 	commands int
 	reason   error // why the connection ended: nil after QUIT
-}
-
-// timedConn is a connection whose reads give up with net.ErrTimeout after d without input (never,
-// if d <= 0). bufio.Reader reads from anything with a Read method.
-type timedConn struct {
-	c net.Conn
-	d time.Duration
 }
 
 // The store. Every scheduler thread runs main, so each has its own (thread var): under threads
@@ -197,13 +191,6 @@ func execute(line string, out []byte) (reply []byte, quit bool, err error) {
 
 // ---- connections ----
 
-func (t timedConn) Read(p []byte) (int, error) {
-	if t.d <= 0 {
-		return t.c.Read(p)
-	}
-	return t.c.ReadTimeout(p, t.d)
-}
-
 task serveConn(c net.Conn, idle time.Duration) pool 64 {
 	defer c.Close()
 	var lines [maxLine - 1]byte // room for the longest line (bufio needn't store its newline)
@@ -213,7 +200,8 @@ task serveConn(c net.Conn, idle time.Duration) pool 64 {
 	var out [maxKeys*(maxKey+2) + 32]byte
 	stats := connStats{}
 	for {
-		line, err := r.ReadLine(timedConn{c, idle})
+		// each read gives up with net.ErrTimeout after idle without input (never, if idle <= 0)
+		line, err := r.ReadLine(c.WithTimeout(idle))
 		switch err {
 		case net.ErrTimeout:
 			err = ErrIdle
@@ -268,26 +256,16 @@ task acceptLoop(l net.Listener, idle time.Duration) pool 1 {
 // ---- main ----
 
 func main() {
-	port := -1
-	idle := 30 * time.Second
-	for i := 1; i < os.NArgs(); i++ {
-		switch os.Arg(i) {
-		case "-port", "--port":
-			i++
-			port, _ = strconv.Atoi(os.Arg(i))
-		case "-idle", "--idle":
-			i++
-			ms, _ := strconv.Atoi(os.Arg(i))
-			idle = time.Duration(ms) * time.Millisecond
-		}
-	}
-	if port < 0 {
+	port := flag.Int("port", -1, "port to listen on (without it, kv tests itself)")
+	idle := flag.Duration("idle", 30*time.Second, "close a connection idle for this long")
+	flag.Parse()
+	if *port < 0 {
 		selfTest()
 		return
 	}
 
 	var buf [32]byte
-	addr := string(strconv.AppendInt(append(buf[:0], ':'), port))
+	addr := string(net.AppendHostPort(buf[:0], "", *port))
 	l, err := net.Listen(addr) // every thread listens: the kernel spreads connections over them
 	if err != nil {
 		println("listen:", err.Error())
@@ -296,6 +274,6 @@ func main() {
 	if runtime.Shard() == 0 {
 		println("kv listening on", addr, "with", runtime.Shards(), "threads")
 	}
-	go acceptLoop(l, idle)
+	go acceptLoop(l, *idle)
 	select {} // serve until killed
 }

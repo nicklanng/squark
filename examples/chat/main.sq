@@ -73,13 +73,6 @@ type Hub struct {
 	sent, dropped      int
 }
 
-// timedConn is a connection whose reads give up with net.ErrTimeout after d without input.
-// bufio.Reader reads from anything with a Read method.
-type timedConn struct {
-	c net.Conn
-	d time.Duration
-}
-
 // Threads share no memory, so the room is split by owner: shard 0 runs the hub, which keeps the
 // room's state, and each shard runs a relay that owns the sockets of the clients handed to it.
 // They talk over shared channels, whose elements can't hold references: text crosses threads in
@@ -109,19 +102,17 @@ func (l *Line) Add(parts ...string) {
 	}
 }
 
-func (t timedConn) Read(p []byte) (int, error) { return t.c.ReadTimeout(p, t.d) }
-
 // ---- clients' shards: sessions and relays ----
 
 // session reads one client's lines and passes them to the hub; its relay does the writing.
 task session(c net.Conn, id int) pool MaxClients {
 	var buf [MaxLine]byte
 	r := bufio.NewReader(buf[:])
-	src := timedConn{c, loginTimeout}
+	src := c.WithTimeout(loginTimeout) // its reads give up with net.ErrTimeout
 	m := Msg{ID: id}
 	for m.Kind != EvLeave {
 		text, err := r.ReadLine(src)
-		src.d = IdleTimeout
+		src = c.WithTimeout(IdleTimeout)
 		m.Kind = EvLeave
 		switch {
 		case err == bufio.ErrTooLong:

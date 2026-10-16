@@ -187,12 +187,13 @@ budget 128M
 
 ```
 $ squark build examples/notes
-memory: worst case 96.7 MiB of 128.0 MiB budget
-  code                           80.0 KiB
-  static data                   464.0 KiB   package variables, arenas, channel buffers, goroutine tables
-  task http.serveConn            96.0 MiB   = 512 × 192.0 KiB stack (proven 185664 B)
-  main goroutine                144.0 KiB   = 1 × 144.0 KiB stack (proven 132288 B)
-  task http.wakeIdle             16.0 KiB   = 1 × 16.0 KiB stack (proven 9280 B)
+memory: worst case 97.1 MiB of 128.0 MiB budget
+  code                          112.0 KiB
+  static data                   576.0 KiB   package variables, arenas, channel buffers, goroutine tables
+  task http.serveConn            96.0 MiB   = 512 × 192.0 KiB stack (proven 187952 B)
+  main goroutine                144.0 KiB   = 1 × 144.0 KiB stack (proven 132432 B)
+  task http.wakeIdle             16.0 KiB   = 1 × 16.0 KiB stack (proven 9328 B)
+  blocking-call helpers         320.0 KiB   = 2 × 160.0 KiB stack: threads that run blocking and detached C calls
   C libraries                 not counted   sqlite3 manages its own memory
 ```
 

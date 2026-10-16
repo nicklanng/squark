@@ -1,0 +1,71 @@
+two spaces:
+{
+  "id": 7,
+  "tags": [
+    "a",
+    "b"
+  ],
+  "none": [],
+  "empty": {},
+  "raw": {
+    "x": [
+      1,
+      {},
+      [],
+      "a,b:{"
+    ],
+    "y": {
+      "z": null
+    }
+  },
+  "deep": [
+    [
+      {
+        "k": true
+      }
+    ]
+  ]
+}
+prefix and tab:
+{
+> 	"id": 7,
+> 	"tags": [
+> 		"a",
+> 		"b"
+> 	],
+> 	"none": [],
+> 	"empty": {},
+> 	"raw": {
+> 		"x": [
+> 			1,
+> 			{},
+> 			[],
+> 			"a,b:{"
+> 		],
+> 		"y": {
+> 			"z": null
+> 		}
+> 	},
+> 	"deep": [
+> 		[
+> 			{
+> 				"k": true
+> 			}
+> 		]
+> 	]
+> }
+no indent:
+[
+1,
+2
+]
+scalar:
+"top"
+late SetIndent:
+[ err: json: encoder call out of place
+full: json: output does not fit in buffer 7 [
+    1
+after Clear:
+,
+    2
+]

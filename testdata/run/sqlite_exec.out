@@ -1,0 +1,12 @@
+insert: 1 1
+insert null: 2 1
+insert: 3 1
+duplicate: true 19 constraint failed
+too many args: true 25
+missing arg is null: 4 1
+update: 2
+delete none: 0
+row: 1 0 0
+row: 2 1 0
+row: 3 0 0
+row: 4 0 1

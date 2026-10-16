@@ -17,11 +17,12 @@ import (
 )
 
 // jsonEncoderProg drives std/json's Encoder from commands on stdin, one per line, through three
-// encoders at once: one with a large buffer, one streaming through a 32-byte buffer (draining and
+// encoders at once: one with a large buffer, one streaming through a 64-byte buffer (draining and
 // retrying on ErrFull, with RawStart for values longer than the buffer) and one growing into an
 // arena from nil. Commands: { [ ] (Object, Array, End), k/s/r <hex> (Key, String, Raw),
-// i <int>, f <float64 bits>, t, F, n (true, false, null), and . to finish the document, which
-// prints "ok <output>" if all three agree and Finish succeeds, or "err <message>".
+// i <int>, f <float64 bits>, t, F, n (true, false, null), I <hex>,<hex> (SetIndent with that
+// prefix and indent), and . to finish the document, which prints "ok <length>" and the output if
+// all three agree and Finish succeeds, or "err <message>".
 const jsonEncoderProg = `package main
 
 import (
@@ -37,16 +38,36 @@ import (
 var lineStore [256K]byte
 var bigStore [256K]byte
 var streamStore [256K]byte
-var small [32]byte
+var small [64]byte
 var arg [128K]byte
+var rawStore [256K]byte
+
+// SetIndent's arguments, and how deeply the document is nested, for laying out a Raw value that
+// goes through RawStart
+var prefix, indent, nested [256]byte
+var plen, ilen, depth int
 
 func unhex(s string) []byte static {
+	return unhexTo(s, arg[:])
+}
+
+func unhexTo(s string, dst []byte) []byte from dst {
 	n := 0
 	for i := 0; i+1 < len(s); i += 2 {
-		arg[n] = nib(s[i])<<4 | nib(s[i+1])
+		dst[n] = nib(s[i])<<4 | nib(s[i+1])
 		n++
 	}
-	return arg[:n]
+	return dst[:n]
+}
+
+// setIndent parses "I <hex>,<hex>" into prefix and indent.
+func setIndent(line string) {
+	i := 2
+	for line[i] != ',' {
+		i++
+	}
+	plen = len(unhexTo(line[2:i], prefix[:]))
+	ilen = len(unhexTo(line[i+1:], indent[:]))
 }
 
 func nib(c byte) byte {
@@ -89,6 +110,8 @@ func apply(e *json.Encoder, line string, b []byte) {
 		e.Bool(false)
 	case 'n':
 		e.Null()
+	case 'I':
+		e.SetIndent(string(prefix[:plen]), string(indent[:ilen]))
 	}
 }
 
@@ -115,8 +138,18 @@ func stream(e *json.Encoder, out *bytes.Buffer, line string, b []byte) {
 		e.Clear()
 		if line[0] == 's' {
 			json.WriteString(out, string(b))
-		} else {
+		} else if plen < 0 {
 			out.Write(b)
+		} else {
+			// laid out as Raw would: the prefix carries the indentation of the open containers
+			n := copy(nested[:], prefix[:plen])
+			for i := 0; i < depth; i++ {
+				n += copy(nested[n:], indent[:ilen])
+			}
+			r := json.NewEncoder(rawStore[:0])
+			r.SetIndent(string(nested[:n]), string(indent[:ilen]))
+			r.Raw(b)
+			out.Write(r.Bytes())
 		}
 	}
 }
@@ -127,6 +160,7 @@ func main() {
 		big := json.NewEncoder(bigStore[:0])
 		streamed := json.NewEncoder(small[:0])
 		out := bytes.NewBuffer(streamStore[:0])
+		plen, ilen, depth = -1, 0, 0
 		arena a 1M {
 			grown := json.NewEncoderIn(nil, a)
 			for {
@@ -138,12 +172,21 @@ func main() {
 					break
 				}
 				var b []byte
-				if line[0] == 'k' || line[0] == 's' || line[0] == 'r' {
+				switch line[0] {
+				case 'k', 's', 'r':
 					b = unhex(line[2:])
+				case 'I':
+					setIndent(line)
 				}
 				apply(&big, line, b)
 				apply(&grown, line, b)
 				stream(&streamed, &out, line, b)
+				switch line[0] {
+				case '{', '[':
+					depth++
+				case ']':
+					depth--
+				}
 			}
 			err := big.Finish()
 			serr := streamed.Finish()
@@ -186,7 +229,7 @@ func (g *jsonGen) cmd(format string, args ...any) {
 func (g *jsonGen) str(maxLen int, long bool) string {
 	n := g.r.Intn(maxLen + 1)
 	if long && g.r.Intn(20) == 0 {
-		n = 40 + g.r.Intn(200) // longer than the streaming buffer
+		n = 64 + g.r.Intn(200) // longer than the streaming buffer
 	}
 	var b []byte
 	for len(b) < n {
@@ -485,8 +528,10 @@ func (g *jsonGen) misuseDoc() bool {
 
 // TestJSONEncoderRandom encodes random documents with std/json's Encoder (whole, streamed through
 // a small buffer, and grown in an arena: all three must agree) and checks that Go's encoding/json
-// parses the output back to the same values; random call sequences, valid or not, must either
-// make valid JSON or set an error, as a model of the encoder predicts.
+// parses the output back to the same values; encodes them again after SetIndent, which must give
+// what Go's json.Indent makes of the compact output; and random call sequences, valid or not (half
+// of them indented), must either make valid JSON or set an error, as a model of the encoder
+// predicts.
 func TestJSONEncoderRandom(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "main.sq"), []byte(jsonEncoderProg), 0o644); err != nil {
@@ -499,13 +544,30 @@ func TestJSONEncoderRandom(t *testing.T) {
 	g := &jsonGen{r: rand.New(rand.NewSource(1))}
 	const docs, misuses = 1500, 1500
 	var wants []any
+	var docCmds []string
 	for i := 0; i < docs; i++ {
 		g.size = 0
+		start := g.cmds.Len()
 		wants = append(wants, g.value(0, false))
 		g.cmd(".")
+		docCmds = append(docCmds, g.cmds.String()[start:])
+	}
+	// the same documents again, indented: the output must be what Go's json.Indent makes of the
+	// compact one (prefixes and indents of up to 2 bytes, so a key's line fits the streaming buffer)
+	prefixes := []string{"", " ", "\t", ">", "  ", "\r\n"}
+	indents := []string{"", " ", "  ", "\t", "-", "\t "}
+	var layouts [][2]string
+	for i := 0; i < docs; i++ {
+		l := [2]string{prefixes[g.r.Intn(len(prefixes))], indents[g.r.Intn(len(indents))]}
+		layouts = append(layouts, l)
+		g.cmd("I %x,%x", l[0], l[1])
+		g.cmds.WriteString(docCmds[i])
 	}
 	var valid []bool
 	for i := 0; i < misuses; i++ {
+		if g.r.Intn(2) == 0 { // whitespace of a byte at most: misuse documents nest 16 deep
+			g.cmd("I %x,%x", []string{"", " "}[g.r.Intn(2)], []string{"", " ", "\t"}[g.r.Intn(3)])
+		}
 		valid = append(valid, g.misuseDoc())
 		g.cmd(".")
 	}
@@ -537,8 +599,8 @@ func TestJSONEncoderRandom(t *testing.T) {
 		}
 		lines = append(lines, line)
 	}
-	if len(lines) != docs+misuses {
-		t.Fatalf("%d lines of output for %d documents", len(lines), docs+misuses)
+	if len(lines) != 2*docs+misuses {
+		t.Fatalf("%d lines of output for %d documents", len(lines), 2*docs+misuses)
 	}
 	bad := 0
 	for i, want := range wants {
@@ -559,8 +621,29 @@ func TestJSONEncoderRandom(t *testing.T) {
 			}
 		}
 	}
+	for i, l := range layouts {
+		plain, indented := lines[i], lines[docs+i]
+		doc, ok := strings.CutPrefix(plain, "ok ")
+		if !ok {
+			if indented != plain {
+				bad++
+				t.Errorf("indented document %d: got %.300q, without SetIndent %.300q", i, indented, plain)
+			}
+			continue
+		}
+		var want bytes.Buffer
+		if err := json.Indent(&want, []byte(doc), l[0], l[1]); err != nil {
+			t.Fatal(err)
+		}
+		if indented != "ok "+want.String() {
+			bad++
+			if bad <= 5 {
+				t.Errorf("indented document %d (prefix %q, indent %q): got\n%.600s\nwant\n%.600s", i, l[0], l[1], indented, want.String())
+			}
+		}
+	}
 	for i, v := range valid {
-		line := lines[docs+i]
+		line := lines[2*docs+i]
 		doc, ok := strings.CutPrefix(line, "ok ")
 		switch {
 		case ok && !json.Valid([]byte(doc)):
