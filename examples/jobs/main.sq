@@ -1,9 +1,16 @@
-// jobs: a job runner spread over scheduler threads. Every thread runs the same main, which starts
-// its workers; they select over shared job and quit channels with an idle timeout. CPU-heavy jobs
-// (count primes, checksum generated data) run in a preemptible task so they don't hold up their
-// thread, and "I/O" jobs call a C function in fetch.c declared `blocking`, which waits on a helper
-// thread. Lookup tables are `shared var`s computed once at startup; per-thread counters are
-// `thread var`s. Shard 0 feeds the jobs, collects the results, sorts them and prints a summary.
+// jobs: a job runner spread over scheduler threads. Every thread runs main, which starts its
+// workers; shard 0 also feeds in 48 jobs of three kinds (count primes, checksum generated data,
+// fetch a record), collects the results and prints a summary.
+//
+//	squark run examples/jobs
+//
+// It shows:
+//   - threads N: a copy of main per scheduler thread, joined by shared channels
+//   - select over shared channels with an idle timeout (time.After)
+//   - a preemptible task for CPU-heavy work, so it doesn't hold up its thread
+//   - a blocking C extern (fetch.c) that waits on a helper thread
+//   - lookup tables computed once at startup (shared var), counters per thread (thread var)
+//   - sort.Slice and sort.IsSorted on a vector of structs
 package main
 
 import (
@@ -11,6 +18,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,7 +33,7 @@ const (
 	perKind     = 16
 	numJobs     = 3 * perKind
 	primeSpan   = 500000 // each primes job counts primes in [i*primeSpan, (i+1)*primeSpan)
-	blockSize   = 16K   // bytes per checksum round
+	blockSize   = 16K    // bytes per checksum round
 	blockRounds = 128
 	fetchSize   = 4K
 	fetchMillis = 20
@@ -60,20 +68,25 @@ type PrimeTable struct {
 	P [500]int
 }
 
+// The tables are computed once, on the first thread before the others start, and are read-only
+// afterwards: every thread reads the same copy, with no locks.
 shared var crcTable = makeCRCTable()
 shared var smallPrimes = makePrimes()
 
+// Shared channels are one channel for all threads. Their elements hold no references (no
+// strings or slices), since a reference could view one thread's own memory.
 shared var jobs chan Job cap 16
 shared var results chan Result cap 16
 shared var quit chan int cap 0
 shared var tallies chan Tally cap 8
 
+// Each thread has its own copy of these, on purpose.
 thread var done chan int cap workers
 thread var handled int
 thread var idle int
 thread var collected [..numJobs]Result
 
-extern "jobs_fetch" func fetch(id int, buf []byte, ms int) int stack 8K blocking
+// ---- startup tables ----
 
 func makeCRCTable() [256]uint32 {
 	var t [256]uint32
@@ -105,6 +118,8 @@ func makePrimes() PrimeTable {
 	}
 	return t
 }
+
+// ---- CPU-heavy jobs ----
 
 func crc32(crc uint32, b []byte) uint32 {
 	crc = ^crc
@@ -172,6 +187,12 @@ task crunch(j Job) pool 4 preemptible {
 	results <- r
 }
 
+// ---- I/O jobs ----
+
+// fetch is a slow C call (fetch.c). Declared blocking, each call runs on a helper thread while
+// the calling goroutine waits, so the other goroutines of its thread keep running.
+extern "jobs_fetch" func fetch(id int, buf []byte, ms int) int stack 8K blocking
+
 // fetchJob runs an I/O job in the worker itself: the blocking extern parks only this goroutine.
 func fetchJob(j Job) Result {
 	start := time.Now()
@@ -179,6 +200,8 @@ func fetchJob(j Job) Result {
 	n := fetch(j.Arg, buf[:], fetchMillis)
 	return Result{j.ID, j.Kind, int(crc32(0, buf[:n])), time.Since(start).Microseconds()}
 }
+
+// ---- workers, feeding and collecting ----
 
 task worker() pool workers {
 	for {
@@ -223,6 +246,8 @@ task collector() pool 1 {
 	close(quit)
 }
 
+// ---- the report ----
+
 func byKindThenID(a, b Result) bool {
 	if a.Kind != b.Kind {
 		return a.Kind < b.Kind
@@ -237,7 +262,7 @@ func byValueDesc(a, b Result) bool {
 	return a.ID < b.ID
 }
 
-// appendHex appends v as 8 hex digits (strconv only formats decimal).
+// appendHex appends v as 8 hex digits (strconv.AppendUintBase doesn't pad).
 func appendHex(dst []byte, v uint32) []byte {
 	const digits = "0123456789abcdef"
 	for shift := 28; shift >= 0; shift -= 4 {
@@ -247,27 +272,20 @@ func appendHex(dst []byte, v uint32) []byte {
 }
 
 func printRow(r Result) {
+	name := kindNames[r.Kind]
 	var buf [80]byte
-	line := append(buf[:0], "  job "...)
-	if r.ID < 10 {
-		line = append(line, ' ')
-	}
-	line = strconv.AppendInt(line, r.ID)
-	line = append(line, ' ')
-	line = append(line, kindNames[r.Kind]...)
-	for i := len(kindNames[r.Kind]); i < 9; i++ {
-		line = append(line, ' ')
-	}
+	line := strconv.AppendIntPad(append(buf[:0], "  job "...), r.ID, 2, ' ')
+	line = strings.AppendRepeat(append(append(line, ' '), name...), " ", 9-len(name))
 	if r.Kind == KindPrimes {
 		line = strconv.AppendInt(line, r.Value)
 	} else {
-		line = append(line, "0x"...)
-		line = appendHex(line, uint32(r.Value))
+		line = appendHex(append(line, "0x"...), uint32(r.Value))
 	}
-	line = append(line, '\n')
-	os.Stdout.Write(line)
+	os.Stdout.Write(append(line, '\n'))
 }
 
+// report prints the results. Timings and which thread ran which job vary from run to run, so it
+// prints only what must hold.
 func report(start time.Time) {
 	rs := collected[:]
 	sort.Slice(rs, byKindThenID)
@@ -309,8 +327,6 @@ func report(start time.Time) {
 	}
 	var hex [8]byte
 	println("combined:", string(appendHex(hex[:0], combined)))
-
-	// timings vary from run to run, so print only what must hold
 	println("jobs overlapped (busy time > wall time):", busy > time.Since(start).Microseconds())
 }
 
@@ -341,7 +357,6 @@ func main() {
 			used++
 		}
 	}
-	// which thread ran which job varies; print only the aggregate
 	println("every job handled once:", total == numJobs)
 	println("threads used > 1:", used > 1 || runtime.Shards() == 1)
 }

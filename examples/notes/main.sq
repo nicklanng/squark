@@ -1,12 +1,18 @@
-// notes is a JSON REST API backed by SQLite. Every request is served without touching the heap:
-// request and response buffers live on the connection goroutine's stack, whose size the compiler
-// proves; SQLite manages its own memory behind the C boundary.
+// notes is a JSON REST API backed by SQLite, and the benchmark server (bench/run.sh):
 //
 //	GET    /health       -> ok
-//	GET    /notes        -> newest 100 notes
+//	GET    /notes        -> the newest 100 notes
 //	POST   /notes        -> {"title": "...", "body": "..."} -> 201 {"id": N}
 //	GET    /notes/{id}   -> the note, or 404
 //	DELETE /notes/{id}   -> 204, or 404
+//
+//	squark run examples/notes [-port 8080] [-db notes.db]
+//
+// It shows:
+//   - requests served without a heap: buffers on the connection goroutine's proven stack
+//   - a memory budget the build checks, with the connection pool sized to fit it
+//   - http.HandleFunc routing, w.JSON() and a JSON request body decoded into r.Arena
+//   - SQLite prepared statements, one connection per scheduler thread (thread var)
 package main
 
 import (
@@ -15,7 +21,6 @@ import (
 	"os"
 	"sqlite"
 	"strconv"
-	"strings"
 )
 
 // At most 512 connections are served at once (more wait for a slot; idle keep-alive
@@ -24,13 +29,23 @@ budget 128M
 pool http.serveConn 512
 
 const (
-	maxTitle  = 200
-	maxBody   = 4000
-	listLimit = 100
+	maxTitle = 200
+	maxBody  = 4000
 )
 
-// Store holds the connection and prepared statements. All goroutines share one OS thread and
-// SQLite calls never yield, so a statement is never used by two requests at once.
+const (
+	sqlPragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
+	sqlSchema  = "CREATE TABLE IF NOT EXISTS notes(" +
+		"id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL)"
+	sqlInsert = "INSERT INTO notes(title, body) VALUES(?, ?)"
+	sqlGet    = "SELECT id, title, body FROM notes WHERE id = ?"
+	sqlList   = "SELECT id, title, body FROM notes ORDER BY id DESC LIMIT 100"
+	sqlDelete = "DELETE FROM notes WHERE id = ?"
+)
+
+// Store holds the connection and prepared statements. A statement holds the connection from its
+// first Bind or Step until Reset (hence `defer st.Reset()`), so other requests that use it wait
+// meanwhile: it is never used by two requests at once.
 type Store struct {
 	db     sqlite.DB
 	insert sqlite.Stmt
@@ -41,31 +56,28 @@ type Store struct {
 
 thread var store Store // each scheduler thread opens its own connection
 
+// ---- store ----
+
 func openStore(path string) error {
-	db, err := sqlite.Open(path)
-	if err != nil {
-		return err
-	}
-	if err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"); err != nil {
-		return err
-	}
-	if err := db.Exec("CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL)"); err != nil {
-		return err
-	}
+	db := try sqlite.Open(path)
+	try db.Exec(sqlPragmas)
+	try db.Exec(sqlSchema)
 	store.db = db
-	if store.insert, err = db.Prepare("INSERT INTO notes(title, body) VALUES(?, ?)"); err != nil {
-		return err
-	}
-	if store.get, err = db.Prepare("SELECT id, title, body FROM notes WHERE id = ?"); err != nil {
-		return err
-	}
-	if store.list, err = db.Prepare("SELECT id, title, body FROM notes ORDER BY id DESC LIMIT 100"); err != nil {
-		return err
-	}
-	if store.del, err = db.Prepare("DELETE FROM notes WHERE id = ?"); err != nil {
-		return err
-	}
+	store.insert = try db.Prepare(sqlInsert)
+	store.get = try db.Prepare(sqlGet)
+	store.list = try db.Prepare(sqlList)
+	store.del = try db.Prepare(sqlDelete)
 	return nil
+}
+
+// insertNote adds a note and returns its id.
+func insertNote(title, body string) (int, error) {
+	st := store.insert
+	defer st.Reset()
+	try st.BindText(1, title)
+	try st.BindText(2, body)
+	try st.Step()
+	return store.db.LastInsertRowID(), nil // read before Reset gives the connection back
 }
 
 // ---- responses ----
@@ -85,7 +97,8 @@ func internalError(w *http.ResponseWriter, err error) {
 	fail(w, 500, "internal error")
 }
 
-// writeNote writes the current row of st as {"id":..,"title":..,"body":..}.
+// writeNote writes the current row of st as {"id":..,"title":..,"body":..}. The column text is
+// copied into buffers on this goroutine's stack, sized for the longest note createNote accepts.
 func writeNote(j *http.JSON, st sqlite.Stmt) error {
 	var title [maxTitle]byte
 	var body [maxBody]byte
@@ -102,29 +115,28 @@ func writeNote(j *http.JSON, st sqlite.Stmt) error {
 	return nil
 }
 
+// writeNotes writes each remaining row of st.
+func writeNotes(j *http.JSON, st sqlite.Stmt) error {
+	for try st.Step() {
+		try writeNote(j, st)
+	}
+	return nil
+}
+
 // ---- handlers ----
 
 // GET /health
 func health(w *http.ResponseWriter, r *http.Request) { w.Text(200, "ok") }
 
-// GET /notes: the newest listLimit notes
+// GET /notes: the newest 100 notes
 func listNotes(w *http.ResponseWriter, r *http.Request) {
 	st := store.list
 	defer st.Reset()
 	j := w.JSON()
 	j.Array()
-	for {
-		row, err := st.Step()
-		if err == nil && row {
-			err = writeNote(j, st)
-		}
-		if err != nil {
-			internalError(w, err)
-			return
-		}
-		if !row {
-			break
-		}
+	if err := writeNotes(j, st); err != nil {
+		internalError(w, err)
+		return
 	}
 	j.End()
 }
@@ -179,17 +191,8 @@ func createNote(w *http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "bad request")
 		return
 	}
-	st := store.insert
-	defer st.Reset()
-	if err := st.BindText(1, title); err != nil {
-		internalError(w, err)
-		return
-	}
-	if err := st.BindText(2, body); err != nil {
-		internalError(w, err)
-		return
-	}
-	if _, err := st.Step(); err != nil {
+	id, err := insertNote(title, body)
+	if err != nil {
 		internalError(w, err)
 		return
 	}
@@ -197,7 +200,7 @@ func createNote(w *http.ResponseWriter, r *http.Request) {
 	j := w.JSON()
 	j.Object()
 	j.Key("id")
-	j.Int(store.db.LastInsertRowID())
+	j.Int(id)
 	j.End()
 }
 

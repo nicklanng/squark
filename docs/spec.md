@@ -640,6 +640,14 @@ the temporary files and exits with 128+n.
 ## 11. A complete program
 
 ```go
+// count is an HTTP server with SQLite: it reports how many rows a table holds.
+//
+//    squark run examples/count
+//    curl localhost:8080/count
+//
+// It shows:
+//   - a SQLite statement prepared once and reused by every request
+//   - try, where an error only propagates
 package main
 
 import (
@@ -667,11 +675,7 @@ func count(w *http.ResponseWriter, r *http.Request) {
 }
 
 func setup() error {
-    d, err := sqlite.Open("app.db")
-    if err != nil {
-        return err
-    }
-    db = d
+    db = try sqlite.Open("app.db")
     try db.Exec("CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY)")
     countStmt = try db.Prepare("SELECT count(*) FROM items")
     return nil

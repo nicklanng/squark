@@ -1,0 +1,48 @@
+package main
+
+import "time"
+
+// selftest runs when the pipeline is done: a few language checks that ride along with this
+// example's test (expected.out), then a wait for the ticker and a check of the clock.
+func selftest(start time.Time) {
+	q, r := divmod(17, 5)
+	println("17/5 =", q, "rem", r, classify(-3), classify(0), classify(4), classify(7))
+
+	a := Job{ID: 1, Input: 2}
+	b := Job{ID: 1, Input: 2}
+	println("struct equality:", a == b, a != Job{ID: 2})
+
+outer:
+	for i := 0; i < 5; i++ {
+		for j := 0; j < 5; j++ {
+			if i*j == 6 {
+				println("found", i, j)
+				break outer
+			}
+			if j > i {
+				continue outer
+			}
+		}
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	println("elapsed > 10ms:", time.Since(start) > 10*time.Millisecond)
+}
+
+func classify(n int) string {
+	switch {
+	case n < 0:
+		return "negative"
+	case n == 0:
+		return "zero"
+	case n%2 == 0:
+		return "even"
+	}
+	return "odd"
+}
+
+func divmod(a, b int) (q, r int) {
+	q = a / b
+	r = a % b
+	return
+}

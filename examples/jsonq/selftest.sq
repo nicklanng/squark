@@ -1,0 +1,31 @@
+package main
+
+// sample is the input when jsonq runs without a FILE, as in its test (expected.out). Records 4 to
+// 12 are each bad in a different way, and are reported by line: keep their line breaks.
+const sample = `[
+{"id": 1, "customer": "ann", "status": "paid",
+  "items": [{"sku": "a1", "qty": 2, "price": 350}, {"sku": "b7", "qty": 1, "price": 1299}]},
+{"id": 2, "customer": "bob", "status": "pending", "items": [{"sku": "a1", "qty": 1, "price": 350}]},
+{"id": 3, "customer": "cy \"the kid\"", "status": "shipped",
+  "note": {"gift": true, "tags": ["x", "]"]}, "items": [{"sku": "c3", "qty": 5, "price": 499}]},
+{"customer": "dan", "status": "paid", "items": [{"sku": "a1", "qty": 1, "price": 350}]},
+{"id": 5, "customer": "eve", "status": "lost", "items": [{"sku": "a1", "qty": 1, "price": 350}]},
+{"id": 6, "customer": "fay", "status": "paid", "items": [{"sku": "d4", "qty": 0, "price": 100}]},
+{"id": 7, "customer": "gus", "status": "paid", "items": [{"sku": "d4", "qty": 1, "price": "100"}]},
+{"id": 8, "customer": "hal", "status": "paid", "items": [{"sku": "d4", "qty": 1, "price": 1.5}]},
+{"id": 9, "customer": null, "status": "paid", "items": [{"sku": "d4", "qty": 1, "price": 100}]},
+{"id": 2, "customer": "bob", "status": "paid", "items": [{"sku": "b7", "qty": 1, "price": 1299}]},
+{"id": 11, "customer": "ivy", "status": "paid", "items": []},
+42,
+{"id": 13, "customer": "ann", "status": "shipped",
+  "items": [{"sku": "c3", "qty": 2, "price": 499}, {"sku": "crème", "qty": 3, "price": 250}]},
+{"id": 14, "customer": "bob", "status": "refunded",
+  "items": [{"sku": "b7", "qty": 1, "price": 1299}]},
+{"id": 15, "customer": "ann", "status": "pending", "items": [{"sku": "a1", "qty": 4, "price": 350}]}
+]
+`
+
+// sampleInput copies the sample into buf.
+func sampleInput(buf []byte) []byte {
+	return buf[:copy(buf, sample)]
+}

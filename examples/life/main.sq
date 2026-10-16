@@ -1,10 +1,14 @@
-// life: Conway's Game of Life (and its HighLife variant) and an ASCII Mandelbrot set: pure
-// computation with no heap. It shows 2-D arrays as package-level storage and as values (boards
-// copied into a vector of frames, compared with ==), a lookup table built at start-up in a shared
-// var, rules as func values, value and pointer receivers, constant pattern tables, anytype helpers
-// taking tables and vectors of any length, labeled loops, switch, math, strconv and a
-// bytes.Buffer. The long run, a census of random soups, is a preemptible task, so a ticker on the
-// same thread keeps sampling its progress. Pass a number to change the glider's generations.
+// life runs Conway's Game of Life (and its HighLife variant), draws an ASCII Mandelbrot set and
+// takes a census of random soups: pure computation, with no heap.
+//
+//	squark run examples/life [generations]   (the glider's generations, 1..63; default 12)
+//
+// It shows:
+//   - 2-D arrays as package storage and as values: boards copied into frames, compared with ==
+//   - a lookup table computed at start-up into a shared var, and rules as func values
+//   - constant pattern tables, and anytype helpers taking tables and vectors of any length
+//   - a preemptible task: a long computation that shares its thread with a ticker
+//   - a bytes.Buffer over package storage that never grows, checked before printing
 package main
 
 import (
@@ -20,6 +24,39 @@ const (
 	cols = 20
 )
 
+const (
+	ruleConway = iota
+	ruleHighLife
+)
+
+const ruleNames = [2]string{"conway", "highlife"}
+
+// seed patterns, as (row, col) offsets
+const (
+	glider     = [5][2]int{{0, 1}, {1, 2}, {2, 0}, {2, 1}, {2, 2}}
+	blinker    = [3][2]int{{0, 0}, {0, 1}, {0, 2}}
+	rPentomino = [5][2]int{{0, 1}, {0, 2}, {1, 0}, {1, 1}, {2, 1}}
+	replicator = [12][2]int{
+		{0, 2}, {0, 3}, {0, 4}, {1, 1}, {1, 4}, {2, 0},
+		{2, 4}, {3, 0}, {3, 3}, {4, 0}, {4, 1}, {4, 2},
+	}
+)
+
+// the soup census
+const (
+	soups     = 400  // random starting boards
+	soupGens  = 1500 // generations before a soup counts as still changing
+	maxPeriod = 16   // the longest cycle the census recognises
+)
+
+// the Mandelbrot image, mw x mh characters
+const (
+	mw      = 60
+	mh      = 23 // odd, so the real axis is a row
+	maxIter = 60
+	palette = " .:-=+*#%" // by escape speed; '@' is inside the set
+)
+
 // Board is a torus of cells. It holds no references, so copying it copies the whole grid.
 type Board struct {
 	cells [rows][cols]uint8
@@ -31,21 +68,52 @@ type Board struct {
 // many of its eight neighbours are.
 type Rule func(alive bool, n int) bool
 
-func conway(alive bool, n int) bool   { return n == 3 || alive && n == 2 }               // B3/S23
-func highLife(alive bool, n int) bool { return n == 3 || n == 6 && !alive || alive && n == 2 } // B36/S23
+// Census tallies how the soups end up: periods[0] counts those still changing at soupGens.
+type Census struct {
+	died                 int
+	periods              [maxPeriod + 1]int
+	longest, longestSeed int
+}
 
-const (
-	ruleConway = iota
-	ruleHighLife
-)
+// rng is xorshift64*: deterministic, so every run sees the same soups.
+type rng struct{ s uint64 }
+
+type Complex struct{ Re, Im float64 }
 
 var rules = [2]Rule{conway, highLife}
 
-const ruleNames = [2]string{"conway", "highlife"}
-
 // tables maps each rule's 3x3 neighbourhood, as 9 bits with the cell itself at bit 4, to the
-// cell's next state. It is computed once at start-up and is read-only afterwards.
+// cell's next state. A shared var is computed once at start-up and is read-only afterwards.
 shared var tables = makeTables()
+
+// The demos' two boards, stepped back and forth, and the output buffer's storage: package
+// variables, so they take no stack.
+var (
+	boards   [2]Board
+	outStore [8192]byte
+)
+
+// The census's boards and results, shared by the census task, the ticker and main: they run on
+// one thread, so they need no locks.
+var (
+	soup        [2]Board
+	census      Census
+	progress    int // soups done, read by the ticker
+	finished    bool
+	sawProgress bool
+	soupDone    chan int cap 1
+	tickerDone  chan int cap 1
+)
+
+var image [mh][mw]int // the Mandelbrot escape counts
+
+// ---- rules ----
+
+// conway is B3/S23.
+func conway(alive bool, n int) bool { return n == 3 || alive && n == 2 }
+
+// highLife is B36/S23.
+func highLife(alive bool, n int) bool { return n == 3 || n == 6 && !alive || alive && n == 2 }
 
 func makeTables() [2][512]uint8 {
 	var t [2][512]uint8
@@ -65,13 +133,7 @@ func makeTables() [2][512]uint8 {
 	return t
 }
 
-// seed patterns, as (row, col) offsets
-const glider = [5][2]int{{0, 1}, {1, 2}, {2, 0}, {2, 1}, {2, 2}}
-const blinker = [3][2]int{{0, 0}, {0, 1}, {0, 2}}
-const rPentomino = [5][2]int{{0, 1}, {0, 2}, {1, 0}, {1, 1}, {2, 1}}
-const replicator = [12][2]int{
-	{0, 2}, {0, 3}, {0, 4}, {1, 1}, {1, 4}, {2, 0}, {2, 4}, {3, 0}, {3, 3}, {4, 0}, {4, 1}, {4, 2},
-}
+// ---- boards ----
 
 func wrap(i, n int) int { return (i%n + n) % n }
 
@@ -114,6 +176,8 @@ func (b Board) Population() int {
 	}
 	return n
 }
+
+// ---- output ----
 
 // renderFrames draws boards side by side, each captioned with its generation.
 func renderFrames(frames []Board, out *bytes.Buffer) {
@@ -169,10 +233,6 @@ func yesNo(b bool) string {
 	return "no"
 }
 
-// two package-level boards, stepped back and forth
-var boards [2]Board
-var outStore [8192]byte
-
 // flush writes out what has been built. A bytes.Buffer never grows: a write that doesn't fit is
 // truncated and flagged, so check before printing a partial frame.
 func flush(out *bytes.Buffer) {
@@ -182,6 +242,8 @@ func flush(out *bytes.Buffer) {
 	os.Stdout.Write(out.Bytes())
 	out.Reset()
 }
+
+// ---- demos ----
 
 // demo runs gens generations from boards[0], drawing every every'th one (and the last).
 func demo(name string, gens, every int, out *bytes.Buffer) {
@@ -213,31 +275,7 @@ func demo(name string, gens, every int, out *bytes.Buffer) {
 	flush(out)
 }
 
-// --- the soup census: a long run in a preemptible task ---
-
-const (
-	soups     = 400  // random starting boards
-	soupGens  = 1500 // generations before a soup counts as still changing
-	maxPeriod = 16   // the longest cycle the census recognises
-)
-
-// Census tallies how the soups end up: periods[0] counts those still changing at soupGens.
-type Census struct {
-	died                 int
-	periods              [maxPeriod + 1]int
-	longest, longestSeed int
-}
-
-var soup [2]Board
-var census Census
-var progress int // soups done, read by the ticker
-var finished bool
-var sawProgress bool
-var soupDone chan int cap 1
-var tickerDone chan int cap 1
-
-// rng is xorshift64*: deterministic, so every run sees the same soups.
-type rng struct{ s uint64 }
+// ---- the soup census ----
 
 func (r *rng) next() uint64 {
 	r.s ^= r.s >> 12
@@ -285,6 +323,9 @@ func (c *Census) add(seed, gen, period, pop int) {
 	}
 }
 
+// runCensus is the long run. A thread's goroutines switch only when one blocks, so a plain task
+// would hold the thread to the end; a preemptible one yields at a loop iteration once it has run
+// for a time slice, in its own loops and in those of everything it calls.
 task runCensus() pool 1 preemptible {
 	for s := 1; s <= soups; s++ {
 		gen, period, pop := runSoup(uint64(s) * 0x9E3779B97F4A7C15)
@@ -307,21 +348,14 @@ task ticker() pool 1 {
 	tickerDone <- 1
 }
 
-// --- Mandelbrot ---
-
-const (
-	mw      = 60
-	mh      = 23 // odd, so the real axis is a row
-	maxIter = 60
-	palette = " .:-=+*#%" // by escape speed; '@' is inside the set
-)
-
-type Complex struct{ Re, Im float64 }
+// ---- Mandelbrot ----
 
 func (z Complex) Add(w Complex) Complex { return Complex{z.Re + w.Re, z.Im + w.Im} }
+
 func (z Complex) Mul(w Complex) Complex {
 	return Complex{z.Re*w.Re - z.Im*w.Im, z.Re*w.Im + z.Im*w.Re}
 }
+
 func (z Complex) Abs() float64 { return math.Sqrt(z.Re*z.Re + z.Im*z.Im) }
 
 // escape counts iterations until |z| > 2, or maxIter if it never escapes.
@@ -335,8 +369,6 @@ func escape(c Complex) int {
 	}
 	return maxIter
 }
-
-var image [mh][mw]int
 
 func mandelbrot(out *bytes.Buffer) {
 	out.WriteString("\n== mandelbrot ==\n")
@@ -374,7 +406,7 @@ check:
 	var num [32]byte
 	put(out, "points inside: ", inside)
 	out.WriteString(", area estimate: ")
-	out.Write(strconv.AppendFloat(num[:0], math.Floor(area*100+0.5)/100, 2))
+	out.Write(strconv.AppendFloat(num[:0], math.Round(area*100)/100, 2))
 	out.WriteString(", symmetric: ")
 	out.WriteString(yesNo(symmetric))
 	out.WriteByte('\n')

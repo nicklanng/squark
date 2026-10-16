@@ -9,20 +9,18 @@
 //
 // Errors are lines starting with -ERR. A connection that sends nothing for a while is closed.
 //
-// It shows a store without a heap (fixed slots, a free list and a map whose string keys view the
-// slots), a line reader over net.Conn with an idle timeout, select with time.After, sort.Strings,
-// and threads. Run with no arguments it is its own test: it serves on a port the system picks
-// and drives a scripted client over real TCP. `squark run examples/kv -port 6380` runs a server
-// (try: nc localhost 6380).
+// Run: squark run examples/kv -port 6380 [-idle ms], then try: nc localhost 6380
+// With no arguments it tests itself: a scripted client over real TCP (selftest.sq).
 //
-// Threads: every scheduler thread runs main and has its own store (thread var), so under
-// `threads auto` a key is seen by connections on the thread that set it. Routing each key to an
-// owner thread would need a reply channel per connection, and shared channels can't be put in an
-// array; run with SQUARK_THREADS=1 for one store shared by every connection.
+// It shows:
+//   - a store without a heap: fixed slots, a free list and a map whose keys view the slots
+//   - a line protocol read with bufio.Reader, with an idle timeout
+//   - replies built in a stack buffer, counted in the task's proven stack size
+//   - try, sort.Strings, and threads auto with per-thread state
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"net"
 	"os"
 	"runtime"
@@ -38,7 +36,7 @@ const (
 	maxKeys  = 1024
 	maxKey   = 64
 	maxValue = 256
-	maxLine  = 512
+	maxLine  = 512 // longest command line, with its newline
 )
 
 const (
@@ -51,8 +49,6 @@ const (
 	ErrTooLong     = error(7, "key or value too long")
 )
 
-// ---- the store: one per scheduler thread ----
-
 type entry struct {
 	key  [maxKey]byte
 	klen int
@@ -60,10 +56,30 @@ type entry struct {
 	vlen int
 }
 
+type connStats struct {
+	commands int
+	reason   error // why the connection ended: nil after QUIT
+}
+
+// timedConn is a connection whose reads give up with net.ErrTimeout after d without input (never,
+// if d <= 0). bufio.Reader reads from anything with a Read method.
+type timedConn struct {
+	c net.Conn
+	d time.Duration
+}
+
+// The store. Every scheduler thread runs main, so each has its own (thread var): under threads
+// auto a key is seen only by connections on the thread that set it. Run with SQUARK_THREADS=1 for
+// one store shared by every connection.
 thread var slots [maxKeys]entry
-thread var index map[string]int cap maxKeys // key (a view of its slot's key bytes) -> slot
+thread var index map[string]int cap maxKeys // key -> slot; a key views its slot's bytes
 thread var free [..maxKeys]int
 thread var used int // slots handed out so far; free holds the ones given back
+
+// onClose is told how each connection ended (the self-test swaps in its own).
+thread var onClose = logClose
+
+// ---- the store ----
 
 func get(key string) (string, bool) {
 	i, ok := index[key]
@@ -102,50 +118,7 @@ func del(key string) bool {
 	return ok
 }
 
-// ---- reading lines ----
-
-type lineReader struct {
-	c    net.Conn
-	buf  [maxLine]byte
-	r, w int
-}
-
-// readLine returns the next line without its line ending. It views lr.buf, so it is valid until
-// the next call. With idle > 0 it gives up with ErrIdle when nothing arrives for that long.
-func (lr *lineReader) readLine(idle time.Duration) (string, error) {
-	for {
-		if i := bytes.IndexByte(lr.buf[lr.r:lr.w], '\n'); i >= 0 {
-			line := string(lr.buf[lr.r : lr.r+i])
-			lr.r += i + 1
-			return strings.TrimSuffix(line, "\r"), nil
-		}
-		if lr.r > 0 {
-			lr.w = copy(lr.buf[:], lr.buf[lr.r:lr.w])
-			lr.r = 0
-		}
-		if lr.w == len(lr.buf) {
-			return "", ErrLineTooLong
-		}
-		if idle > 0 && !lr.c.WaitReadable(idle) {
-			return "", ErrIdle
-		}
-		n, err := lr.c.Read(lr.buf[lr.w:])
-		if err != nil {
-			return "", err
-		}
-		lr.w += n
-	}
-}
-
-// ---- the server ----
-
-type connStats struct {
-	commands int
-	reason   error
-}
-
-thread var closed chan connStats cap 8 // each connection reports here when it ends
-thread var quiet bool                   // test mode: report to closed instead of printing
+// ---- commands ----
 
 // errLine appends err as a -ERR reply line.
 func errLine(out []byte, err error) []byte {
@@ -222,18 +195,34 @@ func execute(line string, out []byte) (reply []byte, quit bool, err error) {
 	return append(strconv.AppendInt(append(out, ':'), n), '\n'), false, nil
 }
 
+// ---- connections ----
+
+func (t timedConn) Read(p []byte) (int, error) {
+	if t.d <= 0 {
+		return t.c.Read(p)
+	}
+	return t.c.ReadTimeout(p, t.d)
+}
+
 task serveConn(c net.Conn, idle time.Duration) pool 64 {
 	defer c.Close()
-	lr := lineReader{c: c}
+	var lines [maxLine - 1]byte // room for the longest line (bufio needn't store its newline)
+	r := bufio.NewReader(lines[:])
 	// room for the largest reply, KEYS with a full store: the compiler counts it in the stack size
 	// it proves for this task (squark build -v shows 64 x 96 KiB)
 	var out [maxKeys*(maxKey+2) + 32]byte
 	stats := connStats{}
 	for {
-		line, err := lr.readLine(idle)
+		line, err := r.ReadLine(timedConn{c, idle})
+		switch err {
+		case net.ErrTimeout:
+			err = ErrIdle
+		case bufio.ErrTooLong:
+			err = ErrLineTooLong
+		}
 		if err != nil {
 			if err == ErrIdle || err == ErrLineTooLong {
-				c.Write(errLine(out[:0], err))
+				c.Write(errLine(out[:0], err)) // say why before hanging up
 			}
 			stats.reason = err
 			break
@@ -251,11 +240,11 @@ task serveConn(c net.Conn, idle time.Duration) pool 64 {
 			break
 		}
 	}
-	if quiet {
-		closed <- stats
-	} else {
-		println("connection closed after", stats.commands, "commands:", errText(stats.reason))
-	}
+	onClose(stats)
+}
+
+func logClose(s connStats) {
+	println("connection closed after", s.commands, "commands:", errText(s.reason))
 }
 
 func errText(err error) string {
@@ -274,4 +263,39 @@ task acceptLoop(l net.Listener, idle time.Duration) pool 1 {
 		}
 		go serveConn(c, idle)
 	}
+}
+
+// ---- main ----
+
+func main() {
+	port := -1
+	idle := 30 * time.Second
+	for i := 1; i < os.NArgs(); i++ {
+		switch os.Arg(i) {
+		case "-port", "--port":
+			i++
+			port, _ = strconv.Atoi(os.Arg(i))
+		case "-idle", "--idle":
+			i++
+			ms, _ := strconv.Atoi(os.Arg(i))
+			idle = time.Duration(ms) * time.Millisecond
+		}
+	}
+	if port < 0 {
+		selfTest()
+		return
+	}
+
+	var buf [32]byte
+	addr := string(strconv.AppendInt(append(buf[:0], ':'), port))
+	l, err := net.Listen(addr) // every thread listens: the kernel spreads connections over them
+	if err != nil {
+		println("listen:", err.Error())
+		os.Exit(1)
+	}
+	if runtime.Shard() == 0 {
+		println("kv listening on", addr, "with", runtime.Shards(), "threads")
+	}
+	go acceptLoop(l, idle)
+	select {} // serve until killed
 }

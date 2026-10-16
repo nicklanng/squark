@@ -28,7 +28,7 @@ func main() {
 }
 ```
 
-(This is `examples/greet`.)
+(This is `examples/greet`, without its header comment.)
 
 The compiler is written in Go, emits C, and builds with clang -O3. It produces small native binaries
 (the SQLite notes server is about 100 KiB) with an M:1 goroutine scheduler on kqueue (epoll on Linux).

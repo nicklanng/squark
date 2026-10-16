@@ -1,5 +1,11 @@
-// echo is a TCP echo server: one goroutine per connection, each with a 4 KiB buffer on its own
-// compiler-sized stack. Try: nc localhost 7007
+// echo is a TCP echo server: whatever a client sends comes straight back.
+//
+// Run: squark run examples/echo, then try: nc localhost 7007
+//
+// It shows:
+//   - a goroutine per connection, from a task pool of fixed size
+//   - a read buffer on each goroutine's stack, whose size the compiler proves
+//   - blocking reads and writes that park only the goroutine that makes them
 package main
 
 import (
@@ -8,6 +14,8 @@ import (
 	"time"
 )
 
+// handle echoes one connection. At most 1000 run at once (pool 1000): each has its own stack,
+// sized at compile time to hold buf and every call below.
 task handle(c net.Conn) pool 1000 {
 	defer c.Close()
 	var buf [4096]byte
@@ -23,7 +31,8 @@ task handle(c net.Conn) pool 1000 {
 		}
 		total += n
 	}
-	println("connection closed after", time.Since(start).Milliseconds(), "ms,", total, "bytes echoed")
+	ms := time.Since(start).Milliseconds()
+	println("connection closed after", ms, "ms,", total, "bytes echoed")
 }
 
 func main() {
@@ -39,6 +48,6 @@ func main() {
 			println("accept:", err.Error())
 			continue
 		}
-		go handle(c)
+		go handle(c) // waits for a free slot when 1000 connections are open
 	}
 }

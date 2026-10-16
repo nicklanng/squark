@@ -1,24 +1,24 @@
-// chat is a TCP chat room spread over scheduler threads. A client sends "NICK name", then lines
-// of text, which the room sends to everyone as "name: text", with notices when people join and
-// leave. "WHO" lists the room and "QUIT" leaves it.
+// chat is a TCP chat room. A client sends "NICK name", then lines of text, which the room sends
+// to everyone as "name: text", with notices when people join and leave. "WHO" lists the room and
+// "QUIT" leaves it.
 //
-// Threads share no memory, so the room is split by owner: shard 0 runs the hub, which keeps the
-// room's state, and each shard runs a relay that owns the sockets of the clients handed to it.
-// They talk over shared channels. A shared channel can't carry a string, so text crosses threads
-// in a fixed-size Line; a net.Conn is only a descriptor, so it crosses as it is. Timeouts use
-// select with time.After (hub, test) and Conn.WaitReadable (logins, idle clients).
+// Run: squark run examples/chat :7070, then connect a few times with: nc localhost 7070
+// With no arguments it tests itself: scripted clients over real TCP (selftest.sq).
 //
-// With no arguments it tests itself: it listens on 127.0.0.1:0, runs scripted clients over real
-// TCP and prints what each heard. With an address it serves: squark run examples/chat :7070
+// It shows:
+//   - a server spread over scheduler threads that share no memory (threads 4)
+//   - shared channels between threads, carrying fixed-size values
+//   - state owned by one goroutine (the hub's room) instead of locks
+//   - a line protocol read with bufio.Reader, with login and idle timeouts
+//   - select with time.After, so one stuck relay can't hold up the room
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"net"
 	"os"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -34,17 +34,66 @@ const (
 	IdleTimeout  = 5 * time.Minute
 )
 
-// selfTest is worked out once at start-up and read by every thread.
-shared var selfTest = os.NArgs() < 2
-
-const ErrTimeout = error(1, "timed out")
-const ErrTooLong = error(2, "line too long")
+const (
+	// sessions (any shard) to the hub (shard 0)
+	EvAccept   = iota // Conn is a new client
+	EvLine            // client ID said Line
+	EvNotice          // tell client ID Line, and only them
+	EvLeave           // client ID is gone; Line is the last thing to tell them, if anything
+	EvShutdown        // stop once the room is empty
+	// the hub to the relay of a client's shard
+	DoAttach // Conn is client ID: start its session here
+	DoSend   // write Line to client ID
+	DoDetach // write Line (if any) to client ID, then close it
+)
 
 // Line is text that can cross threads: room for a nick, ": ", a client's line and a newline.
 type Line struct {
 	N    int
 	Text [MaxNick + 2 + MaxLine + 1]byte
 }
+
+type Msg struct {
+	Kind, ID int
+	Conn     net.Conn
+	Line     Line
+}
+
+type Client struct {
+	Used, Joined bool
+	Shard        int
+	Nick         [MaxNick]byte
+	NickLen      int
+}
+
+// Hub is the room. It lives on the hub task's stack: no other goroutine can touch it.
+type Hub struct {
+	room               [MaxClients]Client
+	online, shards, rr int
+	sent, dropped      int
+}
+
+// timedConn is a connection whose reads give up with net.ErrTimeout after d without input.
+// bufio.Reader reads from anything with a Read method.
+type timedConn struct {
+	c net.Conn
+	d time.Duration
+}
+
+// Threads share no memory, so the room is split by owner: shard 0 runs the hub, which keeps the
+// room's state, and each shard runs a relay that owns the sockets of the clients handed to it.
+// They talk over shared channels, whose elements can't hold references: text crosses threads in
+// a fixed-size Line, and a net.Conn, being only a descriptor, crosses as it is.
+shared var toHub chan Msg cap 64
+shared var relays [Relays]chan Msg cap 64 // one per relay
+
+// how long a new client has to say something: shared, since sessions run on every thread, so
+// it is set before the threads start (the self-test shortens it)
+shared var loginTimeout = selfTestTimeout(LoginTimeout)
+
+thread var relayDone chan bool cap 1
+
+// ---- lines ----
 
 func (l *Line) String() string { return string(l.Text[:l.N]) }
 
@@ -60,90 +109,25 @@ func (l *Line) Add(parts ...string) {
 	}
 }
 
-const (
-	// sessions (any shard) to the hub (shard 0)
-	EvAccept   = iota // Conn is a new client
-	EvLine            // client ID said Line
-	EvNotice          // tell client ID Line, and only them
-	EvLeave           // client ID is gone; Line is the last thing to tell them, if anything
-	EvShutdown        // stop once the room is empty
-	// the hub to the relay of a client's shard
-	DoAttach // Conn is client ID: start its session here
-	DoSend   // write Line to client ID
-	DoDetach // write Line (if any) to client ID, then close it
-)
+func (t timedConn) Read(p []byte) (int, error) { return t.c.ReadTimeout(p, t.d) }
 
-type Msg struct {
-	Kind, ID int
-	Conn     net.Conn
-	Line     Line
-}
-
-shared var toHub chan Msg cap 64
-
-// one channel per relay (per scheduler thread that takes clients)
-shared var relays [Relays]chan Msg cap 64
-
-thread var relayDone chan bool cap 1
-
-// LineReader splits a connection's input into lines, in a fixed buffer.
-type LineReader struct {
-	c          net.Conn
-	buf        [MaxLine + 1]byte
-	start, end int
-	skipping   bool // dropping the rest of a line that was too long
-}
-
-// Next returns the next line without its newline, as a view of r's buffer that the next call
-// overwrites. With a timeout, it gives up with ErrTimeout if nothing arrives for that long.
-func (r *LineReader) Next(timeout time.Duration) (string, error) {
-	for {
-		if i := bytes.IndexByte(r.buf[r.start:r.end], '\n'); i >= 0 {
-			line := string(r.buf[r.start : r.start+i])
-			r.start += i + 1
-			if !r.skipping {
-				return strings.TrimSuffix(line, "\r"), nil
-			}
-			r.skipping = false
-			continue
-		}
-		r.end = copy(r.buf[:], r.buf[r.start:r.end]) // move the partial line to the front
-		r.start = 0
-		if r.end == len(r.buf) {
-			r.end = 0
-			if !r.skipping {
-				r.skipping = true
-				return "", ErrTooLong
-			}
-		}
-		if timeout > 0 && !r.c.WaitReadable(timeout) {
-			return "", ErrTimeout
-		}
-		n, err := r.c.Read(r.buf[r.end:])
-		if err != nil {
-			return "", err
-		}
-		r.end += n
-	}
-}
+// ---- clients' shards: sessions and relays ----
 
 // session reads one client's lines and passes them to the hub; its relay does the writing.
 task session(c net.Conn, id int) pool MaxClients {
-	r := LineReader{c: c}
+	var buf [MaxLine]byte
+	r := bufio.NewReader(buf[:])
+	src := timedConn{c, loginTimeout}
 	m := Msg{ID: id}
-	timeout := LoginTimeout // a new client has this long to say something
-	if selfTest {
-		timeout = 100 * time.Millisecond
-	}
 	for m.Kind != EvLeave {
-		text, err := r.Next(timeout)
-		timeout = IdleTimeout
+		text, err := r.ReadLine(src)
+		src.d = IdleTimeout
 		m.Kind = EvLeave
 		switch {
-		case err == ErrTooLong:
+		case err == bufio.ErrTooLong:
 			m.Kind = EvNotice
 			m.Line.Set("ERR line too long")
-		case err == ErrTimeout:
+		case err == net.ErrTimeout:
 			m.Line.Set("ERR timed out")
 		case err != nil:
 			m.Line.Set("") // hung up
@@ -178,21 +162,9 @@ task relay(shard int) pool 1 {
 	relayDone <- true
 }
 
-type Client struct {
-	Used, Joined bool
-	Shard        int
-	Nick         [MaxNick]byte
-	NickLen      int
-}
+// ---- the hub (shard 0) ----
 
 func (c *Client) nick() string { return string(c.Nick[:c.NickLen]) }
-
-// Hub is the room. It lives on the hub task's stack: no other goroutine can touch it.
-type Hub struct {
-	room               [MaxClients]Client
-	online, shards, rr int
-	sent, dropped      int
-}
 
 func (h *Hub) send(kind, id int, line *Line) {
 	select {
@@ -228,8 +200,7 @@ func (h *Hub) accept(c net.Conn) {
 func (h *Hub) said(id int, text string) {
 	c := &h.room[id]
 	var out Line
-	if strings.HasPrefix(text, "NICK ") {
-		nick := text[len("NICK "):]
+	if nick, ok := strings.CutPrefix(text, "NICK "); ok {
 		taken := false
 		for i := range h.room {
 			taken = taken || h.room[i].Joined && h.room[i].nick() == nick
@@ -251,17 +222,15 @@ func (h *Hub) said(id int, text string) {
 	} else if !c.Joined {
 		out.Set("ERR say NICK name first")
 	} else if text == "WHO" {
-		var names [MaxClients]string
-		n := 0
+		var names [..MaxClients]string
 		for i := range h.room {
 			if h.room[i].Joined {
-				names[n] = h.room[i].nick()
-				n++
+				names.Push(h.room[i].nick())
 			}
 		}
-		sort.Strings(names[:n])
+		sort.Strings(names[:])
 		out.Set("users:")
-		for _, name := range names[:n] {
+		for _, name := range names {
 			out.Add(" ", name)
 		}
 	} else {
@@ -319,6 +288,20 @@ task acceptor(l net.Listener) pool 1 {
 	}
 }
 
+// ---- main ----
+
+// start listens on addr and opens the room, on shard 0; it returns the port.
+func start(addr string) int {
+	l, err := net.Listen(addr)
+	if err != nil {
+		println("listen:", err.Error())
+		os.Exit(1)
+	}
+	go hub()
+	go acceptor(l)
+	return l.Port()
+}
+
 func main() {
 	shard := runtime.Shard()
 	if shard >= Relays {
@@ -326,136 +309,11 @@ func main() {
 	}
 	go relay(shard)
 	if shard == 0 {
-		addr := "127.0.0.1:0"
-		if !selfTest {
-			addr = os.Arg(1)
-		}
-		l, err := net.Listen(addr)
-		if err != nil {
-			println("listen:", err.Error())
-			os.Exit(1)
-		}
-		go hub()
-		go acceptor(l)
-		if selfTest {
-			script(l.Port())
-			toHub <- Msg{Kind: EvShutdown}
+		if os.NArgs() < 2 {
+			selfTest()
 		} else {
-			println("chat on port", l.Port())
+			println("chat on port", start(os.Arg(1)))
 		}
 	}
 	<-relayDone
-}
-
-// The self-test: scripted clients on shard 0. Each line is awaited by everyone who should hear
-// it before the next is sent, so the transcript is the same on every run.
-
-type Peer struct {
-	name   string
-	c      net.Conn
-	hangup bool // close the connection after the next line
-	log    [1024]byte
-	n      int
-}
-
-thread var peers [5]Peer
-thread var heard chan int cap 64 // a peer's listener sends the peer's index for each line
-
-const alice, bob, carol, dave, eve = 0, 1, 2, 3, 4
-
-// listen records what peer i hears. A peer hangs up from here, not from script: Close doesn't
-// wake a goroutine blocked in Read on the same connection.
-task listen(i int) pool 5 {
-	p := &peers[i]
-	r := LineReader{c: p.c}
-	for {
-		text, err := r.Next(0)
-		if err != nil {
-			text = "(disconnected)"
-		}
-		p.n += copy(p.log[p.n:], "  ")
-		p.n += copy(p.log[p.n:], text)
-		p.n += copy(p.log[p.n:], "\n")
-		if p.hangup && err == nil {
-			p.n += copy(p.log[p.n:], "  (hung up)\n")
-		}
-		heard <- i
-		if err != nil || p.hangup {
-			p.c.Close()
-			return
-		}
-	}
-}
-
-func connect(i int, name static string, port int) {
-	var buf [32]byte
-	c, err := net.Dial(string(strconv.AppendInt(append(buf[:0], "127.0.0.1:"...), port)))
-	if err != nil {
-		panic(err)
-	}
-	peers[i].name = name
-	peers[i].c = c
-	go listen(i)
-}
-
-// say sends a line from peer i and waits until each peer in who has heard a line (a peer listed
-// twice, two lines).
-func say(i int, text string, who ...int) {
-	var buf [MaxLine * 2]byte
-	peers[i].c.Write(append(append(buf[:0], text...), '\n'))
-	await(who...)
-}
-
-func await(who ...int) {
-	var want [len(peers)]int
-	for _, i := range who {
-		want[i]++
-	}
-	for range who {
-		select {
-		case i := <-heard:
-			if want[i] == 0 {
-				panic("chat: a client heard a line it shouldn't have")
-			}
-			want[i]--
-		case <-time.After(5 * time.Second):
-			panic("chat: a client is missing a line")
-		}
-	}
-}
-
-func script(port int) {
-	connect(alice, "alice", port)
-	say(alice, "hello?", alice)
-	say(alice, "NICK alice", alice)
-	connect(bob, "bob", port)
-	say(bob, "NICK bob", alice, bob)
-	connect(carol, "carol", port)
-	say(carol, "NICK alice", carol)
-	say(carol, "NICK carol", alice, bob, carol)
-	say(alice, "hi all", alice, bob, carol)
-	say(bob, "hey alice", alice, bob, carol)
-	say(carol, "WHO", carol)
-	connect(dave, "dave", port) // says nothing and is timed out
-	await(dave, dave)
-	var long [MaxLine + 50]byte
-	for i := range long {
-		long[i] = 'x'
-	}
-	say(carol, string(long[:]), carol)
-	say(carol, "sorry, cat on keyboard", alice, bob, carol)
-	say(bob, "QUIT", bob, bob, alice, carol)
-	connect(eve, "eve", port)
-	say(eve, "NICK eve", alice, carol, eve)
-	say(eve, "WHO", eve)
-	peers[carol].hangup = true
-	say(eve, "bye carol", alice, carol, eve)
-	await(alice, eve) // carol left
-	say(alice, "QUIT", alice, alice, eve)
-	say(eve, "QUIT", eve, eve)
-
-	for i := range peers {
-		println(peers[i].name, "heard:")
-		os.Stdout.Write(peers[i].log[:peers[i].n])
-	}
 }

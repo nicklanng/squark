@@ -1,8 +1,21 @@
-// pipeline: a worker pool fed by channels. Channel storage is declared at package level, so it
-// lives in static memory and any goroutine may use it.
+// pipeline: a worker pool fed by channels. A producer sends 1000 jobs (Collatz chain lengths) to
+// four workers, and a collector reports the longest chain and how many results came back, while
+// a ticker runs alongside.
+//
+//	squark run examples/pipeline
+//
+// It shows:
+//   - tasks with fixed-size pools, started with go
+//   - channels declared as storage (chan T cap N), ranged over and closed
+//   - time.Sleep parking one goroutine while the others run
 package main
 
 import "time"
+
+const (
+	numWorkers = 4
+	numJobs    = 1000
+)
 
 type Job struct {
 	ID    int
@@ -15,9 +28,13 @@ type Result struct {
 	Worker int
 }
 
+// The channels are package-level storage, so they live in static memory and every goroutine can
+// use them (a go argument can't refer to a stack, so main couldn't hand out a channel of its own).
 var jobs chan Job cap 16
 var results chan Result cap 16
 var done chan bool cap 0
+
+// ---- the work ----
 
 // collatz counts the steps to reach 1.
 func collatz(n int) int {
@@ -33,7 +50,9 @@ func collatz(n int) int {
 	return steps
 }
 
-task worker(id int) pool 8 {
+// ---- the goroutines ----
+
+task worker(id int) pool numWorkers {
 	for j := range jobs {
 		results <- Result{ID: j.ID, Output: collatz(j.Input), Worker: id}
 	}
@@ -48,7 +67,7 @@ task producer(n int) pool 1 {
 
 task collector(n int) pool 1 {
 	best := Result{}
-	perWorker := [4]int{}
+	perWorker := [numWorkers]int{}
 	for i := 0; i < n; i++ {
 		r := <-results
 		perWorker[r.Worker]++
@@ -72,53 +91,14 @@ task ticker() pool 1 {
 	}
 }
 
-func classify(n int) string {
-	switch {
-	case n < 0:
-		return "negative"
-	case n == 0:
-		return "zero"
-	case n%2 == 0:
-		return "even"
-	}
-	return "odd"
-}
-
-func divmod(a, b int) (q, r int) {
-	q = a / b
-	r = a % b
-	return
-}
-
 func main() {
 	start := time.Now()
 	go ticker()
-	for w := 0; w < 4; w++ {
+	for w := 0; w < numWorkers; w++ {
 		go worker(w)
 	}
-	go producer(1000)
-	go collector(1000)
+	go producer(numJobs)
+	go collector(numJobs)
 	<-done
-
-	q, r := divmod(17, 5)
-	println("17/5 =", q, "rem", r, classify(-3), classify(0), classify(4), classify(7))
-
-	a := Job{ID: 1, Input: 2}
-	b := Job{ID: 1, Input: 2}
-	println("struct equality:", a == b, a != Job{ID: 2})
-
-outer:
-	for i := 0; i < 5; i++ {
-		for j := 0; j < 5; j++ {
-			if i*j == 6 {
-				println("found", i, j)
-				break outer
-			}
-			if j > i {
-				continue outer
-			}
-		}
-	}
-	time.Sleep(10 * time.Millisecond)
-	println("elapsed > 10ms:", time.Since(start) > 10*time.Millisecond)
+	selftest(start)
 }

@@ -1,3 +1,11 @@
+// greet is a one-route HTTP server.
+//
+//	squark run examples/greet
+//	curl 'localhost:8080/hello?name=world'
+//
+// It shows:
+//   - a memory budget, checked at build time against the proven worst case
+//   - a string built in the request's arena, which is freed when the response is done
 package main
 
 import "http"

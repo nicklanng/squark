@@ -27,7 +27,8 @@ Every example follows the same layout, so they read alike:
   it, and lists in a few bullets what it shows about squark. Explanations of squark-specific
   choices (where memory lives, why a reference is safe) sit next to the code they explain.
 - **`selftest.sq`** (same package) holds what only the test needs: scripted clients, fixed
-  input, test-mode switches. `main` calls into it in one place.
+  input, test-mode switches. `main` calls into it in one place. An example whose normal run is
+  its test (`hello`, `jobs`, `life`) has none.
 - **Order:** header, `package`, imports, directives (`budget`, `pool`, `threads`), constants,
   types and package variables, then the code grouped by topic under `// ---- topic ----`
   markers, with `main` last.

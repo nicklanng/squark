@@ -893,6 +893,28 @@ HTTP throughput about 3–5% lower, nbody 3.5% slower, the notes binary 109 → 
   load generator: every latency was a whole µs) — fixed: `sq_nanotime` uses `CLOCK_MONOTONIC_RAW` on
   macOS (nanoseconds; `CLOCK_MONOTONIC` counts whole µs there); test: `testdata/run/time_resolution.sq`
 
+## S: standard library gaps (found tidying the examples, 2026-10-16)
+
+Not bugs: things the examples had to hand-write. Each is a small, self-contained addition.
+
+- [ ] **S1. `bufio.Reader` can't read with a timeout.** kv and chat each define the same
+  `timedConn{c net.Conn; d time.Duration}` wrapper whose `Read` calls `ReadTimeout`. A
+  `ReadLineTimeout`, or a timed-reader method on `net.Conn`, would remove both.
+- [ ] **S2. `net.Conn.ReadTimeout(p, 0)` times out at once;** there is no "no deadline" value, so
+  callers branch to `Read` themselves. Make `d <= 0` mean no deadline (document it).
+- [ ] **S3. `bufio.Reader` returns a partial last line when its source fails** (EOF or a timeout),
+  as Go's Scanner does; a line protocol wants to drop it. An option, or a separate error.
+- [ ] **S4. No `host:port` helper in `net`** (`http.Port` exists): kv and chat build addresses
+  with `strconv.AppendInt`.
+- [ ] **S5. No `flag` package:** notes and kv parse `-port`/`-db`/`-idle` by hand.
+- [ ] **S6. No `math/rand`:** life and jobs carry their own xorshift.
+- [ ] **S7. No zero-padded hex or right-padding:** `strconv.AppendIntPad` is decimal and
+  left-padding only (jobs' `appendHex`, life's caption padding).
+- [ ] **S8. `json.Decoder.Text()` has no length limit;** callers must check (jsonq's `maxName`).
+- [ ] **S9. `json.Encoder` has no indentation,** so line-per-element output is framed by hand.
+- [ ] **S10. No sqlite "bind, step, reset" call** (like `Exec` with arguments): notes needs a
+  helper for each insert.
+
 ## Progress log
 
 Append one line per work session: date, items closed, anything left half-done.
