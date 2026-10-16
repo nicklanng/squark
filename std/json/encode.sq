@@ -467,9 +467,11 @@ func (e *Encoder) room(n int) bool {
 // quotedLen is len(AppendString(nil, s)), so the Encoder knows a string fits before writing it.
 // Keep it in step with AppendString (TestJSONEncoderRandom would panic on a mismatch).
 func quotedLen(s string) int {
-	n := 2
-	for i := 0; i < len(s); i++ {
+	i := special(s, 0)
+	n := 2 + i // the quotes and the bytes copied as they are
+	for i < len(s) {
 		c := s[i]
+		next := i + 1
 		if c >= 0x80 {
 			r, size := utf8.DecodeRuneInString(s[i:])
 			if r == utf8.RuneError && size == 1 {
@@ -479,17 +481,14 @@ func quotedLen(s string) int {
 			} else {
 				n += size
 			}
-			i += size - 1
-			continue
-		}
-		switch {
-		case c >= 0x20 && c != '"' && c != '\\':
-			n++
-		case c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t':
+			next = i + size
+		} else if c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t' {
 			n += 2
-		default:
+		} else {
 			n += 6
 		}
+		i = special(s, next)
+		n += i - next
 	}
 	return n
 }

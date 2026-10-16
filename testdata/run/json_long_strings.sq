@@ -1,0 +1,85 @@
+package main
+
+import (
+	"bytes"
+	"json"
+	"utf8"
+)
+
+// json.AppendString and WriteString skip 16 plain bytes at a time; they must agree with a simple
+// byte-by-byte encoder for every special character at every offset of long plain runs.
+
+const hex = "0123456789abcdef"
+
+func reference(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x80 {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if r == utf8.RuneError && size == 1 {
+				dst = append(dst, "�"...)
+			} else if r == 0x2028 || r == 0x2029 {
+				dst = append(dst, '\\', 'u', '2', '0', '2', hex[r&0xF])
+			} else {
+				dst = append(dst, s[i:i+size]...)
+			}
+			i += size - 1
+			continue
+		}
+		switch {
+		case c == '"':
+			dst = append(dst, '\\', '"')
+		case c == '\\':
+			dst = append(dst, '\\', '\\')
+		case c == '\n':
+			dst = append(dst, '\\', 'n')
+		case c == '\r':
+			dst = append(dst, '\\', 'r')
+		case c == '\t':
+			dst = append(dst, '\\', 't')
+		case c < 0x20:
+			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0xF])
+		default:
+			dst = append(dst, c)
+		}
+	}
+	return append(dst, '"')
+}
+
+var specials = []string{"\"", "\\", "\n", "\x01", "\x1f", "é", "世", "\xff", " ", "\xe2\x80", "~"}
+
+func main() {
+	var src [96]byte
+	var got, want [512]byte
+	var wb [512]byte
+	w := bytes.NewBuffer(wb[:])
+	bad, cases := 0, 0
+	for n := 0; n <= 70; n++ {
+		for pos := 0; pos <= n; pos++ {
+			for _, sp := range specials {
+				k := 0
+				for ; k < pos; k++ {
+					src[k] = 'a' + byte(k%26)
+				}
+				k += copy(src[k:], sp)
+				for ; k < n+len(sp); k++ {
+					src[k] = 'A' + byte(k%26)
+				}
+				s := string(src[:k])
+				a := json.AppendString(got[:0], s)
+				b := reference(want[:0], s)
+				w.Reset()
+				json.WriteString(&w, s)
+				cases++
+				if string(a) != string(b) || string(w.Bytes()) != string(b) {
+					bad++
+					if bad < 5 {
+						println("mismatch:", string(b), string(a), string(w.Bytes()))
+					}
+				}
+			}
+		}
+	}
+	println(cases, "strings, mismatches:", bad)
+}

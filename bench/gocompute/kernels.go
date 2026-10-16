@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -117,6 +119,13 @@ func indexByte(b []byte, c byte) int {
 	return -1
 }
 
+func setupText() {
+	for i := range u8c {
+		u8c[i] = 'a' + byte(i%23)
+	}
+	copy(u8c[kn-40:], "needle")
+}
+
 func kernel(name string, reps int) {
 	// a SIMD variant (sum-float64/simd) runs the scalar Go kernel: Go has no SIMD types
 	name = strings.TrimSuffix(name, "/simd")
@@ -181,6 +190,26 @@ func kernel(name string, reps int) {
 		for r := 0; r < reps; r++ {
 			check += int64(dotFloat32(f32a[:], f32b[:]))
 			f32a[r%kn] = float32(r % 8)
+		}
+	case "strings-index":
+		setupText()
+		for r := 0; r < reps; r++ {
+			check += int64(strings.Index(string(u8c[:]), "needle"))
+			u8c[r%(kn-64)] = 'a' + byte(r%26)
+		}
+	case "json-string":
+		setupText()
+		for i := 63; i < kn; i += 64 {
+			u8c[i] = '"'
+		}
+		out := make([]byte, 0, 2*kn)
+		for r := 0; r < reps; r++ {
+			b := bytes.NewBuffer(out[:0])
+			e := json.NewEncoder(b)
+			e.SetEscapeHTML(false)
+			e.Encode(string(u8c[:]))
+			check += int64(b.Len() - 1) // Encode adds a newline
+			u8c[r%(kn-64)] = 'a' + byte(r%26)
 		}
 	case "index-byte":
 		u8c[kn-5] = 255

@@ -8,8 +8,10 @@
 package main
 
 import (
+	"json"
 	"os"
 	"strconv"
+	"strings"
 )
 
 const n = 16384
@@ -137,6 +139,14 @@ func setupDot() {
 // one 255 near the end: the search reads almost all of u8c
 func setupIndex() { u8c[n-5] = 255 }
 
+// letters, with "needle" near the end
+func setupText() {
+	for i := range u8c {
+		u8c[i] = 'a' + byte(i%23)
+	}
+	copy(u8c[n-40:], "needle")
+}
+
 func main() {
 	if os.NArgs() != 3 {
 		println("usage: kernels NAME REPS")
@@ -208,6 +218,24 @@ func main() {
 		for r := 0; r < reps; r++ {
 			check += int64(dotFloat32(f32a[:], f32b[:]))
 			f32a[r%n] = float32(r % 8)
+		}
+	case "strings-index":
+		// standard library code: strings.Index finds "needle" near the end of 16 KiB of text
+		setupText()
+		for r := 0; r < reps; r++ {
+			check += int64(strings.Index(string(u8c[:]), "needle"))
+			u8c[r%(n-64)] = 'a' + byte(r%26)
+		}
+	case "json-string":
+		// json.AppendString of 16 KiB of text with an escape every 64 bytes
+		setupText()
+		for i := 63; i < n; i += 64 {
+			u8c[i] = '"'
+		}
+		var out [2 * n]byte
+		for r := 0; r < reps; r++ {
+			check += int64(len(json.AppendString(out[:0], string(u8c[:]))))
+			u8c[r%(n-64)] = 'a' + byte(r%26)
 		}
 	case "index-byte":
 		setupIndex()

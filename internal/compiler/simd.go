@@ -11,9 +11,15 @@ import (
 // See spec §3.
 
 // simdMethods are the methods every SIMD vector has; the mask ones only on integer vectors.
-var simdMethods = map[string]bool{"Store": true, "Sum": true, "Min": true, "Max": true, "Any": true, "All": true, "Select": true, "Shuffle": true, "Swizzle": true}
+var simdMethods = map[string]bool{"Store": true, "Sum": true, "Min": true, "Max": true, "Any": true, "All": true, "Select": true, "Shuffle": true, "Swizzle": true, "First": true, "Last": true}
 
-func isSIMDMaskMethod(name string) bool { return name == "Any" || name == "All" || name == "Select" }
+func isSIMDMaskMethod(name string) bool {
+	switch name {
+	case "Any", "All", "Select", "First", "Last":
+		return true
+	}
+	return false
+}
 
 // simdBinary checks a binary operation with a SIMD operand: both operands have the same SIMD
 // type, or one is an untyped constant, which is broadcast to every lane.
@@ -111,8 +117,8 @@ func (c *Checker) simdConversion(e *CallExpr, t Type) {
 	}
 	switch u := xi.T.Underlying().(type) {
 	case *Basic:
-		if u.Kind == s.Elem.Kind {
-			return
+		if u.Kind == s.Elem.Kind || (u.Kind == String && s.Elem.Kind == Uint8) {
+			return // a broadcast, or a load of a string's bytes
 		}
 	case *SIMD:
 		if u.Lanes == s.Lanes {
@@ -130,7 +136,11 @@ func (c *Checker) simdConversion(e *CallExpr, t Type) {
 			return
 		}
 	}
-	c.errorf(e.P, "cannot convert %s (type %s) to %s: it takes a %s (broadcast), a vector with %d lanes, or a []%s or [%d]%s (load)", exprString(x), xi.T, t, s.Elem, s.Lanes, s.Elem, s.Lanes, s.Elem)
+	load := fmt.Sprintf("a []%s or [%d]%s (load)", s.Elem, s.Lanes, s.Elem)
+	if s.Elem.Kind == Uint8 {
+		load = fmt.Sprintf("a []byte, [%d]byte or string (load)", s.Lanes)
+	}
+	c.errorf(e.P, "cannot convert %s (type %s) to %s: it takes a %s (broadcast), a vector with %d lanes, or %s", exprString(x), xi.T, t, s.Elem, s.Lanes, load)
 	c.invalid(e)
 }
 
@@ -148,6 +158,8 @@ func (c *Checker) simdMethod(e *SelectorExpr, s *SIMD, name string) *Signature {
 		return &Signature{Results: []*Var{{Type: s.Elem}}}
 	case "Any", "All":
 		return &Signature{Results: []*Var{{Type: tBool}}}
+	case "First", "Last":
+		return &Signature{Results: []*Var{{Type: tInt}}}
 	case "Select", "Shuffle", "Swizzle": // checked at the call (simdSelect, simdShuffle)
 		return &Signature{Variadic: true}
 	}
@@ -354,7 +366,10 @@ func (g *gen) simdConversion(e *CallExpr, s *SIMD) string {
 				simdC(u), f, g.expr(x), ct, r, i, i, u.Lanes, i, r, i, g.basicC(s.Elem.Kind), conv, r)
 		}
 		return fmt.Sprintf("__builtin_convertvector(%s, %s)", g.expr(x), ct)
-	case *Slice:
+	case *Slice, *Basic:
+		if b, ok := u.(*Basic); ok && b.Kind != String {
+			break // a broadcast
+		}
 		sl, v := g.tmp(), g.tmp()
 		return fmt.Sprintf("({ %s %s = %s; if (__builtin_expect(%s.len < %d, 0)) sq_panic_index(%d, %s.len, __FILE__, __LINE__); %s %s; memcpy(&%s, %s.p, sizeof %s); %s; })",
 			g.ctype(x.info().T), sl, g.expr(x), sl, s.Lanes, s.Lanes-1, sl, ct, v, v, sl, v, v)
@@ -422,6 +437,21 @@ func (g *gen) simdBuiltin(e *CallExpr) string {
 			}
 			return fmt.Sprintf("(%s %s %s)", a, op, b)
 		}))
+	case "simd.First", "simd.Last":
+		if s.Lanes == 16 && sizeofBasic(s.Elem.Kind) == 1 {
+			// each lane narrowed to 4 bits of a uint64 (arm64: shrn; there is no movemask)
+			fn := "sq_first16"
+			if e.Builtin == "simd.Last" {
+				fn = "sq_last16"
+			}
+			return fmt.Sprintf("({ %s%s((sq_int8x16)(%s != 0)); })", recv, fn, v)
+		}
+		i, r := g.tmp(), g.tmp()
+		loop := fmt.Sprintf("for (int %s = 0; %s < %d; %s++) if (%s[%s]) { %s = %s; break; }", i, i, s.Lanes, i, v, i, r, i)
+		if e.Builtin == "simd.Last" {
+			loop = fmt.Sprintf("for (int %s = %d; %s >= 0; %s--) if (%s[%s]) { %s = %s; break; }", i, s.Lanes-1, i, i, v, i, r, i)
+		}
+		return fmt.Sprintf("({ %sint64_t %s = -1; %s %s; })", recv, r, loop, r)
 	case "simd.Shuffle", "simd.Swizzle":
 		args, other := e.Args, v
 		if e.Builtin == "simd.Shuffle" {

@@ -1,0 +1,69 @@
+package main
+
+import "strings"
+
+// strings.IndexByte, LastIndexByte and Index (SIMD inside) agree with simple loops at every length
+// and position.
+
+func naiveIndex(s, sep string) int {
+	for i := 0; i+len(sep) <= len(s); i++ {
+		if s[i:i+len(sep)] == sep {
+			return i
+		}
+	}
+	return -1
+}
+
+func naiveFirst(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func naiveLast(s string, c byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func main() {
+	var buf [80]byte
+	for i := range buf {
+		buf[i] = 'a' + byte(i%7)
+	}
+	bad := 0
+	for n := 0; n <= len(buf); n++ {
+		s := string(buf[:n])
+		for _, c := range "abcgz" {
+			if strings.IndexByte(s, byte(c)) != naiveFirst(s, byte(c)) {
+				bad++
+			}
+			if strings.LastIndexByte(s, byte(c)) != naiveLast(s, byte(c)) {
+				bad++
+			}
+		}
+		for _, sep := range []string{"a", "gab", "cdefg", "zz", "abcdefgabcdefgabcd", "fgabcdefgabcdefga"} {
+			if strings.Index(s, sep) != naiveIndex(s, sep) {
+				bad++
+				println("Index", n, sep, strings.Index(s, sep), naiveIndex(s, sep))
+			}
+		}
+		for k := 0; k < n; k++ {
+			old := buf[k]
+			buf[k] = '#'
+			s := string(buf[:n])
+			if strings.IndexByte(s, '#') != k || strings.LastIndexByte(s, '#') != k {
+				bad++
+				println("byte", n, k, strings.IndexByte(s, '#'), strings.LastIndexByte(s, '#'))
+			}
+			buf[k] = old
+		}
+	}
+	println("mismatches:", bad)
+}

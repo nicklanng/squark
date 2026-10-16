@@ -42,6 +42,23 @@ typedef uint64_t sq_uint64x4 __attribute__((vector_size(32), aligned(16)));
 typedef float sq_float32x8 __attribute__((vector_size(32), aligned(16)));
 typedef double sq_float64x4 __attribute__((vector_size(32), aligned(16)));
 
+// sq_first16 and sq_last16 find the first and last set lane of a byte mask (lanes 0 or -1), or
+// -1: each lane narrowed to 4 bits of a uint64, which arm64 does in one instruction (shrn).
+typedef uint8_t sq_u8x8 __attribute__((vector_size(8)));
+typedef uint16_t sq_u16x8 __attribute__((vector_size(16)));
+static inline int64_t sq_first16(sq_int8x16 m) {
+	sq_u8x8 n = __builtin_convertvector((sq_u16x8)m >> 4, sq_u8x8);
+	uint64_t b;
+	memcpy(&b, &n, 8);
+	return b ? (int64_t)(__builtin_ctzll(b) >> 2) : -1;
+}
+static inline int64_t sq_last16(sq_int8x16 m) {
+	sq_u8x8 n = __builtin_convertvector((sq_u16x8)m >> 4, sq_u8x8);
+	uint64_t b;
+	memcpy(&b, &n, 8);
+	return b ? (int64_t)(15 - (__builtin_clzll(b) >> 2)) : -1;
+}
+
 // ---- panics ----
 SQ_NORETURN void sq_panic_cstr(const char *msg, const char *file, int line);
 SQ_NORETURN void sq_panic_str(sq_string msg, const char *file, int line);

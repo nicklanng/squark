@@ -1018,7 +1018,7 @@ func (g *gen) builtinCall(e *CallExpr) string {
 		}
 		b.WriteString("})")
 		return b.String()
-	case "simd.Store", "simd.Sum", "simd.Min", "simd.Max", "simd.Any", "simd.All", "simd.Select", "simd.Shuffle", "simd.Swizzle":
+	case "simd.Store", "simd.Sum", "simd.Min", "simd.Max", "simd.Any", "simd.All", "simd.Select", "simd.Shuffle", "simd.Swizzle", "simd.First", "simd.Last":
 		return g.simdBuiltin(e)
 	case "min", "max":
 		if s := simdOf(e.T); s != nil {

@@ -40,8 +40,12 @@ package strings
 
 func HasPrefix(s string, prefix string) bool
 func HasSuffix(s string, suffix string) bool
+// IndexByte returns the index of the first c in s, or -1. It compares 16 bytes at a time.
 func IndexByte(s string, c byte) int
+// LastIndexByte returns the index of the last c in s, or -1.
 func LastIndexByte(s string, c byte) int
+// Index returns the index of the first sep in s, or -1. For 16 positions at a time it compares
+// sep's first and last bytes, and compares the whole of sep only where both match.
 func Index(s string, sep string) int
 func Contains(s string, substr string) bool
 func TrimSpace(s string) string from s

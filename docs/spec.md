@@ -198,12 +198,14 @@ without AVX).
 a := float32x4{1, 2, 3, 4}       // a literal; missing lanes are 0
 b := float32x4(x)                // broadcast: x (a float32) in every lane
 c := float32x4(xs[i:])           // load xs[i], …, xs[i+3]; panics if len(xs[i:]) < 4
+u := uint8x16(s[i:])             // a byte vector also loads from a string
 d := float32x4(int32x4{1, 2})    // lane by lane conversion: same lane count
 a*b + c                          // operators work lane by lane
 a * 2                            // an untyped constant is broadcast
 m := a > b                       // a mask: int32x4, -1 where a > b, 0 elsewhere
 m.Select(a, b)                   // a where the mask is nonzero, b elsewhere
 m.Any(); m.All()                 // some / every lane nonzero
+m.First(); m.Last()              // index of the first / last nonzero lane, or -1
 min(a, b); max(a, b, c)          // lane by lane
 a.Sum(); a.Min(); a.Max()        // across the lanes, giving a float32
 a.Store(ys[i:])                  // write the lanes to ys[i:]; panics if len(ys[i:]) < 4
@@ -230,7 +232,7 @@ a.Shuffle(b, 0, 4, 1, 5)         // the same from a and b: indexes 0-3 are a's, 
   float additions is fixed, the same on every CPU. `Min` and `Max` pick lanes the way the builtin
   `min` and `max` do.
 - Converting float lanes to integer lanes saturates, as scalar conversions do (§5).
-- `Any`, `All` and `Select` are methods of integer vectors; `Select` takes two vectors with the
+- `Any`, `All`, `First`, `Last` and `Select` are methods of integer vectors; `Select` takes two vectors with the
   mask's lane count and lane width (`int32x4` selects between `float32x4`s or `uint32x4`s).
 - `println(v)` prints `[a b c d]`.
 - SIMD types can't be constants. They have no references, so they go anywhere a number can:
