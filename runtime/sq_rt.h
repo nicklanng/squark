@@ -91,6 +91,18 @@ static inline bool sq_inrange_incl(int64_t lo, int64_t hi, int64_t off, int64_t 
 	if (hi == INT64_MAX || __builtin_add_overflow(lo, off, &a) || __builtin_add_overflow(hi, off, &b)) return false;
 	return a >= 0 && b < n;
 }
+// The same for a counter counting down from hi: sq_inrange_down stops at lo, included (and says
+// no for lo = INT64_MIN, where the counter would wrap), sq_inrange_above stops above lo.
+static inline bool sq_inrange_down(int64_t lo, int64_t hi, int64_t off, int64_t n) {
+	int64_t a, b;
+	if (lo > hi) return true;
+	if (lo == INT64_MIN || __builtin_add_overflow(lo, off, &a) || __builtin_add_overflow(hi, off, &b)) return false;
+	return a >= 0 && b < n;
+}
+static inline bool sq_inrange_above(int64_t lo, int64_t hi, int64_t off, int64_t n) {
+	if (lo >= hi) return true;
+	return sq_inrange_down(lo + 1, hi, off, n);
+}
 
 // SQ_NN checks a pointer before it is dereferenced. A fault would catch most nil dereferences,
 // but not a large offset from nil, and C lets the compiler assume a dereferenced pointer is

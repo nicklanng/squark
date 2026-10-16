@@ -119,6 +119,15 @@ func indexByte(b []byte, c byte) int {
 	return -1
 }
 
+type vec struct{ data []float32 }
+
+//go:noinline
+func (v *vec) axpy(a float32, x *vec) {
+	for i := range v.data {
+		v.data[i] += a * x.data[i]
+	}
+}
+
 func setupText() {
 	for i := range u8c {
 		u8c[i] = 'a' + byte(i%23)
@@ -190,6 +199,14 @@ func kernel(name string, reps int) {
 		for r := 0; r < reps; r++ {
 			check += int64(dotFloat32(f32a[:], f32b[:]))
 			f32a[r%kn] = float32(r % 8)
+		}
+	case "method-axpy":
+		v := vec{f32b[:]}
+		x := vec{f32a[:]}
+		for r := 0; r < reps; r++ {
+			v.axpy(float32(1-2*(r&1)), &x)
+			check += int64(f32b[r%kn])
+			f32a[r%kn] = float32(r % 64)
 		}
 	case "strings-index":
 		setupText()

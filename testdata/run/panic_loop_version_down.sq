@@ -1,0 +1,14 @@
+package main
+
+// counting down past the start of a: the checked copy runs, prints 3, 2, 1, 0 and panics at -1
+func down(a []int, from int) {
+	for i := from; i >= -5; i-- {
+		println(i)
+		a[i] = i
+	}
+}
+
+func main() {
+	var a [4]int
+	down(a[:], 3)
+}

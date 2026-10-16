@@ -693,17 +693,20 @@ resp := try c.Get("/notes/1")    // resp.Body and resp.HeaderValue(...) view buf
 - Each task pool has N stacks of a size proven at compile time, each with a guard page. A C function
   that exceeds its `stack` budget hits the guard: `fatal error: stack overflow in goroutine [pool]`.
 - **Loops and SIMD.** clang vectorizes loops, so a loop over slices often runs as SIMD code. A loop
-  gets an unchecked copy, which clang can vectorize, when it counts up by one (`for i := range s`,
-  `for i := range n`, or `for i := a; i < b; i++` with `<=` too). Its body must be at most 40
-  statements, with no loop, `switch`, `select`, `defer`, `go`, `try`, channel operation or
-  allocation (`make`, `new`, `append`, `in`). The copy drops the bounds checks of indexes of the
-  form `x[i]`, `x[i+k]` and `x[i-k]`. Here `x` is a local slice or string, an array, or a pointer to
-  an array. Neither `x` nor `k` (an `int` expression of locals and constants) may change in the
-  loop, and neither may have its address taken. A test before the loop runs the unchecked copy only
-  when every index the counter can reach is in range, so a loop that would go out of range still
-  panics at the same iteration. Index through a slice variable, not a struct field (`buf := s.buf`
-  before the loop), to qualify. Floating-point sums stay in source order, so they don't vectorize:
-  write them with SIMD types (§3).
+  gets an unchecked copy, which clang can vectorize, when it counts by one (`for i := range s`,
+  `for i := range n`, `for i := a; i < b; i++` with `<=` too, or `for i := a; i >= b; i--` with
+  `>` too). Its body must be at most 40 statements, with no loop, `switch`, `select`, `defer`,
+  `go`, `try`, channel operation or allocation (`make`, `new`, `append`, `in`). The copy drops
+  the bounds checks of indexes of the form `x[i]`, `x[i+k]` and `x[i-k]`, where `x` is an array, a
+  pointer to an array, or a slice or string that the loop can't change, and `k` is an `int`
+  expression of locals and constants that the loop doesn't change. A slice in a local variable
+  qualifies if the loop doesn't assign it and its address isn't taken. A slice in a field of a
+  local (`p.data` in a method on `*T`, `s.data`) or in a package variable qualifies if the loop
+  calls no functions (builtins are fine) and stores only into local variables or values without
+  references, so nothing in it can change the slice. A test before the loop runs the unchecked
+  copy only when every index the counter can reach is in range (and `p` isn't nil), so a loop
+  that would go out of range still panics at the same iteration. Floating-point sums stay in
+  source order, so they don't vectorize: write them with SIMD types (§3).
 - Panics print `panic: <message>` with the goroutine and source position, then exit with status 2.
   There is no `recover`. A nil dereference becomes `panic: runtime error: invalid memory address or
   nil pointer dereference`.

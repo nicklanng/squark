@@ -6,6 +6,51 @@ package main
 import "os"
 
 var g [64]int32
+var pkg []int32
+var pkgArr [64]int32
+
+type Buf struct {
+	n    int
+	data []float32
+}
+
+// want: vectorized
+//
+//squark:noinline
+func (b *Buf) add(o *Buf) {
+	for i := range b.data {
+		b.data[i] += o.data[i]
+	}
+}
+
+// want: vectorized
+//
+//squark:noinline
+func (b *Buf) scale(k float32) {
+	for i := 0; i < len(b.data); i++ {
+		b.data[i] *= k
+	}
+}
+
+// want: vectorized
+//
+//squark:noinline
+func reverse(dst, src []int32) {
+	for i := len(src) - 1; i >= 0; i-- {
+		dst[len(src)-1-i] = src[i]
+	}
+}
+
+// want: vectorized
+//
+//squark:noinline
+func sumPkg(n int) int32 {
+	var s int32
+	for i := 0; i < n; i++ {
+		s += pkg[i]
+	}
+	return s
+}
 
 // want: vectorized
 //
@@ -144,5 +189,11 @@ func main() {
 	neighbours(x[:n], y[:n])
 	inclusive(x[:n], y[:n], n-1)
 	viaPointer(&y, x[:n])
-	println(maxInt32(x[:n]), dot(x[:n], y[:n]), countByte(p[:n], 0), countIn(string(q[:n]), 0, n))
+	fb := Buf{0, f[:n]}
+	hb := Buf{0, h[:n]}
+	fb.add(&hb)
+	fb.scale(2)
+	reverse(y[:n], x[:n])
+	pkg = pkgArr[:n]
+	println(sumPkg(n), maxInt32(x[:n]), dot(x[:n], y[:n]), countByte(p[:n], 0), countIn(string(q[:n]), 0, n))
 }

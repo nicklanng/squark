@@ -179,7 +179,7 @@ func timed(bin string, args ...string) (float64, int64, string, error) {
 
 // kernels are the loops in bench/squark/kernels, which a vectorizing compiler should turn into
 // SIMD code; each runs 40000 times over 16Ki elements.
-var kernels = []string{"saxpy", "dot-int32", "sum-float64", "sum-float64/simd", "dot-float32", "dot-float32/simd", "count-byte", "max-int32", "index-byte", "index-byte/simd", "strings-index", "json-string", "xor-bytes", "add-rows", "brighten"}
+var kernels = []string{"saxpy", "method-axpy", "dot-int32", "sum-float64", "sum-float64/simd", "dot-float32", "dot-float32/simd", "count-byte", "max-int32", "index-byte", "index-byte/simd", "strings-index", "json-string", "xor-bytes", "add-rows", "brighten"}
 
 const kernelReps = "40000"
 

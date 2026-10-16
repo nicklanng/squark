@@ -130,6 +130,18 @@ func indexByte(b []byte, c byte) int {
 	return -1
 }
 
+// Vec is a vector of numbers held in a struct: the loops index a field through a pointer.
+type Vec struct {
+	data []float32
+}
+
+//squark:noinline
+func (v *Vec) axpy(a float32, x *Vec) {
+	for i := range v.data {
+		v.data[i] += a * x.data[i]
+	}
+}
+
 func setupDot() {
 	for i := range f32b {
 		f32b[i] = float32(i % 7)
@@ -218,6 +230,15 @@ func main() {
 		for r := 0; r < reps; r++ {
 			check += int64(dotFloat32(f32a[:], f32b[:]))
 			f32a[r%n] = float32(r % 8)
+		}
+	case "method-axpy":
+		// saxpy as a method: v.data and x.data are fields reached through pointers
+		v := Vec{f32b[:]}
+		x := Vec{f32a[:]}
+		for r := 0; r < reps; r++ {
+			v.axpy(float32(1-2*(r&1)), &x)
+			check += int64(f32b[r%n])
+			f32a[r%n] = float32(r % 64)
 		}
 	case "strings-index":
 		// standard library code: strings.Index finds "needle" near the end of 16 KiB of text

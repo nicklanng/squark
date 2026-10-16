@@ -58,6 +58,13 @@ func (g *gen) coerce(x Expr, t Type) string {
 }
 
 func (g *gen) expr(x Expr) string {
+	if g.headerCopies != nil {
+		if k, ok := headerKey(x); ok {
+			if c, ok := g.headerCopies[k]; ok {
+				return c
+			}
+		}
+	}
 	xi := x.info()
 	if xi.Const != nil {
 		return g.constant(xi.Const, xi.T)
@@ -215,7 +222,7 @@ func (g *gen) indexExpr(e *IndexExpr) string {
 	}
 	idx := g.coerce(e.Index, tInt)
 	checked := func(n string) string {
-		if g.unchecked[e] {
+		if _, ok := g.unchecked[e]; ok {
 			return idx // in range for every value of the loop counter (cgen_loop.go)
 		}
 		if v, ok := constInt(e.Index); ok {
@@ -239,6 +246,9 @@ func (g *gen) indexExpr(e *IndexExpr) string {
 	case *Slice:
 		if isSimpleC(e.X) {
 			s := g.expr(e.X)
+			if h := g.unchecked[e]; h != "" {
+				s = h // the loop's copy of a field or package slice (cgen_loop.go)
+			}
 			if hasCall(e.Index) {
 				// the index's calls may change s: read its pointer and length together, afterwards
 				i := g.tmp()
@@ -251,6 +261,9 @@ func (g *gen) indexExpr(e *IndexExpr) string {
 	case *Basic:
 		if isSimpleC(e.X) {
 			s := g.expr(e.X)
+			if h := g.unchecked[e]; h != "" {
+				s = h // the loop's copy of a field or package slice (cgen_loop.go)
+			}
 			if hasCall(e.Index) {
 				i := g.tmp()
 				return fmt.Sprintf("({ int64_t %s = %s; (%s).p[SQ_IDX(%s, (%s).len)]; })", i, idx, s, i, s)

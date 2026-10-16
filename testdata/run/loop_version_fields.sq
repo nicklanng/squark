@@ -1,0 +1,116 @@
+package main
+
+// Loop versioning (cgen_loop.go) of slices in struct fields and package variables, and of loops
+// counting down: both copies must compute the same thing.
+
+type Matrix struct {
+	n    int
+	data []float32
+}
+
+var table [16]int32
+var tab []int32
+
+func (m *Matrix) add(o *Matrix) {
+	for i := range m.data {
+		m.data[i] += o.data[i]
+	}
+}
+
+func (m *Matrix) scale(k float32) {
+	for i := 0; i < len(m.data); i++ {
+		m.data[i] *= k
+	}
+}
+
+func (m Matrix) sum() float32 {
+	var s float32
+	for i := range m.data {
+		s += m.data[i]
+	}
+	return s
+}
+
+// the loop changes m.n but not m.data: m.data is still copied
+func (m *Matrix) countPositive() int {
+	m.n = 0
+	for i := 0; i < len(m.data); i++ {
+		if m.data[i] > 0 {
+			m.n++
+		}
+	}
+	return m.n
+}
+
+// the loop stores a slice: m.data may change, so its indexes stay checked
+func (m *Matrix) shrink(other []float32) float32 {
+	var s float32
+	for i := 0; i < 3; i++ {
+		s += m.data[i]
+		m.data = other
+	}
+	return s
+}
+
+// a nil m with a loop that doesn't run is fine
+func (m *Matrix) firstN(n int) float32 {
+	var s float32
+	for i := 0; i < n; i++ {
+		s += m.data[i]
+	}
+	return s
+}
+
+func reverseCopy(dst, src []int32) {
+	for i := len(src) - 1; i >= 0; i-- {
+		dst[len(src)-1-i] = src[i]
+	}
+}
+
+func down(a []int32, n int) int32 {
+	var s int32
+	for i := n; i > 0; i-- {
+		s += a[i-1]
+	}
+	return s
+}
+
+func downTo(a []int32, lo int) int32 {
+	var s int32
+	for i := len(a) - 1; lo <= i; i -= 1 {
+		s += a[i] * int32(i)
+	}
+	return s
+}
+
+func sumTab(n int) int32 {
+	var s int32
+	for i := 0; i < n; i++ {
+		s += tab[i]
+	}
+	return s
+}
+
+func main() {
+	var a, b, c [8]float32
+	for i := range a {
+		a[i] = float32(i)
+		b[i] = 10
+		c[i] = -1
+	}
+	m := Matrix{0, a[:]}
+	o := Matrix{0, b[:]}
+	m.add(&o)
+	m.scale(0.5)
+	println(m.data[0], m.data[7], m.sum(), m.countPositive(), m.n)
+	println(m.shrink(c[:]), m.data[0])
+	var none *Matrix
+	println(none.firstN(0))
+	for i := range table {
+		table[i] = int32(i)
+	}
+	tab = table[:]
+	var r [16]int32
+	reverseCopy(r[:], table[:])
+	println(r[0], r[15], down(table[:], 16), down(table[:], 0), downTo(table[:], 10), downTo(table[:], 20), sumTab(16))
+}
