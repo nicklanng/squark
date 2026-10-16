@@ -1,5 +1,7 @@
 package main
 
+func vec() float32x4 { return float32x4{} }
+
 func main() {
 	a := float32x4{1, 2, 3, 4}
 	i := int32x4{1, 2, 3, 4}
@@ -16,7 +18,9 @@ func main() {
 	_ = a + 1.5
 	_ = i + 1.5 // ERROR "truncated to integer"
 	_ = int8x16{} + 300 // ERROR "overflows int8"
-	a[0] = 1 // ERROR "cannot assign"
+	a[0] = 1
+	vec().Sum()
+	vec()[0] = 1 // ERROR "cannot assign"
 	_ = &a[0] // ERROR "a SIMD lane"
 	_ = a[4] // ERROR "out of bounds"
 	_ = float32x4{1, 2, 3, 4, 5} // ERROR "out of bounds"
@@ -26,6 +30,12 @@ func main() {
 	_ = (a > a).Select(i, i)
 	_ = (a > a).Select(int16x8{}, int16x8{}) // ERROR "the mask has 4 lanes of 32 bits"
 	_ = cap(a) // ERROR "invalid argument"
+	k := 1
+	_ = a.Swizzle(0, 1, 2, k) // ERROR "must be an integer constant"
+	_ = a.Swizzle(0, 1, 2) // ERROR "takes 4 lane indexes"
+	_ = a.Swizzle(0, 1, 2, 4) // ERROR "out of range [0:4]"
+	_ = a.Shuffle(a, 0, 1, 2, 8) // ERROR "out of range [0:8]"
+	_ = a.Shuffle(i, 0, 1, 2, 3) // ERROR "cannot use i"
 	var m map[float32x4]int cap 4 // ERROR "float32x4"
 	_ = m
 	const n = len(a)

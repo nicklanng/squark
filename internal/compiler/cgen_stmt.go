@@ -154,6 +154,15 @@ func (g *gen) store(lhs Expr, val string) {
 		g.line("(void)(%s);", val)
 		return
 	}
+	if ix, ok := unparen(lhs).(*IndexExpr); ok && simdOf(ix.X.info().T) != nil {
+		g.line("{")
+		g.ind++
+		lane, _ := g.simdLane(lhs)
+		g.line("%s = %s;", lane, val)
+		g.ind--
+		g.line("}")
+		return
+	}
 	if ix, ok := unparen(lhs).(*IndexExpr); ok {
 		if m, ok := ix.X.info().T.Underlying().(*Map); ok {
 			v := g.tmp()
@@ -239,6 +248,10 @@ func (g *gen) lhsTargets(lhs []Expr, skip func(int) bool) []string {
 		case *Ident:
 			continue
 		case *IndexExpr:
+			if lane, ok := g.simdLane(x); ok {
+				targets[i] = lane
+				continue
+			}
 			if m, ok := x.X.info().T.Underlying().(*Map); ok {
 				mp, k := g.tmp(), g.tmp()
 				g.line("sq_map *%s = %s; %s %s = %s;", mp, g.expr(x.X), g.ctype(m.Key), k, g.coerce(x.Index, m.Key))
@@ -365,6 +378,15 @@ func (g *gen) opAssign(lhs Expr, op Tok, rhs Expr, rhsC string) {
 	if id, ok := unparen(lhs).(*Ident); ok {
 		n := g.expr(id)
 		g.line("%s = %s;", n, val(n))
+		return
+	}
+	if ix, ok := unparen(lhs).(*IndexExpr); ok && simdOf(ix.X.info().T) != nil {
+		g.line("{")
+		g.ind++
+		lane, _ := g.simdLane(lhs)
+		g.line("%s = %s;", lane, val(lane))
+		g.ind--
+		g.line("}")
 		return
 	}
 	p := g.tmp()

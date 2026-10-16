@@ -205,7 +205,9 @@ func (c *Checker) derefVec(x Expr) Expr {
 	if !ok {
 		return x
 	}
-	if _, ok := p.Elem.Underlying().(*VecType); !ok {
+	switch p.Elem.Underlying().(type) {
+	case *VecType, *SIMD: // a pointer to a vector or SIMD vector works like the vector
+	default:
 		return x
 	}
 	d := &StarExpr{X: x, P: x.Pos()}
@@ -872,7 +874,7 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 		return
 	}
 	name := e.Sel.Name
-	if isVecMethod(name) {
+	if isVecMethod(name) || simdMethods[name] {
 		e.X = c.derefVec(e.X)
 		xi = e.X.info()
 	}
@@ -1092,9 +1094,14 @@ func (c *Checker) index(e *IndexExpr) {
 		c.checkIndex(e.Index, -1)
 		e.T, e.Mode = u.Elem, ModeVar
 	case *SIMD:
-		// lanes are read-only: build a new vector instead (C can't address a lane)
+		// a lane of a variable can be assigned, but not addressed (see unary)
 		c.checkIndex(e.Index, u.Lanes)
-		e.T, e.Mode = u.Elem, ModeValue
+		e.T = u.Elem
+		if xi.Mode == ModeVar {
+			e.Mode = ModeVar
+		} else {
+			e.Mode = ModeValue
+		}
 	case *Basic:
 		if !isString(u) {
 			break

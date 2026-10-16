@@ -207,7 +207,9 @@ m.Any(); m.All()                 // some / every lane nonzero
 min(a, b); max(a, b, c)          // lane by lane
 a.Sum(); a.Min(); a.Max()        // across the lanes, giving a float32
 a.Store(ys[i:])                  // write the lanes to ys[i:]; panics if len(ys[i:]) < 4
-a[2]; len(a)                     // read a lane (bounds-checked); len is the constant 4
+a[2]; a[2] = 7; len(a)           // a lane (bounds-checked); len is the constant 4
+a.Swizzle(3, 2, 1, 0)            // rearrange lanes: lane i of the result is a[index i]
+a.Shuffle(b, 0, 4, 1, 5)         // the same from a and b: indexes 0-3 are a's, 4-7 are b's
 ```
 
 - Operators: `+ - *` on all vectors, `/` on float vectors only (no CPU divides integer vectors:
@@ -220,8 +222,10 @@ a[2]; len(a)                     // read a lane (bounds-checked); len is the con
 - Comparisons give a mask, a signed integer vector as wide as the lanes (`float64x2` compares to
   `int64x2`), not a `bool`. Compare whole vectors with `(a == b).All()`. So SIMD vectors can't be
   map keys and a struct holding one can't be compared with `==`.
-- Lanes are read-only (`v[i] = x` and `&v[i]` are errors): build a new vector with a literal,
-  `Select` or arithmetic.
+- A lane of a variable can be assigned (`v[i] = x`, `v[i] += x`, `v[i]++`), but not addressed
+  (`&v[i]` is an error). A pointer to a SIMD vector works like the vector (`p[i]`, `p.Sum()`).
+- `Swizzle` and `Shuffle` take one constant index per lane; they compile to the CPU's shuffle
+  instructions (reversing a `int32x4` is two arm64 instructions).
 - `Sum` adds the upper half of the lanes to the lower half until one lane is left, so the order of
   float additions is fixed, the same on every CPU. `Min` and `Max` pick lanes the way the builtin
   `min` and `max` do.

@@ -74,8 +74,12 @@ func (c *Checker) call(e *CallExpr) {
 				e.Builtin = "vec." + f.Sel.Name
 			case *SIMD:
 				e.Builtin = "simd." + f.Sel.Name
-				if f.Sel.Name == "Select" {
+				switch f.Sel.Name {
+				case "Select":
 					c.simdSelect(e, simdOf(f.X.info().T))
+					return
+				case "Shuffle", "Swizzle":
+					c.simdShuffle(e, f.X.info().T, f.Sel.Name)
 					return
 				}
 			default:

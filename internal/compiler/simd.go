@@ -11,7 +11,7 @@ import (
 // See spec §3.
 
 // simdMethods are the methods every SIMD vector has; the mask ones only on integer vectors.
-var simdMethods = map[string]bool{"Store": true, "Sum": true, "Min": true, "Max": true, "Any": true, "All": true, "Select": true}
+var simdMethods = map[string]bool{"Store": true, "Sum": true, "Min": true, "Max": true, "Any": true, "All": true, "Select": true, "Shuffle": true, "Swizzle": true}
 
 func isSIMDMaskMethod(name string) bool { return name == "Any" || name == "All" || name == "Select" }
 
@@ -148,10 +148,53 @@ func (c *Checker) simdMethod(e *SelectorExpr, s *SIMD, name string) *Signature {
 		return &Signature{Results: []*Var{{Type: s.Elem}}}
 	case "Any", "All":
 		return &Signature{Results: []*Var{{Type: tBool}}}
-	case "Select":
-		return &Signature{Params: []*Var{{Type: tInvalid}, {Type: tInvalid}}}
+	case "Select", "Shuffle", "Swizzle": // checked at the call (simdSelect, simdShuffle)
+		return &Signature{Variadic: true}
 	}
 	return nil
+}
+
+// simdShuffle checks a.Shuffle(b, i0, …) and a.Swizzle(i0, …): one constant lane index per lane
+// of the result, into a (0 to lanes-1) and, for Shuffle, b (lanes to 2*lanes-1).
+func (c *Checker) simdShuffle(e *CallExpr, recv Type, name string) {
+	s := simdOf(recv)
+	args := e.Args
+	limit := s.Lanes
+	if name == "Shuffle" {
+		if len(args) == 0 {
+			c.errorf(e.P, "not enough arguments for Shuffle (expected a %s and %d lane indexes)", recv, s.Lanes)
+			c.invalid(e)
+			return
+		}
+		c.valueExpr(args[0], recv)
+		if !c.assignable(args[0], recv, "argument to Shuffle") {
+			c.invalid(e)
+			return
+		}
+		args = args[1:]
+		limit = 2 * s.Lanes
+	}
+	if int64(len(args)) != s.Lanes {
+		c.errorf(e.P, "%s takes %d lane indexes for %s (one per lane), found %d", name, s.Lanes, recv, len(args))
+		c.invalid(e)
+		return
+	}
+	for _, a := range args {
+		c.expr(a)
+		v, ok := constInt(a)
+		if a.info().Const == nil || !isInteger(a.info().T) || !ok {
+			c.errorf(a.Pos(), "lane index %s must be an integer constant", exprString(a))
+			c.invalid(e)
+			return
+		}
+		c.convertUntyped(a, tInt, name)
+		if v < 0 || v >= limit {
+			c.errorf(a.Pos(), "lane index %d out of range [0:%d]", v, limit)
+			c.invalid(e)
+			return
+		}
+	}
+	e.T, e.Mode = recv, ModeValue
 }
 
 // simdSelect checks m.Select(a, b): lanes of a where m's lane is nonzero, of b elsewhere. a and
@@ -379,6 +422,23 @@ func (g *gen) simdBuiltin(e *CallExpr) string {
 			}
 			return fmt.Sprintf("(%s %s %s)", a, op, b)
 		}))
+	case "simd.Shuffle", "simd.Swizzle":
+		args, other := e.Args, v
+		if e.Builtin == "simd.Shuffle" {
+			other = g.tmp()
+			recv += fmt.Sprintf("%s %s = %s; ", ct, other, g.coerce(e.Args[0], se.X.info().T))
+			args = args[1:]
+		}
+		lanes := make([]string, len(args))
+		for i, a := range args {
+			k, _ := constInt(a)
+			if k < s.Lanes {
+				lanes[i] = fmt.Sprintf("%s[%d]", v, k)
+			} else {
+				lanes[i] = fmt.Sprintf("%s[%d]", other, k-s.Lanes)
+			}
+		}
+		return fmt.Sprintf("({ %s(%s){%s}; })", recv, ct, strings.Join(lanes, ", "))
 	case "simd.Select":
 		t := e.T
 		vt := simdC(simdOf(t))
@@ -428,4 +488,25 @@ func (g *gen) simdPrint(v string, s *SIMD) string {
 	}
 	b.WriteString("sq_print_byte(']'); })")
 	return b.String()
+}
+
+// simdLane returns lhs's vector and lane when lhs is a lane of a SIMD variable (v[i] = x), as a
+// C lvalue (*p)[i] after emitting the pointer and the checked index: C can't take a lane's
+// address, but it can assign through a pointer to the vector.
+func (g *gen) simdLane(lhs Expr) (string, bool) {
+	ix, ok := unparen(lhs).(*IndexExpr)
+	if !ok {
+		return "", false
+	}
+	s := simdOf(ix.X.info().T)
+	if s == nil {
+		return "", false
+	}
+	p, i := g.tmp(), g.tmp()
+	idx := g.coerce(ix.Index, tInt)
+	if _, ok := constInt(ix.Index); !ok {
+		idx = fmt.Sprintf("SQ_IDX(%s, %d)", idx, s.Lanes)
+	}
+	g.line("%s *%s = &(%s); int64_t %s = %s;", simdC(s), p, g.expr(ix.X), i, idx)
+	return fmt.Sprintf("(*%s)[%s]", p, i), true
 }
