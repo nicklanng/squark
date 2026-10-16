@@ -1,0 +1,10 @@
+package main
+
+// loading a vector from a slice shorter than its lanes panics
+func load(s []float32) float32x4 { return float32x4(s) }
+
+func main() {
+	xs := []float32{1, 2, 3}
+	println("before")
+	println(load(xs))
+}

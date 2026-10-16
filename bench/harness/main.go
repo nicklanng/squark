@@ -28,7 +28,7 @@ var (
 	conc     = envInt("CONC", 64)
 	idleN    = envInt("IDLE", 5000)
 	runs     = envInt("RUNS", 3)
-	only     = os.Getenv("ONLY") // "compute", "kernels" (just the loop kernels) or "http"
+	only     = os.Getenv("ONLY") // "compute", "kernels" (just the loop kernels), "compare" (see compare.sh) or "http"
 	// loadgen is the load generator in bin: sq-load (bench/squark/load, the default) or load (the
 	// Go one in bench/load, which also has the -startup mode)
 	loadgen = envStr("LOADGEN", "sq-load")
@@ -103,6 +103,10 @@ type Report struct {
 
 func main() {
 	raiseFDLimit()
+	if only == "compare" {
+		compareKernels()
+		return
+	}
 	rep := &Report{Date: time.Now().Format(time.RFC3339), Machine: machine(), Duration: duration.String(), Conc: conc, Sizes: map[string]int64{}, LoadGen: loadgen}
 	for _, b := range []string{"notes", "gonotes", "sq-sieve", "sq-nbody", "sq-wordfreq", "sq-jsonenc", "gocompute"} {
 		if st, err := os.Stat(filepath.Join(binDir, b)); err == nil {
@@ -175,9 +179,45 @@ func timed(bin string, args ...string) (float64, int64, string, error) {
 
 // kernels are the loops in bench/squark/kernels, which a vectorizing compiler should turn into
 // SIMD code; each runs 40000 times over 16Ki elements.
-var kernels = []string{"saxpy", "dot-int32", "sum-float64", "count-byte", "max-int32", "xor-bytes", "add-rows", "brighten"}
+var kernels = []string{"saxpy", "dot-int32", "sum-float64", "sum-float64/simd", "dot-float32", "dot-float32/simd", "count-byte", "max-int32", "index-byte", "index-byte/simd", "xor-bytes", "add-rows", "brighten"}
 
 const kernelReps = "40000"
+
+// compareKernels times each kernel built from another revision (bin/sq-kernels-base, see
+// compare.sh) and from the working tree (bin/sq-kernels), and prints them side by side.
+func compareKernels() {
+	base := os.Getenv("BASE")
+	best := func(bin string, args ...string) (float64, string, bool) {
+		b, out := 1e9, ""
+		for i := 0; i < runs; i++ {
+			secs, _, o, err := timed(bin, args...)
+			if err != nil {
+				return 0, "", false // the other revision doesn't have this kernel
+			}
+			b, out = min(b, secs), o
+		}
+		return b, out, true
+	}
+	fmt.Printf("# Loop kernels: %s vs working tree\n\n%s, %s, best of %d\n\n", base, machine(), time.Now().Format(time.RFC3339), runs)
+	fmt.Printf("| kernel | %s | working tree | speedup |\n|---|---:|---:|---:|\n", base)
+	for _, k := range kernels {
+		fmt.Fprintf(os.Stderr, "  %s\n", k)
+		cur, curOut, ok := best(filepath.Join(binDir, "sq-kernels"), k, kernelReps)
+		if !ok {
+			fatal("kernel %s failed", k)
+		}
+		old, oldOut, ok := best(filepath.Join(binDir, "sq-kernels-base"), strings.TrimSuffix(k, "/simd"), kernelReps)
+		if !ok {
+			fmt.Printf("| %s | — | %s | |\n", k, secs(cur))
+			continue
+		}
+		same := ""
+		if oldOut != curOut {
+			same = " ⚠ outputs differ"
+		}
+		fmt.Printf("| %s%s | %s | %s | %.1f× |\n", k, same, secs(old), secs(cur), old/cur)
+	}
+}
 
 func computeBenchmarks(rep *Report) {
 	type bench struct {

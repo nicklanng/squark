@@ -1,0 +1,9 @@
+package main
+
+const c float32x4 = 1 // ERROR "SIMD vectors can't be constants"
+
+type V float32x4
+
+func (v V) Sum() float32 { return 0 } // ERROR "would be hidden by the SIMD method Sum"
+
+func main() {}

@@ -525,6 +525,9 @@ func (c *Checker) convertUntyped(x Expr, t Type, context string) bool {
 		return true
 	}
 	if xi.Const != nil {
+		if s := simdOf(t); s != nil {
+			return c.simdConst(x, s, t, context)
+		}
 		if _, ok := t.Underlying().(*Basic); !ok {
 			c.errorf(x.Pos(), "cannot use %s (untyped constant) as type %s in %s", exprString(x), t, context)
 			return false
@@ -549,9 +552,13 @@ func (c *Checker) convertUntyped(x Expr, t Type, context string) bool {
 		return true
 	}
 	// untyped non-constant (bool from comparison)
-	if isBoolean(xi.T) && isBoolean(t) {
-		setType(x, t)
-		return true
+	if isBoolean(xi.T) {
+		if isBoolean(t) {
+			setType(x, t)
+			return true
+		}
+		c.errorf(x.Pos(), "cannot use %s (untyped bool value) as type %s in %s", exprString(x), t, context)
+		return false
 	}
 	// untyped non-constant number: a shift of an untyped constant by a variable (1 << n), maybe
 	// inside arithmetic; the shifted constant takes the context's type
@@ -738,6 +745,8 @@ func (c *Checker) compositeLit(e *CompositeLit, hint Type) {
 		c.indexedElts(e.Elts, u.Elem, -1)
 	case *VecType:
 		c.indexedElts(e.Elts, u.Elem, u.Len)
+	case *SIMD:
+		c.indexedElts(e.Elts, u.Elem, u.Lanes)
 	case *Map:
 		c.errorf(e.P, "map literals are not supported; use make(map[K]V, capacity) and assign entries")
 	default:
@@ -917,6 +926,19 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 		}
 		return
 	}
+	if s := simdOf(t); s != nil && simdMethods[name] {
+		sig := c.simdMethod(e, s, name)
+		if sig == nil {
+			c.invalid(e)
+			return
+		}
+		e.Kind = SelBuiltinMethod
+		e.T, e.Mode = sig, ModeValue
+		if !callee {
+			c.errorf(e.Sel.P, "method values are not supported; call %s(...) directly", exprString(e))
+		}
+		return
+	}
 	if _, ok := t.Underlying().(*ArenaType); ok {
 		switch name {
 		case "Used", "Left", "Cap":
@@ -1069,6 +1091,10 @@ func (c *Checker) index(e *IndexExpr) {
 	case *Slice:
 		c.checkIndex(e.Index, -1)
 		e.T, e.Mode = u.Elem, ModeVar
+	case *SIMD:
+		// lanes are read-only: build a new vector instead (C can't address a lane)
+		c.checkIndex(e.Index, u.Lanes)
+		e.T, e.Mode = u.Elem, ModeValue
 	case *Basic:
 		if !isString(u) {
 			break
@@ -1208,6 +1234,11 @@ func (c *Checker) unary(e *UnaryExpr, hint Type) {
 			c.invalid(e)
 			return
 		}
+		if ix, ok := unparen(e.X).(*IndexExpr); ok && simdOf(ix.X.info().T) != nil {
+			c.errorf(e.P, "cannot take address of %s (a SIMD lane)", exprString(e.X))
+			c.invalid(e)
+			return
+		}
 		if e.X.info().Mode != ModeVar {
 			if e.X.info().Mode == ModeMapIndex {
 				c.errorf(e.P, "cannot take address of map element %s", exprString(e.X))
@@ -1243,6 +1274,10 @@ func (c *Checker) unary(e *UnaryExpr, hint Type) {
 			return
 		}
 		e.T, e.Mode = ch.Elem, ModeValue
+		return
+	}
+	if simdOf(xi.T) != nil {
+		c.simdUnary(e)
 		return
 	}
 	ok := false
@@ -1311,6 +1346,10 @@ func (c *Checker) binary(e *BinaryExpr) {
 		return
 	}
 	x, y := e.X.info(), e.Y.info()
+	if simdOf(x.T) != nil || simdOf(y.T) != nil {
+		c.simdBinary(e)
+		return
+	}
 	// match operand types
 	if isUntyped(x.T) && !isUntyped(y.T) {
 		if !c.convertUntyped(e.X, y.T, "binary operation") {
@@ -1497,6 +1536,15 @@ func (c *Checker) shift(e *BinaryExpr) {
 		}
 	} else if isUntyped(y.T) {
 		c.convertUntyped(e.Y, tUint, "shift count")
+	}
+	if s := simdOf(x.T); s != nil {
+		if !isInteger(s.Elem) {
+			c.errorf(e.P, "invalid operation: shifted operand %s (type %s) must be integer", exprString(e.X), x.T)
+			c.invalid(e)
+			return
+		}
+		e.T, e.Mode = x.T, ModeValue // every lane shifted by the same count
+		return
 	}
 	if x.Const != nil && isUntyped(x.T) && y.Const == nil {
 		// untyped constant shifted by a variable amount: as in Go, the shift is untyped and takes

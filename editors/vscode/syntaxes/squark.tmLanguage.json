@@ -261,7 +261,7 @@
     },
 
     "types": {
-      "match": "\\b(bool|byte|rune|int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|uintptr|float32|float64|string|error|rawptr|anytype)\\b",
+      "match": "\\b(bool|byte|rune|int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|uintptr|float32|float64|string|error|rawptr|anytype|(?:u?int(?:8x(?:16|32)|16x(?:8|16)|32x(?:4|8)|64x(?:2|4))|float32x(?:4|8)|float64x(?:2|4)))\\b",
       "name": "storage.type.builtin.squark"
     },
 

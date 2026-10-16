@@ -104,6 +104,7 @@ arena ...
 | `[N]T` | array (storage) |
 | `[]T` | slice (view) |
 | `[..N]T` | vector: inline storage for N elements plus a length (storage) |
+| `float32x4`, `uint8x16`, … | SIMD vector: N numbers that operators work on lane by lane (below) |
 | `map[K]V cap N` | map storage with fixed capacity N (`cap(m)` is N, also through a view; 0 for a nil map). K is an integer, string, bool or pointer type |
 | `map[K]V` | map view |
 | `chan T cap N` | channel storage with an N-element buffer (`cap 0` = unbuffered) |
@@ -174,6 +175,67 @@ vector (`p.Push(x)`, `len(p)`, `p[i]`), as a pointer to an array does. Vectors a
 (`==`), nor is a struct or array containing one.
 
 ## 4. Declarations
+
+### SIMD vectors
+
+A SIMD type holds a fixed number of lanes of one number type and compiles to SIMD instructions
+(NEON on arm64, SSE/AVX on x86-64). There is one for each integer and float element type, 128
+and 256 bits wide:
+
+| element | 128-bit | 256-bit |
+|---|---|---|
+| `int8`, `uint8` | `int8x16`, `uint8x16` | `int8x32`, `uint8x32` |
+| `int16`, `uint16` | `int16x8`, `uint16x8` | `int16x16`, `uint16x16` |
+| `int32`, `uint32` | `int32x4`, `uint32x4` | `int32x8`, `uint32x8` |
+| `int64`, `uint64` | `int64x2`, `uint64x2` | `int64x4`, `uint64x4` |
+| `float32` | `float32x4` | `float32x8` |
+| `float64` | `float64x2` | `float64x4` |
+
+A 256-bit vector is two 128-bit registers where the CPU has no wider ones (arm64, x86-64
+without AVX).
+
+```go
+a := float32x4{1, 2, 3, 4}       // a literal; missing lanes are 0
+b := float32x4(x)                // broadcast: x (a float32) in every lane
+c := float32x4(xs[i:])           // load xs[i], …, xs[i+3]; panics if len(xs[i:]) < 4
+d := float32x4(int32x4{1, 2})    // lane by lane conversion: same lane count
+a*b + c                          // operators work lane by lane
+a * 2                            // an untyped constant is broadcast
+m := a > b                       // a mask: int32x4, -1 where a > b, 0 elsewhere
+m.Select(a, b)                   // a where the mask is nonzero, b elsewhere
+m.Any(); m.All()                 // some / every lane nonzero
+min(a, b); max(a, b, c)          // lane by lane
+a.Sum(); a.Min(); a.Max()        // across the lanes, giving a float32
+a.Store(ys[i:])                  // write the lanes to ys[i:]; panics if len(ys[i:]) < 4
+a[2]; len(a)                     // read a lane (bounds-checked); len is the constant 4
+```
+
+- Operators: `+ - *` on all vectors, `/` on float vectors only (no CPU divides integer vectors:
+  divide the lanes one at a time), `& | ^ &^` and unary `^` on integer vectors, unary `-`.
+  Integer lanes wrap. `<<` and `>>` shift every lane of an integer vector by one count, as in
+  Go: a count of at least the lane width gives 0 (or the sign for `>>` of a signed lane), and a
+  negative count panics.
+- Both operands have the same type. An untyped constant is broadcast; a typed scalar must be
+  broadcast with a conversion (`v * float32x4(k)`).
+- Comparisons give a mask, a signed integer vector as wide as the lanes (`float64x2` compares to
+  `int64x2`), not a `bool`. Compare whole vectors with `(a == b).All()`. So SIMD vectors can't be
+  map keys and a struct holding one can't be compared with `==`.
+- Lanes are read-only (`v[i] = x` and `&v[i]` are errors): build a new vector with a literal,
+  `Select` or arithmetic.
+- `Sum` adds the upper half of the lanes to the lower half until one lane is left, so the order of
+  float additions is fixed, the same on every CPU. `Min` and `Max` pick lanes the way the builtin
+  `min` and `max` do.
+- Converting float lanes to integer lanes saturates, as scalar conversions do (§5).
+- `Any`, `All` and `Select` are methods of integer vectors; `Select` takes two vectors with the
+  mask's lane count and lane width (`int32x4` selects between `float32x4`s or `uint32x4`s).
+- `println(v)` prints `[a b c d]`.
+- SIMD types can't be constants. They have no references, so they go anywhere a number can:
+  struct fields, arrays, channels, `go` arguments.
+- A named type can have a SIMD type (`type Vec4 float32x4`) and keeps its operators and
+  methods; its own methods can't be named like a built-in one.
+
+Most loops vectorize without these types (§9). Use them where clang can't: float sums (it keeps
+the source order), searches that stop early, and data-dependent selects.
 
 ### Functions, tasks, externs
 
@@ -458,6 +520,9 @@ must not outlive the memory it points to:
 | `cannot call M on a copy of x` | declare M with a pointer receiver: `func (x *T) M()` |
 | `named result r holds … storage` | return an unnamed `T{...}`, or take a `*T` parameter and fill it |
 | `append exceeds capacity` (runtime panic) | larger storage, or `append(...) in a` |
+| `mismatched types float32x4 and float32` | broadcast the scalar: `v * float32x4(k)` |
+| `integer vectors have no division` | divide lane by lane in a loop, or multiply by a reciprocal in a float vector |
+| `non-boolean condition` on `a == b` with vectors | comparisons give masks: `(a == b).All()` or `.Any()` |
 | `map capacity exceeded` (runtime panic) | a larger `cap N` |
 | `memory budget exceeded` | lower pool sizes (`pool pkg.task N`), fewer `workers`, or raise the budget |
 | `workers auto can't be checked against the budget` | `workers N` with the number of cores you deploy on |
@@ -631,7 +696,8 @@ resp := try c.Get("/notes/1")    // resp.Body and resp.HeaderValue(...) view buf
   loop, and neither may have its address taken. A test before the loop runs the unchecked copy only
   when every index the counter can reach is in range, so a loop that would go out of range still
   panics at the same iteration. Index through a slice variable, not a struct field (`buf := s.buf`
-  before the loop), to qualify. Floating-point sums stay in source order, so they don't vectorize.
+  before the loop), to qualify. Floating-point sums stay in source order, so they don't vectorize:
+  write them with SIMD types (§3).
 - Panics print `panic: <message>` with the goroutine and source position, then exit with status 2.
   There is no `recover`. A nil dereference becomes `panic: runtime error: invalid memory address or
   nil pointer dereference`.

@@ -893,6 +893,12 @@ HTTP throughput about 3–5% lower, nbody 3.5% slower, the notes binary 109 → 
   load generator: every latency was a whole µs) — fixed: `sq_nanotime` uses `CLOCK_MONOTONIC_RAW` on
   macOS (nanoseconds; `CLOCK_MONOTONIC` counts whole µs there); test: `testdata/run/time_resolution.sq`
 
+- [x] **Z7. A comparison's untyped bool converted to any type** (bug, C compiler failure;
+  pre-existing, found by `TestFuzzSoundness` on the simd branch) — fixed: `convertUntyped` accepts a
+  non-constant untyped bool only for boolean types; test: `testdata/errors/untyped_bool.sq`
+  `show(a.Used() > 0)` with `func show(s string)`, or `var n int = x > 1`, type-checked, and clang
+  rejected the C (`passing 'int' to parameter of incompatible type 'sq_string'`).
+
 ## S: standard library gaps (found tidying the examples, 2026-10-16)
 
 Not bugs: things the examples had to hand-write. Each is a small, self-contained addition.
@@ -975,3 +981,5 @@ Append one line per work session: date, items closed, anything left half-done.
 - 2026-10-15: second whole-project review logged as section F (F1–F56, all open). Start with P0: F1–F16.
 - 2026-10-15: section F closed (F1–F56): compiler items fixed directly; stdlib/HTTP and runtime/CLI items fixed in parallel worktrees and merged. Go divergences F53–F56 and parts of F46 documented in the spec rather than changed. Whole suite passes on macOS and on Linux (Docker, arm64). Nothing committed.
 - 2026-10-16: section S closed (S1–S10): new packages `flag` and `math/rand`, plus `net.WithTimeout`/`AppendHostPort`, `json` TextMax/SetIndent, `sqlite` Stmt.Exec, padding helpers; examples use them. Done in parallel worktrees and merged.
+- 2026-10-16: Z7 (untyped bool from a comparison converted to any type) found by the fuzzer while
+  adding SIMD types on the `simd` branch; fixed there.

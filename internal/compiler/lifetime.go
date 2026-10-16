@@ -1173,8 +1173,8 @@ func (l *lifetime) call(e *CallExpr) []vec {
 			}
 			return []vec{l.alloc(e.InArena, e.P)}
 		}
-		if basicKind(e.T) == Rawptr || basicKind(e.T) == Uintptr {
-			return nil
+		if basicKind(e.T) == Rawptr || basicKind(e.T) == Uintptr || simdOf(e.T) != nil {
+			return nil // a SIMD load copies the elements: the vector holds no reference
 		}
 		return []vec{x}
 	}

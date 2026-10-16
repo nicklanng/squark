@@ -216,6 +216,31 @@ link "sqlite3"
 var table [64K]byte                               // 4K, 16M, 1G size literals
 ```
 
+### SIMD
+
+```go
+// sum adds xs with two 4-lane accumulators: SIMD instructions on arm64 and x86-64
+func sum(xs []float64) float64 {
+    var a, b float64x4
+    i := 0
+    for ; i+8 <= len(xs); i += 8 {
+        a += float64x4(xs[i:])     // load 4 lanes
+        b += float64x4(xs[i+4:])
+    }
+    s := (a + b).Sum()
+    for ; i < len(xs); i++ {
+        s += xs[i]
+    }
+    return s
+}
+```
+
+`float32x4`, `uint8x16`, `float64x4` and the other SIMD types take operators lane by lane;
+comparisons give masks (`(v == c).Any()`, `m.Select(a, b)`). Plain loops over slices are
+vectorized by clang already (see Loops below); SIMD types are for what it can't do, such as float
+sums, which it keeps in source order, and searches that stop early. Both run 6 to 7 times faster
+than scalar code in `bench/squark/kernels`.
+
 ### What's deliberately missing
 
 There's no `new` or `make` without an arena, no string `+` without an arena, and no recursion. There
@@ -267,7 +292,10 @@ the OS.
   `workers 3` (processes) is similar. See `bench/workers-linux.sh`.
 - `ONLY=kernels bench/run.sh` runs only the loop kernels (`bench/squark/kernels`: saxpy, byte
   xor, row-wise add and others). Use it to watch vectorization. Results go to
-  `bench/results/kernels.md`. Go doesn't vectorize, so its times are the scalar baseline.
+  `bench/results/kernels.md`. Go doesn't vectorize, so its times are the scalar baseline. A
+  kernel named `…/simd` is written with SIMD types; Go runs its scalar version.
+- `bench/compare.sh [REF]` builds the same kernels with another revision's compiler (default
+  `main`) and with the working tree's, and prints both (`bench/results/compare.md`).
 - The JSON benchmark compares hand-written append code with Go's reflection-based `encoding/json`.
 - wordfreq streams the file and interns words in an arena, while Go's version reads the whole file,
   as idiomatic Go does.

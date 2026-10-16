@@ -210,6 +210,9 @@ func (g *gen) selector(e *SelectorExpr) string {
 
 func (g *gen) indexExpr(e *IndexExpr) string {
 	xt := e.X.info().T.Underlying()
+	if s, ok := xt.(*SIMD); ok {
+		return g.simdIndex(e, s)
+	}
 	idx := g.coerce(e.Index, tInt)
 	checked := func(n string) string {
 		if g.unchecked[e] {
@@ -416,6 +419,9 @@ func (g *gen) binaryExpr(e *BinaryExpr) string {
 		return b.String()
 	}
 	t := e.T
+	if s := simdOf(t); s != nil && (e.Op == SHL || e.Op == SHR) {
+		return g.simdShift(e, s)
+	}
 	switch e.Op {
 	case LAND:
 		return "(" + g.expr(e.X) + " && " + g.expr(e.Y) + ")"
@@ -472,6 +478,9 @@ func (g *gen) shiftC(op Tok, a, n string, signedCount bool, t Type) string {
 }
 
 func (g *gen) comparison(e *BinaryExpr) string {
+	if simdOf(e.T) != nil {
+		return g.simdComparison(e)
+	}
 	x, y := e.X, e.Y
 	t := x.info().T
 	if isNilLit(x) || isNilType(t) {
@@ -522,6 +531,8 @@ func (g *gen) compositeLit(e *CompositeLit) string {
 	t := e.T
 	ct := g.ctype(t)
 	switch u := t.Underlying().(type) {
+	case *SIMD:
+		return g.simdCompositeLit(e, u)
 	case *Struct:
 		if len(e.Elts) == 0 {
 			return "((" + ct + "){})"
@@ -749,6 +760,9 @@ func (g *gen) conversion(e *CallExpr) string {
 	if isNilType(from) || isNilLit(x) {
 		return g.zero(to)
 	}
+	if st := simdOf(to); st != nil {
+		return g.simdConversion(e, st)
+	}
 	s := g.expr(x)
 	if e.InArena != nil && (isString(to) || isByteSlice(to)) {
 		// copy into the arena (Go's copying conversion)
@@ -807,6 +821,8 @@ func (g *gen) builtinCall(e *CallExpr) string {
 			}
 		case *Array:
 			fixed = u.Len
+		case *SIMD:
+			fixed = u.Lanes
 		case *VecType:
 			if e.Builtin == "cap" {
 				fixed = u.Len
@@ -1002,7 +1018,12 @@ func (g *gen) builtinCall(e *CallExpr) string {
 		}
 		b.WriteString("})")
 		return b.String()
+	case "simd.Store", "simd.Sum", "simd.Min", "simd.Max", "simd.Any", "simd.All", "simd.Select":
+		return g.simdBuiltin(e)
 	case "min", "max":
+		if s := simdOf(e.T); s != nil {
+			return g.simdMinMax(e, s)
+		}
 		t := e.T
 		ct := g.ctype(t)
 		var b strings.Builder

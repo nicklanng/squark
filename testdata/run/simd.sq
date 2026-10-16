@@ -1,0 +1,38 @@
+package main
+
+// SIMD vectors: operators lane by lane, masks, conversions, loads and stores, methods.
+
+type Vec4 float32x4
+
+func scale(v float32x4, k float32) float32x4 { return v * float32x4(k) }
+
+func main() {
+	a := float32x4{1, 2, 3, 4}
+	b := float32x4(2)
+	println(a + b, a * b, a / b, -a, a - 1, 2 * a)
+	println(a.Sum(), a.Min(), a.Max(), len(a), a[2])
+	m := a > b
+	println(m, m.Any(), m.All(), (a == a).All())
+	println(m.Select(a, b), min(a, b), max(a, b, float32x4(3.5)))
+	xs := []float32{9, 8, 7, 6, 5}
+	v := float32x4(xs[1:])
+	println(v, scale(v, 0.5))
+	var buf [6]float32
+	v.Store(buf[2:])
+	println(buf[0], buf[2], buf[5])
+	i := int32x4{1, -2, 3, -4}
+	println(i << 1, i >> 1, uint32x4{1, 2, 3, 0x80000000} >> 31, i & 1, i | 8, i ^ -1, i &^ 1, ^i)
+	var n uint = 40
+	println(i << n, i >> n)
+	println(float32x4(i), int32x4(float32x4{1.9, -1.9, 3e10, -3e10}), uint8x16(int8x16{-1, 2}))
+	u := uint8x16{250, 5, 7}
+	println((u + 10)[0], u.Sum(), u.Max())
+	d := float64x4{1, 2, 3, 4}
+	println(d.Sum(), d * d, int64x4(d))
+	var w Vec4 = Vec4{1, 1, 1, 1}
+	println(float32x4(w) + a)
+	var z int16x8
+	println(z, z.Any())
+	k := 3
+	println(a[k])
+}

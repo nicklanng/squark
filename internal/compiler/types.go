@@ -146,6 +146,59 @@ type VecType struct {
 	Elem Type
 }
 
+// SIMD is a vector of Lanes numbers that operators work on lane by lane (float32x4, uint8x16):
+// one value in a 128- or 256-bit register.
+type SIMD struct {
+	Name  string
+	Elem  *Basic
+	Lanes int64
+}
+
+func (t *SIMD) Underlying() Type { return t }
+func (t *SIMD) String() string   { return t.Name }
+
+// simdTypes are the predeclared SIMD types: every integer and float element type, 128 and 256
+// bits wide.
+var simdTypes = func() []*SIMD {
+	var ts []*SIMD
+	for _, bits := range []int64{128, 256} {
+		for _, e := range []struct {
+			name string
+			t    *Basic
+		}{{"int8", tInt8}, {"uint8", tUint8}, {"int16", tInt16}, {"uint16", tUint16}, {"int32", tInt32}, {"uint32", tUint32}, {"int64", tInt64}, {"uint64", tUint64}, {"float32", tFloat32}, {"float64", tFloat64}} {
+			lanes := bits / (sizeofBasic(e.t.Kind) * 8)
+			ts = append(ts, &SIMD{Name: fmt.Sprintf("%sx%d", e.name, lanes), Elem: e.t, Lanes: lanes})
+		}
+	}
+	return ts
+}()
+
+// simdType returns the predeclared SIMD type of lanes elements of kind k, or nil.
+func simdType(k BasicKind, lanes int64) *SIMD {
+	for _, t := range simdTypes {
+		if t.Elem.Kind == k && t.Lanes == lanes {
+			return t
+		}
+	}
+	return nil
+}
+
+// simdOf returns t's SIMD type, or nil.
+func simdOf(t Type) *SIMD {
+	if t == nil {
+		return nil
+	}
+	s, _ := t.Underlying().(*SIMD)
+	return s
+}
+
+// maskOf is the type of a comparison of two s vectors: signed integers as wide as s's elements,
+// each -1 (true) or 0.
+func maskOf(s *SIMD) *SIMD {
+	k := map[int64]BasicKind{1: Int8, 2: Int16, 4: Int32, 8: Int64}[sizeofBasic(s.Elem.Kind)]
+	return simdType(k, s.Lanes)
+}
+
 // MapStore is map[K]V cap N: inline storage for a fixed-capacity map.
 type MapStore struct {
 	Key, Value Type
@@ -468,6 +521,9 @@ func Identical(a, b Type) bool {
 	case *VecType:
 		y, ok := b.(*VecType)
 		return ok && x.Len == y.Len && Identical(x.Elem, y.Elem)
+	case *SIMD:
+		y, ok := b.(*SIMD)
+		return ok && x.Lanes == y.Lanes && x.Elem.Kind == y.Elem.Kind
 	case *MapStore:
 		y, ok := b.(*MapStore)
 		return ok && x.Cap == y.Cap && Identical(x.Key, y.Key) && Identical(x.Value, y.Value)
@@ -616,6 +672,8 @@ func whyIncomparable(t Type) string {
 		return whyIncomparable(u.Elem)
 	case *VecType:
 		return "a vector"
+	case *SIMD:
+		return "a SIMD vector (== compares lanes; use (a == b).All())"
 	case *Slice:
 		return "a slice"
 	case *Map, *MapStore:

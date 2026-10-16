@@ -72,6 +72,12 @@ func (c *Checker) call(e *CallExpr) {
 				e.Builtin = "arena." + f.Sel.Name
 			case *VecType:
 				e.Builtin = "vec." + f.Sel.Name
+			case *SIMD:
+				e.Builtin = "simd." + f.Sel.Name
+				if f.Sel.Name == "Select" {
+					c.simdSelect(e, simdOf(f.X.info().T))
+					return
+				}
 			default:
 				e.Builtin = "error." + f.Sel.Name
 			}
@@ -218,6 +224,10 @@ func (c *Checker) conversion(e *CallExpr, t Type) {
 	if _, ok := t.(*ErrorType); ok {
 		// error(msg) or error(code, msg): build an error value
 		c.errorCtor(e)
+		return
+	}
+	if simdOf(t) != nil {
+		c.simdConversion(e, t)
 		return
 	}
 	e.Conversion = true
@@ -440,6 +450,15 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 				e.Const, e.Mode = constant.MakeInt64(u.Len), ModeConst
 			}
 		case *Slice, *Chan:
+		case *SIMD:
+			if name == "cap" {
+				c.errorf(x.Pos(), "invalid argument %s (type %s) for cap", exprString(x), xi.T)
+				c.invalid(e)
+				return
+			}
+			if !hasCall(x) {
+				e.Const, e.Mode = constant.MakeInt64(u.Lanes), ModeConst
+			}
 		case *Map: // cap is the number of entries the storage holds (map[K]V cap N: N)
 		case *Basic:
 			if name == "cap" || !isString(u) {
@@ -589,6 +608,7 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 			c.defaultUntyped(a)
 			t := a.info().T
 			switch t.Underlying().(type) {
+			case *SIMD: // printed as [a b c d]
 			case *Basic, *Pointer, *ErrorType:
 				if isNilType(t) {
 					c.errorf(a.Pos(), "use of untyped nil in %s", name)
@@ -651,7 +671,7 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 		for _, a := range e.Args {
 			c.assignable(a, t, name)
 		}
-		if !isNumeric(t) && !isString(t) {
+		if !isNumeric(t) && !isString(t) && simdOf(t) == nil {
 			c.errorf(e.P, "invalid argument for %s: %s is not ordered", name, t)
 		}
 		e.T, e.Mode = t, ModeValue

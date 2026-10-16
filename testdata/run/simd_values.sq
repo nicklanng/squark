@@ -1,0 +1,33 @@
+package main
+
+// SIMD vectors are plain values: struct fields, arrays, channel elements, task arguments.
+
+type Vec4 float32x4
+
+type Particle struct {
+	pos, vel float32x4
+}
+
+var ch chan int32x8 cap 2
+
+task worker(v int32x8) pool 1 {
+	ch <- v * 2
+}
+
+func main() {
+	var ps [3]Particle
+	for i := range ps {
+		ps[i].vel = float32x4(float32(i))
+		ps[i].pos += ps[i].vel
+	}
+	println(ps[2].pos)
+	var vs [2]uint16x8
+	vs[1] = uint16x8{1, 2, 3}
+	println(vs[1].Sum(), len(vs[0]))
+	w := Vec4{1, 2, 3, 4}
+	println(w.Sum(), w+w, (w > 2).Any())
+	go worker(int32x8{1, 2, 3, 4, 5, 6, 7, 8})
+	println(<-ch)
+	var p *Particle = &ps[1]
+	println(p.vel[3], (p.pos == p.vel).All())
+}

@@ -1,0 +1,82 @@
+package main
+
+// The SIMD versions. Their results equal the scalar ones because the data are small integers,
+// so every float sum is exact in any order.
+
+//squark:noinline
+func sumFloat64SIMD(x []float64) float64 {
+	var a, b float64x4
+	i := 0
+	for ; i+8 <= len(x); i += 8 {
+		a += float64x4(x[i:])
+		b += float64x4(x[i+4:])
+	}
+	s := (a + b).Sum()
+	for ; i < len(x); i++ {
+		s += x[i]
+	}
+	return s
+}
+
+//squark:noinline
+func dotFloat32SIMD(x []float32, y []float32) float32 {
+	var a, b float32x8
+	i := 0
+	for ; i+16 <= len(x); i += 16 {
+		a += float32x8(x[i:]) * float32x8(y[i:])
+		b += float32x8(x[i+8:]) * float32x8(y[i+8:])
+	}
+	s := (a + b).Sum()
+	for ; i < len(x); i++ {
+		s += x[i] * y[i]
+	}
+	return s
+}
+
+//squark:noinline
+func indexByteSIMD(b []byte, c byte) int {
+	cs := uint8x16(c)
+	i := 0
+	for ; i+16 <= len(b); i += 16 {
+		if m := uint8x16(b[i:]) == cs; m.Any() {
+			for j := 0; j < 16; j++ {
+				if m[j] != 0 {
+					return i + j
+				}
+			}
+		}
+	}
+	for ; i < len(b); i++ {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// simdKernel runs a SIMD kernel: the same work and result as the scalar kernel it is named after.
+func simdKernel(name string, reps int) (int64, bool) {
+	var check int64
+	switch name {
+	case "sum-float64/simd":
+		for r := 0; r < reps; r++ {
+			check += int64(sumFloat64SIMD(f64a[:]))
+			f64a[r%n] = float64(r % 64)
+		}
+	case "dot-float32/simd":
+		setupDot()
+		for r := 0; r < reps; r++ {
+			check += int64(dotFloat32SIMD(f32a[:], f32b[:]))
+			f32a[r%n] = float32(r % 8)
+		}
+	case "index-byte/simd":
+		setupIndex()
+		for r := 0; r < reps; r++ {
+			check += int64(indexByteSIMD(u8c[:], 255))
+			u8c[r%(n-5)] = byte(r % 200)
+		}
+	default:
+		return 0, false
+	}
+	return check, true
+}

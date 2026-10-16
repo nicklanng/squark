@@ -491,6 +491,8 @@ func (g *gen) deferCall(d *DeferStmt) string {
 
 func (g *gen) printArgC(s string, t Type) string {
 	switch u := t.Underlying().(type) {
+	case *SIMD:
+		return g.simdPrint(s, u)
 	case *Basic:
 		switch {
 		case u.Kind == String:

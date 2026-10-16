@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // The Go version of bench/squark/kernels: one small loop run many times. Go doesn't vectorize
@@ -97,7 +98,28 @@ func brighten(dst []byte, src []byte) {
 	}
 }
 
+//go:noinline
+func dotFloat32(a []float32, b []float32) float32 {
+	var s float32
+	for i := range a {
+		s += a[i] * b[i]
+	}
+	return s
+}
+
+//go:noinline
+func indexByte(b []byte, c byte) int {
+	for i := range b {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
 func kernel(name string, reps int) {
+	// a SIMD variant (sum-float64/simd) runs the scalar Go kernel: Go has no SIMD types
+	name = strings.TrimSuffix(name, "/simd")
 	for i := 0; i < kn; i++ {
 		f32a[i] = float32(i % 64)
 		f64a[i] = float64(i % 64)
@@ -151,6 +173,20 @@ func kernel(name string, reps int) {
 			brighten(u8c[:], u8a[:])
 			check += int64(u8c[r%kn])
 			u8a[r%kn] = byte(r)
+		}
+	case "dot-float32":
+		for i := range f32b {
+			f32b[i] = float32(i % 7)
+		}
+		for r := 0; r < reps; r++ {
+			check += int64(dotFloat32(f32a[:], f32b[:]))
+			f32a[r%kn] = float32(r % 8)
+		}
+	case "index-byte":
+		u8c[kn-5] = 255
+		for r := 0; r < reps; r++ {
+			check += int64(indexByte(u8c[:], 255))
+			u8c[r%(kn-5)] = byte(r % 200)
 		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown kernel", name)

@@ -104,6 +104,9 @@ expect("x := 1e-9", "1e-9", "constant.numeric.float.decimal");
 expect("x := 0b1010", "0b1010", "constant.numeric.integer.binary");
 expect("var line [..256]byte", "..", "keyword.operator.vector");
 expect("var line [..256]byte", "byte", "storage.type.builtin");
+expect("a := float32x4(xs[i:])", "float32x4", "storage.type.builtin");
+expect("var m uint8x16", "uint8x16", "storage.type.builtin");
+expect("float32x45", "float32x45", "-");
 expect("var seen map[string]int cap 1024", "cap", "keyword.other.capacity");
 expect("var jobs chan Job cap 16", "cap", "keyword.other.capacity");
 

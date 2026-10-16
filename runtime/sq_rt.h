@@ -18,6 +18,30 @@ typedef struct { uint8_t *p; int64_t len, cap; } sq_bytes; // layout of a squark
 #define SQ_STR(lit, n) ((sq_string){(const uint8_t *)(lit), (n)})
 #define SQ_NORETURN __attribute__((noreturn, cold))
 
+// ---- SIMD vectors ----
+// The SIMD types (spec §3) are GNU C vectors. The 256-bit ones are only 16-byte aligned: stacks and
+// arenas guarantee 16, and unaligned vector loads are as fast as aligned ones on aligned data.
+typedef int8_t sq_int8x16 __attribute__((vector_size(16)));
+typedef uint8_t sq_uint8x16 __attribute__((vector_size(16)));
+typedef int16_t sq_int16x8 __attribute__((vector_size(16)));
+typedef uint16_t sq_uint16x8 __attribute__((vector_size(16)));
+typedef int32_t sq_int32x4 __attribute__((vector_size(16)));
+typedef uint32_t sq_uint32x4 __attribute__((vector_size(16)));
+typedef int64_t sq_int64x2 __attribute__((vector_size(16)));
+typedef uint64_t sq_uint64x2 __attribute__((vector_size(16)));
+typedef float sq_float32x4 __attribute__((vector_size(16)));
+typedef double sq_float64x2 __attribute__((vector_size(16)));
+typedef int8_t sq_int8x32 __attribute__((vector_size(32), aligned(16)));
+typedef uint8_t sq_uint8x32 __attribute__((vector_size(32), aligned(16)));
+typedef int16_t sq_int16x16 __attribute__((vector_size(32), aligned(16)));
+typedef uint16_t sq_uint16x16 __attribute__((vector_size(32), aligned(16)));
+typedef int32_t sq_int32x8 __attribute__((vector_size(32), aligned(16)));
+typedef uint32_t sq_uint32x8 __attribute__((vector_size(32), aligned(16)));
+typedef int64_t sq_int64x4 __attribute__((vector_size(32), aligned(16)));
+typedef uint64_t sq_uint64x4 __attribute__((vector_size(32), aligned(16)));
+typedef float sq_float32x8 __attribute__((vector_size(32), aligned(16)));
+typedef double sq_float64x4 __attribute__((vector_size(32), aligned(16)));
+
 // ---- panics ----
 SQ_NORETURN void sq_panic_cstr(const char *msg, const char *file, int line);
 SQ_NORETURN void sq_panic_str(sq_string msg, const char *file, int line);

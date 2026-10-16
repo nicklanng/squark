@@ -328,6 +328,8 @@ func (g *gen) typeKey(t Type) string {
 		return "error"
 	case *ArenaType:
 		return "arena"
+	case *SIMD:
+		return u.Name
 	case *VecType:
 		return fmt.Sprintf("[..%d]%s", u.Len, g.typeKey(u.Elem))
 	case *MapStore:
@@ -363,6 +365,8 @@ func (g *gen) ctype(t Type) string {
 	switch u := t.(type) {
 	case *Basic:
 		return g.basicC(u.Kind)
+	case *SIMD:
+		return simdC(u)
 	case *ErrorType:
 		return "sq_error"
 	case *ArenaType:
@@ -771,6 +775,9 @@ func cString(s string) string {
 func (g *gen) constant(v constant.Value, t Type) string {
 	if isUntyped(t) {
 		t = defaultType(t)
+	}
+	if s := simdOf(t); s != nil {
+		return g.simdConstant(v, s)
 	}
 	k := basicKind(t)
 	switch {

@@ -18,6 +18,9 @@ func init() {
 		universe.Insert(&Object{Kind: ObjType, Name: t.Name, Type: t, state: 2})
 	}
 	universe.Insert(&Object{Kind: ObjType, Name: "uint8", Type: tUint8, state: 2})
+	for _, t := range simdTypes {
+		universe.Insert(&Object{Kind: ObjType, Name: t.Name, Type: t, state: 2})
+	}
 	universe.Insert(&Object{Kind: ObjType, Name: "rune", Type: tInt32, state: 2})
 	universe.Insert(&Object{Kind: ObjType, Name: "anytype", Type: tAnyType, state: 2})
 	universe.Insert(&Object{Kind: ObjType, Name: "error", Type: tError, state: 2})
@@ -481,6 +484,8 @@ func sizeBoundSeen(t Type, seen map[*Named]bool) int64 {
 		return sizeBoundSeen(u.underlying, seen)
 	case *Basic:
 		return sizeofBasic(u.Kind)
+	case *SIMD:
+		return u.Lanes * sizeofBasic(u.Elem.Kind)
 	case *Array:
 		return mul(u.Len, sizeBoundSeen(u.Elem, seen))
 	case *VecType:
@@ -605,6 +610,9 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			}
 			if _, ok := named.Underlying().(*VecType); ok && isVecMethod(fn.Name) {
 				c.errorf(d.Name.P, "method %s.%s would be hidden by the vector method %s; give it another name", named.Obj.Name, fn.Name, fn.Name)
+			}
+			if simdOf(named) != nil && simdMethods[fn.Name] {
+				c.errorf(d.Name.P, "method %s.%s would be hidden by the SIMD method %s; give it another name", named.Obj.Name, fn.Name, fn.Name)
 			}
 			named.Methods = append(named.Methods, fn)
 		}
@@ -928,6 +936,12 @@ func (c *Checker) resolveConst(o *Object) {
 		if x.info().Mode != ModeInvalid {
 			c.errorf(x.Pos(), "%s is not constant", exprString(x))
 		}
+		o.Type = tInvalid
+		o.Const = constant.MakeUnknown()
+		return
+	}
+	if typ != nil && simdOf(typ) != nil {
+		c.errorf(o.Pos, "invalid constant type %s: SIMD vectors can't be constants; use a var", typ)
 		o.Type = tInvalid
 		o.Const = constant.MakeUnknown()
 		return

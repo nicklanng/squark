@@ -287,6 +287,10 @@ func (w *ptWalker) expr(x Expr) {
 			if len(e.Args) > 0 {
 				w.written(e.Args[0], "copied into")
 			}
+		case "simd.Store":
+			if len(e.Args) > 0 {
+				w.written(e.Args[0], "stored into")
+			}
 		case "vec.Push", "vec.TryPush", "vec.Append", "vec.TryAppend", "vec.Pop", "vec.Clear":
 			if se, ok := unparen(e.Fun).(*SelectorExpr); ok {
 				w.written(se.X, "changed by "+se.Sel.Name)

@@ -106,6 +106,37 @@ func brighten(dst []byte, src []byte) {
 	}
 }
 
+//squark:noinline
+func dotFloat32(a []float32, b []float32) float32 {
+	var s float32
+	for i := range a {
+		s += a[i] * b[i]
+	}
+	return s
+}
+
+// indexByte returns the index of the first c in b, or -1. The loop can exit early, which
+// stops clang vectorizing it.
+//
+//squark:noinline
+func indexByte(b []byte, c byte) int {
+	for i := range b {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func setupDot() {
+	for i := range f32b {
+		f32b[i] = float32(i % 7)
+	}
+}
+
+// one 255 near the end: the search reads almost all of u8c
+func setupIndex() { u8c[n-5] = 255 }
+
 func main() {
 	if os.NArgs() != 3 {
 		println("usage: kernels NAME REPS")
@@ -172,9 +203,25 @@ func main() {
 			check += int64(u8c[r%n])
 			u8a[r%n] = byte(r)
 		}
+	case "dot-float32":
+		setupDot()
+		for r := 0; r < reps; r++ {
+			check += int64(dotFloat32(f32a[:], f32b[:]))
+			f32a[r%n] = float32(r % 8)
+		}
+	case "index-byte":
+		setupIndex()
+		for r := 0; r < reps; r++ {
+			check += int64(indexByte(u8c[:], 255))
+			u8c[r%(n-5)] = byte(r % 200)
+		}
 	default:
-		println("unknown kernel", name)
-		os.Exit(2)
+		c, ok := simdKernel(name, reps)
+		if !ok {
+			println("unknown kernel", name)
+			os.Exit(2)
+		}
+		check = c
 	}
 	println(check)
 }

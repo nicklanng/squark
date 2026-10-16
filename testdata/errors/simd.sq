@@ -1,0 +1,34 @@
+package main
+
+func main() {
+	a := float32x4{1, 2, 3, 4}
+	i := int32x4{1, 2, 3, 4}
+	var f float32 = 2
+	_ = a * f // ERROR "broadcast a scalar with float32x4(f)"
+	_ = a + i // ERROR "mismatched types float32x4 and int32x4"
+	_ = i / i // ERROR "integer vectors have no division"
+	_ = i % i // ERROR "operator % not defined"
+	_ = a & a // ERROR "operator & not defined"
+	_ = a << 1 // ERROR "must be integer"
+	_ = ^a // ERROR "operator ^ not defined"
+	if a == a { // ERROR "non-boolean condition"
+	}
+	_ = a + 1.5
+	_ = i + 1.5 // ERROR "truncated to integer"
+	_ = int8x16{} + 300 // ERROR "overflows int8"
+	a[0] = 1 // ERROR "cannot assign"
+	_ = &a[0] // ERROR "a SIMD lane"
+	_ = a[4] // ERROR "out of bounds"
+	_ = float32x4{1, 2, 3, 4, 5} // ERROR "out of bounds"
+	_ = float32x8(a) // ERROR "needs the same number of lanes"
+	_ = float32x4(i[0]) // ERROR "it takes a float32 (broadcast)"
+	_ = a.Any() // ERROR "Any is defined on integer vectors"
+	_ = (a > a).Select(i, i)
+	_ = (a > a).Select(int16x8{}, int16x8{}) // ERROR "the mask has 4 lanes of 32 bits"
+	_ = cap(a) // ERROR "invalid argument"
+	var m map[float32x4]int cap 4 // ERROR "float32x4"
+	_ = m
+	const n = len(a)
+	var arr [n]int
+	_ = arr
+}
