@@ -1,0 +1,131 @@
+package main
+
+// json.NewDecoderIn: Key and Text decode into the arena at the exact size, results kept in
+// variables outside the loop; String and Field still work; without an arena Key and Text fail with
+// ErrNoArena; a full arena is ErrBuffer, not a panic
+
+import "json"
+
+type Note struct {
+	Title string
+	Tags  [..4]string
+	Body  string
+}
+
+// parse fills n from data: n may keep strings from Text, which live in the arena (the checker ties
+// them to the data too, as it does everything from the decoder)
+func parse(data []byte, a arena, n *Note) error {
+	d := json.NewDecoderIn(data, a)
+	if !d.BeginObject() {
+		return d.Err
+	}
+	for {
+		key, ok := d.Key()
+		if !ok {
+			break
+		}
+		switch key {
+		case "title":
+			before := a.Used()
+			n.Title, _ = d.Text()
+			println("  title used", a.Used()-before, "len", len(n.Title))
+		case "body":
+			n.Body, _ = d.Text()
+		case "tags":
+			if d.BeginArray() {
+				for d.More() {
+					t, ok := d.Text()
+					if ok {
+						n.Tags.TryPush(t)
+					}
+				}
+			}
+		case "note":
+			var buf [32]byte // String still decodes into a caller buffer
+			s, _ := d.String(buf[:])
+			println("  note:", s)
+		default:
+			println("  skip", key)
+			d.Skip()
+		}
+	}
+	if !d.End() {
+		return d.Err
+	}
+	return nil
+}
+
+func main() {
+	var src [256]byte
+	arena a 1K {
+		var n Note // request-scoped: inside the arena's block
+		k := copy(src[:], `{"title": "café \"q\" 😀 \ud800x", "xAy": [1, {"a": null}], "tags": ["a", "\t", ""], "note": "plain", "body": "b`+"\xff"+`c"}`)
+		err := parse(src[:k], a, &n)
+		println("err nil:", err == nil)
+		println("title:", n.Title)
+		println("tags:", len(n.Tags), n.Tags[0], n.Tags[1] == "\t", n.Tags[2] == "")
+		println("body:", n.Body == "b�c", len(n.Body))
+
+		// an escaped key comes out decoded
+		var data [64]byte
+		k = copy(data[:], `{"xAy\n": 1}`)
+		d := json.NewDecoderIn(data[:k], a)
+		d.BeginObject()
+		key, ok := d.Key()
+		println("key:", ok, key == "xAy\n")
+
+		// errors: not a string, a bad escape, an unterminated string
+		k = copy(data[:], `[1, "a\qb", "open`)
+		d = json.NewDecoderIn(data[:k], a)
+		d.BeginArray()
+		d.More()
+		_, ok = d.Text()
+		println("number:", ok, d.Err == json.ErrType)
+		d = json.NewDecoderIn(data[4:k], a)
+		_, ok = d.Text()
+		println("bad escape:", ok, d.Err == json.ErrSyntax)
+		d = json.NewDecoderIn(data[11:k], a)
+		_, ok = d.Text()
+		println("unterminated:", ok, d.Err == json.ErrSyntax)
+
+		// a key that isn't a string
+		k = copy(data[:], `{1: 2}`)
+		d = json.NewDecoderIn(data[:k], a)
+		d.BeginObject()
+		_, ok = d.Key()
+		println("bad key:", ok, d.Err == json.ErrType)
+	}
+
+	// no arena: Text and Key fail, String and Field work
+	var data [64]byte
+	k := copy(data[:], `{"k": "v", "k2": "v2"}`)
+	d := json.NewDecoder(data[:k])
+	d.BeginObject()
+	var kb, vb [8]byte
+	key, ok := d.Field(kb[:])
+	println("field:", ok, key)
+	_, ok = d.Text()
+	println("text without arena:", ok, d.Err.Error())
+	d = json.NewDecoder(data[:k])
+	d.BeginObject()
+	_, ok = d.Key()
+	println("key without arena:", ok, d.Err.Error())
+	d = json.NewDecoder(data[:k])
+	d.BeginObject()
+	d.Field(kb[:])
+	s, ok := d.String(vb[:])
+	println("string:", ok, s)
+
+	// a full arena
+	arena small 16 {
+		k = copy(data[:], `["0123456789abcdef", "x"]`)
+		d := json.NewDecoderIn(data[:k], small)
+		d.BeginArray()
+		d.More()
+		s, ok := d.Text()
+		println("fits:", ok, s, small.Left())
+		d.More()
+		_, ok = d.Text()
+		println("too big:", ok, d.Err.Error(), small.Left())
+	}
+}

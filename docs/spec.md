@@ -533,12 +533,30 @@ if err != nil {
     return ErrNoUser
 }
 
-// HTTP handler
-func handle(w *http.ResponseWriter, r *http.Request) {
-    w.SetHeader("Content-Type", "application/json")
-    w.WriteHeader(201)
-    w.WriteString(`{"ok":true}`)
+// HTTP server: Go 1.22 patterns ("METHOD /path/{param}"), 404 and 405 answered for you
+func getNote(w *http.ResponseWriter, r *http.Request) {
+    id, ok := r.PathInt("id")        // r.PathValue("id") for the string; r.QueryParam("q") decoded
+    if !ok {
+        http.Error(w, 404)           // "404 Not Found"; w.Text(code, s) for your own text
+        return
+    }
+    j := w.JSON()                    // streams into the response: commas, nesting and escapes handled
+    j.Object()
+    j.Key("id")
+    j.Int(id)
+    j.End()
 }
+func main() {
+    http.HandleFunc("GET /notes/{id}", getNote)
+    http.ListenAndServe(http.Port(8080), nil)   // nil: the HandleFunc patterns
+}
+
+// JSON request body: strings decoded into the request's arena, no buffers to size
+d := json.NewDecoderIn(r.Body, r.Arena)
+for k, ok := d.Key(); ok; k, ok = d.Key() {
+    if k == "title" { title, _ = d.Text() } else { d.Skip() }   // lives until the response is done
+}
+// json.NewEncoder(buf) / NewEncoderIn(nil, a) build JSON outside a handler the same way
 
 // HTTP client: responses are read into the caller's buffer, and the connection is kept alive
 var buf [64K]byte
@@ -636,19 +654,16 @@ pool http.serveConn 128
 var db sqlite.DB
 var countStmt sqlite.Stmt
 
-func handle(w *http.ResponseWriter, r *http.Request) {
-    if r.Path != "/count" {
-        w.WriteHeader(404)
-        return
-    }
+// GET /count: how many items the database holds
+func count(w *http.ResponseWriter, r *http.Request) {
     defer countStmt.Reset()
     row, err := countStmt.Step()
     if err != nil || !row {
-        w.WriteHeader(500)
+        http.Error(w, 500)
         return
     }
     var buf [24]byte
-    w.Write(strconv.AppendInt(buf[:0], countStmt.ColumnInt(0)))
+    w.Text(200, string(strconv.AppendInt(buf[:0], countStmt.ColumnInt(0))))
 }
 
 func setup() error {
@@ -667,7 +682,8 @@ func main() {
         println("setup:", err.Error())
         return
     }
-    if err := http.ListenAndServe(":8080", handle); err != nil {
+    http.HandleFunc("GET /count", count)
+    if err := http.ListenAndServe(":8080", nil); err != nil {
         panic(err)
     }
 }

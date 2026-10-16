@@ -1,0 +1,180 @@
+package main
+
+// Test server for TestMux (internal/driver): patterns registered with http.HandleFunc, served by
+// ListenAndServe(addr, nil). Each handler answers with what it saw, so the test can check which
+// pattern won and what its wildcards held.
+
+import (
+	"http"
+	"os"
+	"strconv"
+)
+
+func health(w *http.ResponseWriter, r *http.Request) { w.Text(200, "ok") }
+
+func listNotes(w *http.ResponseWriter, r *http.Request) { w.Text(200, "list") }
+
+func createNote(w *http.ResponseWriter, r *http.Request) { w.Text(201, "create") }
+
+func getNote(w *http.ResponseWriter, r *http.Request) {
+	id, ok := r.PathInt("id")
+	if !ok {
+		http.Error(w, 404)
+		return
+	}
+	w.Text(200, "note ")
+	w.WriteInt(id)
+}
+
+func deleteNote(w *http.ResponseWriter, r *http.Request) {
+	w.Text(200, "delete ")
+	w.WriteString(r.PathValue("id"))
+}
+
+func static(w *http.ResponseWriter, r *http.Request) {
+	w.Text(200, "static ")
+	w.WriteString(r.Path)
+}
+
+func file(w *http.ResponseWriter, r *http.Request) {
+	w.Text(200, "file ")
+	w.WriteString(r.PathValue("path"))
+}
+
+func root(w *http.ResponseWriter, r *http.Request) { w.Text(200, "root") }
+
+func userPost(w *http.ResponseWriter, r *http.Request) {
+	w.Text(200, "user ")
+	w.WriteString(r.PathValue("name"))
+	w.WriteString(" post ")
+	w.WriteString(r.PathValue("pid"))
+}
+
+func adminPost(w *http.ResponseWriter, r *http.Request) {
+	w.Text(200, "admin post ")
+	w.WriteString(r.PathValue("pid"))
+}
+
+func query(w *http.ResponseWriter, r *http.Request) {
+	n, ok := r.QueryInt("n")
+	w.Text(200, r.QueryParam("name"))
+	w.WriteByte(' ')
+	if ok {
+		w.WriteInt(n)
+	} else {
+		w.WriteString("none")
+	}
+}
+
+func enc(w *http.ResponseWriter, r *http.Request) { w.Text(200, r.PathValue("v")) }
+
+func anyMethod(w *http.ResponseWriter, r *http.Request) {
+	w.Text(200, "any ")
+	w.WriteString(r.Method)
+}
+
+var long [600]byte
+
+func doc(w *http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(201)
+	j := w.JSON()
+	j.Object()
+	j.Key("id")
+	j.Int(7)
+	j.Key("name")
+	j.String("quote \" and \\ and \n")
+	j.Key("long")
+	j.String(string(long[:]))
+	j.Key("list")
+	j.Array()
+	for i := range 3 {
+		j.Object()
+		j.Key("i")
+		j.Int(i)
+		j.Key("half")
+		j.Float(float64(i) / 2)
+		j.End()
+	}
+	j.End()
+	j.Key("ok")
+	j.Bool(true)
+	j.Key("none")
+	j.Null()
+	j.Key("raw")
+	j.Raw([]byte(`{"a":[1,2]}`) in r.Arena)
+	j.End()
+	if err := j.Finish(); err != nil {
+		panic(err)
+	}
+}
+
+var huge [3000]byte
+
+// big is larger than the write buffer several times over: the encoder's buffer-full retry, and
+// strings and Raw values long enough to go to the response directly.
+func big(w *http.ResponseWriter, r *http.Request) {
+	j := w.JSON()
+	j.Array()
+	for i := range 3000 {
+		j.Object()
+		j.Key("i")
+		j.Int(i)
+		j.Key("s")
+		j.String(string(long[:i%len(long)]))
+		j.End()
+	}
+	j.String(string(huge[:]))
+	raw := make([]byte, 0, 2200) in r.Arena
+	raw = append(raw, '[')
+	for i := range 700 {
+		if i > 0 {
+			raw = append(raw, ',')
+		}
+		raw = append(raw, '1', '2')
+	}
+	raw = append(raw, ']')
+	j.Raw(raw)
+	j.End()
+	if err := j.Finish(); err != nil {
+		panic(err)
+	}
+}
+
+func misuse(w *http.ResponseWriter, r *http.Request) {
+	j := w.JSON()
+	j.Object()
+	j.Int(1) // no key
+	if err := j.Finish(); err != nil {
+		w.WriteString(" ")
+		w.WriteString(err.Error())
+	}
+}
+
+func main() {
+	for i := range len(long) {
+		long[i] = 'a' + byte(i%26)
+	}
+	for i := range len(huge) {
+		huge[i] = 'A' + byte(i%26)
+	}
+	http.HandleFunc("GET /big", big)
+	http.HandleFunc("GET /doc", doc)
+	http.HandleFunc("GET /misuse", misuse)
+	http.HandleFunc("GET /health", health)
+	http.HandleFunc("GET /notes", listNotes)
+	http.HandleFunc("POST /notes", createNote)
+	http.HandleFunc("GET /notes/{id}", getNote)
+	http.HandleFunc("DELETE /notes/{id}", deleteNote)
+	http.HandleFunc("/static/", static)
+	http.HandleFunc("GET /files/{path...}", file)
+	http.HandleFunc("GET /{$}", root)
+	http.HandleFunc("GET /users/{name}/posts/{pid}", userPost)
+	http.HandleFunc("GET /users/admin/posts/{pid}", adminPost)
+	http.HandleFunc("GET /q", query)
+	http.HandleFunc("GET /enc/{v}", enc)
+	http.HandleFunc("/any", anyMethod)
+	port, _ := strconv.Atoi(os.Arg(1))
+	if err := http.ListenAndServe(http.Port(port), nil); err != nil {
+		panic(err)
+	}
+}

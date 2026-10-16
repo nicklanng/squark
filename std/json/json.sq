@@ -1,5 +1,6 @@
-// Package json writes and reads JSON without allocating: encoding appends to caller buffers,
-// decoding is a pull parser whose strings are views of the input or of caller buffers.
+// Package json writes and reads JSON without allocating: encoding appends to caller buffers (an
+// Encoder adds the commas and nesting), decoding is a pull parser whose strings are views of the
+// input or of caller buffers, or are copied into an arena.
 package json
 
 import (
@@ -10,6 +11,11 @@ import (
 const ErrSyntax = error(1, "json: syntax error")
 const ErrType = error(2, "json: unexpected value type")
 const ErrBuffer = error(3, "json: string does not fit in buffer")
+const ErrFull = error(4, "json: output does not fit in buffer")
+const ErrMisuse = error(5, "json: encoder call out of place")
+const ErrDepth = error(6, "json: nested too deeply")
+const ErrFloat = error(7, "json: NaN or infinity has no JSON form")
+const ErrNoArena = error(8, "json: decoder has no arena")
 
 const hex = "0123456789abcdef"
 
@@ -103,17 +109,29 @@ func AppendBool(dst []byte, v bool) []byte {
 	return append(dst, "false"...)
 }
 
-// Decoder pulls values out of a JSON document.
+// Decoder pulls values out of a JSON document. The first error is kept in Err, and every call
+// after it fails.
 type Decoder struct {
 	data  []byte
 	pos   int
 	depth int
 	first bool
+	a     arena // for Text and Key; nil from NewDecoder
 	Err   error
 }
 
+// NewDecoder reads data. Strings are decoded into caller buffers (String, Field).
 func NewDecoder(data []byte) Decoder from data {
 	return Decoder{data: data}
+}
+
+// NewDecoderIn reads data and can also decode strings into a, at their exact size (Text, Key), so
+// callers don't size buffers. Their results are checked as references into the decoder (into both
+// data and a), so they may be kept wherever both live: with a request's Body and Arena,
+// `title, ok := d.Text()` may go into anything that lives until the response is done, and not into
+// a package variable. String and Field work as with NewDecoder.
+func NewDecoderIn(data []byte, a arena) Decoder from data, a {
+	return Decoder{data: data, a: a}
 }
 
 func (d *Decoder) fail(err error) {
@@ -186,137 +204,226 @@ func (d *Decoder) More() bool {
 
 // Field reads the next object key into keybuf, returning false at the end of the object.
 func (d *Decoder) Field(keybuf []byte) (string, bool) {
-	if d.Err != nil {
+	if !d.nextField() {
 		return "", false
+	}
+	key, ok := d.String(keybuf)
+	if !ok || !d.colon() {
+		return "", false
+	}
+	return key, true
+}
+
+// Key reads the next object key, as Field does, into the decoder's arena (NewDecoderIn) at its
+// exact size (see NewDecoderIn for how long it may be kept). ErrNoArena on a decoder from
+// NewDecoder, ErrBuffer if the arena is full.
+func (d *Decoder) Key() (string, bool) from d {
+	if !d.nextField() {
+		return "", false
+	}
+	key, ok := d.Text()
+	if !ok || !d.colon() {
+		return "", false
+	}
+	return key, true
+}
+
+// nextField consumes the comma before an object's next key, or the '}' at its end (false).
+func (d *Decoder) nextField() bool {
+	if d.Err != nil {
+		return false
 	}
 	c := d.peek()
 	if c == '}' {
 		d.pos++
 		d.first = false
-		return "", false
+		return false
 	}
 	if !d.first {
 		if c != ',' {
 			d.fail(ErrSyntax)
-			return "", false
+			return false
 		}
 		d.pos++
 	}
 	d.first = false
-	key, ok := d.String(keybuf)
-	if !ok {
-		return "", false
-	}
+	return true
+}
+
+// colon consumes the ':' after a key.
+func (d *Decoder) colon() bool {
 	if d.peek() != ':' {
 		d.fail(ErrSyntax)
-		return "", false
+		return false
 	}
 	d.pos++
-	return key, true
+	return true
 }
 
 // String decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD,
 // as in Go. ErrBuffer if the decoded string doesn't fit in buf.
 func (d *Decoder) String(buf []byte) (string, bool) from buf {
-	if d.Err != nil {
+	if !d.quote() {
 		return "", false
 	}
-	if d.peek() != '"' {
-		d.fail(ErrType)
-		return "", false
-	}
-	d.pos++
 	out := buf[:0]
-	for d.pos < len(d.data) {
-		c := d.data[d.pos]
-		d.pos++
-		if c == '"' {
-			return string(out), true
-		}
-		if c < 0x20 {
-			d.fail(ErrSyntax)
-			return "", false
-		}
-		if c < 0x80 && c != '\\' {
-			if len(out) == cap(out) {
-				d.fail(ErrBuffer)
-				return "", false
-			}
-			out = append(out, c)
-			continue
-		}
-		if c >= 0x80 { // copy a valid UTF-8 sequence; an invalid byte becomes U+FFFD
-			r, size := utf8.DecodeRuneInString(string(d.data[d.pos-1:]))
-			if r == utf8.RuneError && size == 1 {
-				if cap(out)-len(out) < 3 {
-					d.fail(ErrBuffer)
-					return "", false
-				}
-				out = append(out, "�"...)
-				continue
-			}
-			if cap(out)-len(out) < size {
-				d.fail(ErrBuffer)
-				return "", false
-			}
-			out = append(out, d.data[d.pos-1:d.pos-1+size]...)
-			d.pos += size - 1
-			continue
-		}
-		if d.pos >= len(d.data) {
-			break
-		}
-		e := d.data[d.pos]
-		d.pos++
-		var r rune
-		switch e {
-		case '"', '\\', '/':
-			r = rune(e)
-		case 'n':
-			r = '\n'
-		case 't':
-			r = '\t'
-		case 'r':
-			r = '\r'
-		case 'b':
-			r = 8
-		case 'f':
-			r = 12
-		case 'u':
-			r = d.hex4()
+	for {
+		r, n := d.char()
+		if n < 0 {
 			if d.Err != nil {
 				return "", false
 			}
-			if r >= 0xD800 && r < 0xE000 {
-				// a high surrogate must be followed by a low one; anything else is U+FFFD
-				hi := r
-				r = utf8.RuneError
-				if hi < 0xDC00 && d.pos+1 < len(d.data) && d.data[d.pos] == '\\' && d.data[d.pos+1] == 'u' {
-					save := d.pos
-					d.pos += 2
-					lo := d.hex4()
-					if d.Err != nil {
-						return "", false
-					}
-					if lo >= 0xDC00 && lo < 0xE000 {
-						r = 0x10000 + (hi-0xD800)<<10 + (lo - 0xDC00)
-					} else {
-						d.pos = save // not a pair: that escape is decoded on its own
-					}
-				}
-			}
-		default:
-			d.fail(ErrSyntax)
-			return "", false
+			return string(out), true
 		}
-		if cap(out)-len(out) < utf8.RuneLen(r) {
+		size := n
+		if n == 0 {
+			size = utf8.RuneLen(r)
+		}
+		if cap(out)-len(out) < size {
+			if n > 0 {
+				d.pos -= n - 1 // just after the character's first byte
+			}
 			d.fail(ErrBuffer)
 			return "", false
 		}
-		out = utf8.AppendRune(out, r)
+		if n > 0 {
+			out = append(out, d.data[d.pos-n:d.pos]...)
+		} else {
+			out = utf8.AppendRune(out, r)
+		}
 	}
-	d.fail(ErrSyntax)
-	return "", false
+}
+
+// Text decodes a JSON string, as String does, into the decoder's arena (NewDecoderIn) at its exact
+// size (see NewDecoderIn for how long it may be kept). ErrNoArena on a decoder from NewDecoder,
+// ErrBuffer if the arena is full; the decoded string is measured first, so a full arena uses none
+// of it.
+func (d *Decoder) Text() (string, bool) from d {
+	if d.Err != nil {
+		return "", false
+	}
+	if d.a == nil {
+		d.fail(ErrNoArena)
+		return "", false
+	}
+	start := d.pos
+	if !d.quote() {
+		return "", false
+	}
+	n := 0 // a first pass measures the decoded string
+	for {
+		r, k := d.char()
+		if k < 0 {
+			break
+		}
+		if k > 0 {
+			n += k
+		} else {
+			n += utf8.RuneLen(r)
+		}
+	}
+	if d.Err != nil {
+		return "", false
+	}
+	d.pos = start
+	if d.a.Left() < n {
+		d.fail(ErrBuffer)
+		return "", false
+	}
+	buf := make([]byte, n) in d.a
+	return d.String(buf)
+}
+
+// quote consumes the '"' that starts a string (ErrType if the next value isn't one).
+func (d *Decoder) quote() bool {
+	if d.Err != nil {
+		return false
+	}
+	if d.peek() != '"' {
+		d.fail(ErrType)
+		return false
+	}
+	d.pos++
+	return true
+}
+
+// char decodes the next character of a string at d.pos. It returns n > 0 when the n bytes just
+// consumed (d.data[d.pos-n:d.pos], an ASCII byte or a valid UTF-8 sequence) are the character as
+// they are, n == 0 with the rune r for an escape (or U+FFFD for an invalid byte), and n < 0 at the
+// closing quote or after an error (Err set).
+func (d *Decoder) char() (rune, int) {
+	if d.pos >= len(d.data) {
+		d.fail(ErrSyntax)
+		return 0, -1
+	}
+	c := d.data[d.pos]
+	d.pos++
+	if c == '"' {
+		return 0, -1
+	}
+	if c < 0x20 {
+		d.fail(ErrSyntax)
+		return 0, -1
+	}
+	if c < 0x80 && c != '\\' {
+		return 0, 1
+	}
+	if c >= 0x80 { // a valid UTF-8 sequence as it is; an invalid byte becomes U+FFFD
+		r, size := utf8.DecodeRuneInString(string(d.data[d.pos-1:]))
+		if r == utf8.RuneError && size == 1 {
+			return utf8.RuneError, 0
+		}
+		d.pos += size - 1
+		return 0, size
+	}
+	if d.pos >= len(d.data) {
+		d.fail(ErrSyntax)
+		return 0, -1
+	}
+	e := d.data[d.pos]
+	d.pos++
+	var r rune
+	switch e {
+	case '"', '\\', '/':
+		r = rune(e)
+	case 'n':
+		r = '\n'
+	case 't':
+		r = '\t'
+	case 'r':
+		r = '\r'
+	case 'b':
+		r = 8
+	case 'f':
+		r = 12
+	case 'u':
+		r = d.hex4()
+		if d.Err != nil {
+			return 0, -1
+		}
+		if r >= 0xD800 && r < 0xE000 {
+			// a high surrogate must be followed by a low one; anything else is U+FFFD
+			hi := r
+			r = utf8.RuneError
+			if hi < 0xDC00 && d.pos+1 < len(d.data) && d.data[d.pos] == '\\' && d.data[d.pos+1] == 'u' {
+				save := d.pos
+				d.pos += 2
+				lo := d.hex4()
+				if d.Err != nil {
+					return 0, -1
+				}
+				if lo >= 0xDC00 && lo < 0xE000 {
+					r = 0x10000 + (hi-0xD800)<<10 + (lo - 0xDC00)
+				} else {
+					d.pos = save // not a pair: that escape is decoded on its own
+				}
+			}
+		}
+	default:
+		d.fail(ErrSyntax)
+		return 0, -1
+	}
+	return r, 0
 }
 
 func (d *Decoder) hex4() rune {
@@ -495,8 +602,9 @@ func (d *Decoder) Null() bool {
 	return d.literal("null")
 }
 
-// MaxDepth is how deeply Skip follows nested arrays and objects; a deeper value is ErrSyntax.
-// (The decoder doesn't allocate, so Skip keeps its bracket stack in a fixed array.)
+// MaxDepth is how deeply Skip follows nested arrays and objects (a deeper value is ErrSyntax),
+// and how deeply an Encoder nests them (ErrDepth). Neither allocates, so each keeps its bracket
+// stack in a fixed array of MaxDepth bits.
 const MaxDepth = 1024
 
 // Skip skips one value of any type, checking that it is valid JSON: brackets match, commas and

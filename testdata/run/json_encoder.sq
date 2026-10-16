@@ -1,0 +1,366 @@
+package main
+
+// json.Encoder: commas and nesting, every kind of value, escapes matching AppendString, misuse and
+// depth errors, a full buffer (each call all or nothing), streaming through a small buffer with
+// Clear, and growing into an arena
+
+import (
+	"bytes"
+	"json"
+	"math"
+)
+
+func show(label string, e *json.Encoder) {
+	err := e.Finish()
+	if err != nil {
+		println(label, string(e.Bytes()), "err:", err.Error())
+	} else {
+		println(label, string(e.Bytes()))
+	}
+}
+
+func kinds() {
+	var buf [512]byte
+	e := json.NewEncoder(buf[:0])
+	e.Object()
+	e.Key("s")
+	e.String("tab\t\"q\" \\ é\x01")
+	e.Key("i")
+	e.Int(-9223372036854775807 - 1)
+	e.Key("f")
+	e.Array()
+	e.Float(1.5)
+	e.Float(0.1)
+	e.Float(1e21)
+	e.Float(1e-7)
+	e.Float(123456789)
+	e.Float(0)
+	e.Float(-2.5e-300)
+	e.End()
+	e.Key("b")
+	e.Bool(true)
+	e.Key("nb")
+	e.Bool(false)
+	e.Key("n")
+	e.Null()
+	e.Key("raw")
+	var raw [32]byte
+	n := copy(raw[:], ` {"pre": [1, 2]} `)
+	e.Raw(raw[:n])
+	e.Key("empty")
+	e.Object()
+	e.End()
+	e.Key("nested")
+	e.Array()
+	e.Array()
+	e.End()
+	e.Object()
+	e.Key("k\n")
+	e.Array()
+	e.Int(1)
+	e.Object()
+	e.End()
+	e.End()
+	e.End()
+	e.String("")
+	e.End()
+	e.End()
+	show("kinds:", &e)
+
+	var b2 [16]byte
+	t := json.NewEncoder(b2[:0])
+	t.Int(42)
+	show("scalar:", &t)
+}
+
+func strings() {
+	encode := [...]string{"a\xffb", "\xe2\x80\xa8|\xe2\x80\xa9", "ok é 世", "\x00\x1f", "\xed\xa0\x80", "\xf0\x9f\x98\x80", "\xc3", "<&>", "\x7f"}
+	for _, s := range encode {
+		var b1, b2 [64]byte
+		e := json.NewEncoder(b1[:0])
+		e.String(s)
+		want := json.AppendString(b2[:0], s)
+		println("string", string(e.Bytes()) == string(want), len(e.Bytes()), e.Finish() == nil)
+		// a buffer exactly the size of the string, and one byte short
+		var b3 [64]byte
+		f := json.NewEncoder(b3[:0:len(want)])
+		f.String(s)
+		g := json.NewEncoder(b3[:0 : len(want)-1])
+		g.String(s)
+		println("  exact", f.Err == nil, "short", g.Err == json.ErrFull, len(g.Bytes()))
+	}
+}
+
+func misuse() {
+	var buf [64]byte
+	e := json.NewEncoder(buf[:0])
+	e.Object()
+	e.Int(1) // no key
+	show("value without key:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.Key("x")
+	show("key at top level:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.Array()
+	e.Key("x")
+	show("key in array:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.Object()
+	e.Key("x")
+	e.Key("y")
+	show("key twice:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.End()
+	show("end with nothing open:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.Array()
+	e.End()
+	e.End()
+	show("end once too often:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.Object()
+	e.Key("x")
+	e.End()
+	show("end after key:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.Int(1)
+	e.Int(2)
+	show("two top-level values:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.Object()
+	e.Key("a")
+	e.Array()
+	show("still open:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	show("nothing written:", &e)
+
+	e = json.NewEncoder(buf[:0])
+	e.Array()
+	e.Int(1)
+	e.Object() // no error yet
+	e.Int(2)   // misuse: the first error is kept, and nothing more is written
+	e.End()
+	e.End()
+	e.String("more")
+	show("after an error:", &e)
+
+	floats := [...]float64{math.NaN(), math.Inf(1), math.Inf(-1)}
+	for _, f := range floats {
+		e = json.NewEncoder(buf[:0])
+		e.Array()
+		e.Float(f)
+		show("float:", &e)
+	}
+
+	raws := [...]string{"", "{", "1 2", "[1,]", `{"a"}`, "nul", `"\x"`, "  [ ]  ", "-0.5e3", `"é"`}
+	for _, r := range raws {
+		var rb [16]byte
+		n := copy(rb[:], r)
+		e = json.NewEncoder(buf[:0])
+		e.Array()
+		e.Raw(rb[:n])
+		e.End()
+		show("raw:", &e)
+	}
+}
+
+func depth() {
+	var buf [2100]byte
+	e := json.NewEncoder(buf[:0])
+	for i := 0; i < json.MaxDepth; i++ {
+		e.Array()
+	}
+	for i := 0; i < json.MaxDepth; i++ {
+		e.End()
+	}
+	println("depth MaxDepth:", e.Finish() == nil, len(e.Bytes()))
+
+	e = json.NewEncoder(buf[:0])
+	for i := 0; i <= json.MaxDepth; i++ {
+		e.Array()
+	}
+	println("depth MaxDepth+1:", e.Finish().Error(), len(e.Bytes()))
+}
+
+func full() {
+	var buf [12]byte
+	e := json.NewEncoder(buf[:0])
+	e.Array()
+	e.Int(12345)
+	e.String("abcdef") // doesn't fit: nothing of it is written
+	e.Int(1)           // after the error: ignored
+	println("full:", string(e.Bytes()), e.Err.Error())
+
+	// drain, clear the error and retry: the document continues
+	var out [..64]byte
+	out.Append(e.Bytes())
+	e.Clear()
+	e.Err = nil
+	e.String("abcdef")
+	e.End()
+	out.Append(e.Bytes())
+	println("retried:", string(out[:]), e.Finish() == nil)
+}
+
+// streamed writes a document through a 16-byte buffer, draining into out whenever a call doesn't
+// fit; strings too long for the buffer go through RawStart and json.WriteString.
+type streamer struct {
+	e   json.Encoder
+	out *bytes.Buffer
+}
+
+func (s *streamer) drain() {
+	s.out.Write(s.e.Bytes())
+	s.e.Clear()
+}
+
+// retry runs after each call: if it didn't fit, drain and report that it must be made again
+func (s *streamer) retry() bool {
+	if s.e.Err != json.ErrFull {
+		return false
+	}
+	s.drain()
+	s.e.Err = nil
+	return true
+}
+
+func (s *streamer) str(v string) {
+	s.e.String(v)
+	if s.retry() {
+		s.e.String(v)
+		if s.retry() { // longer than the buffer: write it straight through
+			if s.e.RawStart() {
+				s.drain()
+				json.WriteString(s.out, v)
+			}
+		}
+	}
+}
+
+func (s *streamer) key(k string) {
+	s.e.Key(k)
+	if s.retry() {
+		s.e.Key(k)
+	}
+}
+
+func (s *streamer) num(v int) {
+	s.e.Int(v)
+	if s.retry() {
+		s.e.Int(v)
+	}
+}
+
+func (s *streamer) open(obj bool) {
+	if obj {
+		s.e.Object()
+	} else {
+		s.e.Array()
+	}
+	if s.retry() {
+		if obj {
+			s.e.Object()
+		} else {
+			s.e.Array()
+		}
+	}
+}
+
+func (s *streamer) end() {
+	s.e.End()
+	if s.retry() {
+		s.e.End()
+	}
+}
+
+func doc(s *streamer) {
+	s.open(true)
+	s.key("items")
+	s.open(false)
+	for i := 0; i < 5; i++ {
+		s.open(true)
+		s.key("id")
+		s.num(i * 1000)
+		s.key("name")
+		s.str("item\t\"x\"")
+		s.end()
+	}
+	s.end()
+	s.key("long")
+	s.str("a string much longer than the sixteen-byte buffer, with \"quotes\" and é")
+	s.key("after")
+	s.open(false)
+	s.end()
+	s.end()
+}
+
+func stream() {
+	var small [16]byte
+	var store [1024]byte
+	out := bytes.NewBuffer(store[:0])
+	s := streamer{e: json.NewEncoder(small[:0]), out: &out}
+	doc(&s)
+	err := s.e.Finish()
+	s.drain()
+
+	var big [1024]byte
+	var store2 [1024]byte
+	out2 := bytes.NewBuffer(store2[:0])
+	t := streamer{e: json.NewEncoder(big[:0]), out: &out2}
+	doc(&t)
+	t.drain()
+	println("streamed:", err == nil, string(out.Bytes()) == string(out2.Bytes()), out.Len())
+	println(string(out.Bytes()))
+}
+
+func inArena() {
+	arena a 8K {
+		e := json.NewEncoderIn(nil, a)
+		e.Array()
+		for i := 0; i < 300; i++ {
+			e.Int(i)
+		}
+		e.End()
+		println("arena:", e.Finish() == nil, len(e.Bytes()), cap(e.Bytes()), a.Used())
+
+		// a buffer that isn't the arena's latest allocation is copied once, then grows in place
+		var small [8]byte
+		f := json.NewEncoderIn(small[:0], a)
+		f.Array()
+		f.String("0123456789") // copied into a 64-byte block
+		x := new(int) in a     // so f's buffer isn't the latest allocation: copied again, once
+		*x = 1
+		for i := 1; i < 100; i++ {
+			f.String("0123456789")
+		}
+		f.End()
+		println("arena copy:", f.Finish() == nil, len(f.Bytes()), cap(f.Bytes()), a.Used())
+	}
+	arena b 256 {
+		e := json.NewEncoderIn(nil, b)
+		e.Array()
+		for i := 0; i < 100 && e.Err == nil; i++ {
+			e.String("0123456789")
+		}
+		println("arena full:", e.Err.Error(), len(e.Bytes()), b.Used() <= b.Cap())
+	}
+}
+
+func main() {
+	kinds()
+	strings()
+	misuse()
+	depth()
+	full()
+	stream()
+	inArena()
+}

@@ -1,0 +1,335 @@
+package json
+
+import (
+	"strconv"
+	"utf8"
+)
+
+// Encoder writes one JSON value, usually an object or an array, adding the commas, colons and
+// quotes itself. Object and Array open a container and End closes the innermost one; inside an
+// object, Key names the member whose value comes next. Values are String, Int, Float, Bool, Null
+// and Raw (JSON encoded already):
+//
+//	e := json.NewEncoder(buf[:0])
+//	e.Object()
+//	e.Key("id")
+//	e.Int(7)
+//	e.Key("tags")
+//	e.Array()
+//	e.String("a")
+//	e.End()
+//	e.End()
+//	if e.Finish() == nil {
+//		w.Write(e.Bytes()) // {"id":7,"tags":["a"]}
+//	}
+//
+// Nothing is written that would make the output invalid: a call out of place (a value in an object
+// without a Key, Key outside an object or twice, End with nothing open or right after a Key, a
+// second top-level value) sets Err to ErrMisuse, nesting deeper than MaxDepth sets ErrDepth, a NaN
+// or infinite Float sets ErrFloat, and Raw of invalid JSON sets ErrSyntax. The first error is kept,
+// and every call after it writes nothing. Finish also checks that the value is complete.
+//
+// The output is appended to the slice given to NewEncoder. When it is full, a call sets ErrFull
+// and writes nothing at all (each call writes all of its output or none); with NewEncoderIn the
+// slice grows into the arena instead. To stream through a small buffer, write e.Bytes() out and
+// call e.Clear() whenever it fills: Clear empties the buffer but keeps the nesting and comma state,
+// so the next call continues the same document. A call that fails with ErrFull can be retried
+// after draining: set e.Err = nil first.
+type Encoder struct {
+	buf   []byte
+	a     arena                 // grows buf; nil from NewEncoder
+	top   int                   // a.Used() when buf was last grown: buf ends there while it still is
+	objs  [MaxDepth / 64]uint64 // bit i: level i is an object (else an array)
+	depth int
+	first bool // nothing written yet in the innermost container
+	key   bool // a Key was written: its value is next
+	done  bool // the top-level value has been started
+	Err   error
+}
+
+// NewEncoder appends to dst, up to its capacity (ErrFull beyond it).
+func NewEncoder(dst []byte) Encoder from dst {
+	return Encoder{buf: dst}
+}
+
+// NewEncoderIn appends to dst (nil is fine) and grows it into a when it is full, doubling as
+// append in an arena does: in place while the buffer is a's latest allocation, by copying (the old
+// buffer stays allocated until a ends) otherwise. ErrFull if a can't hold the larger buffer.
+func NewEncoderIn(dst []byte, a arena) Encoder from dst, a {
+	return Encoder{buf: dst, a: a, top: -1}
+}
+
+// Bytes returns the output written so far (since the last Clear).
+func (e *Encoder) Bytes() []byte from e { return e.buf }
+
+// Clear empties the output buffer but keeps the encoder's state (the open containers, whether a
+// comma comes next, Err), so the calls after it continue the same document: write e.Bytes()
+// somewhere, then call e.Clear(), to stream a large document through a small buffer.
+func (e *Encoder) Clear() { e.buf = e.buf[:0] }
+
+// Finish returns Err, after setting it to ErrMisuse if the document isn't complete: nothing was
+// written, or an array or object is still open.
+func (e *Encoder) Finish() error {
+	if e.Err == nil && (e.depth > 0 || !e.done) {
+		e.Err = ErrMisuse
+	}
+	return e.Err
+}
+
+// Object starts an object: Key and a value for each member, then End.
+func (e *Encoder) Object() { e.open('{') }
+
+// Array starts an array: its elements, then End.
+func (e *Encoder) Array() { e.open('[') }
+
+// End closes the innermost open object or array.
+func (e *Encoder) End() {
+	if e.Err != nil {
+		return
+	}
+	if e.depth == 0 || e.key {
+		e.fail(ErrMisuse)
+		return
+	}
+	if !e.room(1) {
+		return
+	}
+	e.depth--
+	if e.inObject(e.depth) {
+		e.buf = append(e.buf, '}')
+	} else {
+		e.buf = append(e.buf, ']')
+	}
+	e.first = false
+}
+
+// Key writes the name of an object's next member; its value comes next.
+func (e *Encoder) Key(name string) {
+	if e.Err != nil {
+		return
+	}
+	if e.depth == 0 || !e.inObject(e.depth-1) || e.key {
+		e.fail(ErrMisuse)
+		return
+	}
+	comma := 1
+	if e.first {
+		comma = 0
+	}
+	if !e.room(comma + quotedLen(name) + 1) {
+		return
+	}
+	if comma == 1 {
+		e.buf = append(e.buf, ',')
+	}
+	e.buf = AppendString(e.buf, name)
+	e.buf = append(e.buf, ':')
+	e.first = false
+	e.key = true
+}
+
+// String writes s as a JSON string, escaped exactly as AppendString does.
+func (e *Encoder) String(s string) {
+	if e.value(quotedLen(s)) {
+		e.buf = AppendString(e.buf, s)
+	}
+}
+
+// Int writes an integer.
+func (e *Encoder) Int(v int) {
+	var tmp [24]byte
+	b := strconv.AppendInt(tmp[:0], v)
+	if e.value(len(b)) {
+		e.buf = append(e.buf, b...)
+	}
+}
+
+// Float writes the shortest decimal that reads back as v (strconv.AppendFloat with prec -1:
+// exponent notation below 1e-6 and from 1e21, as JavaScript writes numbers). JSON has no NaN or
+// infinity: those set ErrFloat.
+func (e *Encoder) Float(v float64) {
+	if e.Err != nil {
+		return
+	}
+	if v-v != 0 { // NaN or ±Inf (Inf-Inf is NaN)
+		e.fail(ErrFloat)
+		return
+	}
+	var tmp [32]byte
+	b := strconv.AppendFloat(tmp[:0], v, -1)
+	if e.value(len(b)) {
+		e.buf = append(e.buf, b...)
+	}
+}
+
+// Bool writes true or false.
+func (e *Encoder) Bool(v bool) {
+	if v {
+		e.literal("true")
+	} else {
+		e.literal("false")
+	}
+}
+
+// Null writes null.
+func (e *Encoder) Null() { e.literal("null") }
+
+// Raw writes b, one complete JSON value encoded already (from another Encoder, a database, a
+// file), as the next value. It is checked as Decoder.Skip checks a value: invalid JSON sets
+// ErrSyntax and writes nothing.
+func (e *Encoder) Raw(b []byte) {
+	if e.Err != nil {
+		return
+	}
+	d := NewDecoder(b)
+	if !d.Skip() || !d.End() {
+		e.fail(ErrSyntax)
+		return
+	}
+	if e.value(len(b)) {
+		e.buf = append(e.buf, b...)
+	}
+}
+
+// RawStart is Raw for a value the caller writes itself, for one too large to go through the
+// buffer: it writes what comes before a value here (a comma or nothing) and counts the value as
+// written. The caller then writes exactly one complete JSON value straight after e.Bytes() (drain
+// the buffer and Clear, then json.WriteString(w, s) for a long string, say); it isn't checked.
+// False, writing nothing, if a value can't come next (Err is set).
+func (e *Encoder) RawStart() bool { return e.value(0) }
+
+func (e *Encoder) fail(err error) {
+	if e.Err == nil {
+		e.Err = err
+	}
+}
+
+func (e *Encoder) inObject(level int) bool {
+	return e.objs[level/64]&(1<<uint(level%64)) != 0
+}
+
+func (e *Encoder) literal(s string) {
+	if e.value(len(s)) {
+		e.buf = append(e.buf, s...)
+	}
+}
+
+func (e *Encoder) open(c byte) {
+	if e.Err != nil {
+		return
+	}
+	if e.depth == MaxDepth {
+		e.fail(ErrDepth)
+		return
+	}
+	if !e.value(1) {
+		return
+	}
+	if c == '{' {
+		e.objs[e.depth/64] |= 1 << uint(e.depth%64)
+	} else {
+		e.objs[e.depth/64] &^= 1 << uint(e.depth%64)
+	}
+	e.depth++
+	e.first = true
+	e.buf = append(e.buf, c)
+}
+
+// value starts a value of n bytes: it checks that a value may come next and that it fits, and
+// writes the comma before it if one is needed. False (Err set, nothing written) if not.
+func (e *Encoder) value(n int) bool {
+	if e.Err != nil {
+		return false
+	}
+	comma := 0
+	if e.depth == 0 {
+		if e.done {
+			e.fail(ErrMisuse)
+			return false
+		}
+	} else if e.inObject(e.depth - 1) {
+		if !e.key {
+			e.fail(ErrMisuse)
+			return false
+		}
+	} else if !e.first {
+		comma = 1
+	}
+	if !e.room(comma + n) {
+		return false
+	}
+	if comma == 1 {
+		e.buf = append(e.buf, ',')
+	}
+	e.first = false
+	e.key = false
+	e.done = true
+	return true
+}
+
+// room makes sure n more bytes fit in buf, growing it into the arena if there is one. False
+// (ErrFull) if they don't.
+func (e *Encoder) room(n int) bool {
+	l := len(e.buf)
+	if cap(e.buf)-l >= n {
+		return true
+	}
+	if e.a == nil {
+		e.fail(ErrFull)
+		return false
+	}
+	if e.a.Used() != e.top { // buf isn't the arena's latest allocation: copy it to a new block
+		c := max(2*cap(e.buf), l+n, 64)
+		if e.a.Left() < c {
+			e.fail(ErrFull)
+			return false
+		}
+		nb := make([]byte, l, c) in e.a
+		copy(nb, e.buf)
+		e.buf = nb
+		e.top = e.a.Used()
+		return true
+	}
+	for cap(e.buf)-l < n { // buf ends at the arena's top: append doubles it in place
+		c := cap(e.buf)
+		if e.a.Left() < c {
+			e.buf = e.buf[:l]
+			e.fail(ErrFull)
+			return false
+		}
+		e.buf = append(e.buf[:c], 0) in e.a
+		e.top = e.a.Used()
+	}
+	e.buf = e.buf[:l]
+	return true
+}
+
+// quotedLen is len(AppendString(nil, s)), so the Encoder knows a string fits before writing it.
+// Keep it in step with AppendString (TestJSONEncoderRandom would panic on a mismatch).
+func quotedLen(s string) int {
+	n := 2
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x80 {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if r == utf8.RuneError && size == 1 {
+				n += 3 // U+FFFD
+			} else if r == 0x2028 || r == 0x2029 {
+				n += 6
+			} else {
+				n += size
+			}
+			i += size - 1
+			continue
+		}
+		switch {
+		case c >= 0x20 && c != '"' && c != '\\':
+			n++
+		case c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t':
+			n += 2
+		default:
+			n += 6
+		}
+	}
+	return n
+}

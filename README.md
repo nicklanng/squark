@@ -15,13 +15,14 @@ import "http"
 budget 128M             // the build fails if the worst case can exceed this
 pool http.serveConn 512 // at most 512 connections served at once
 
-func handle(w *http.ResponseWriter, r *http.Request) {
-    greeting := "hello, " + r.QueryValue("name") + "\n" in r.Arena // per-request arena
-    w.WriteString(greeting)
+// GET /hello?name=world
+func hello(w *http.ResponseWriter, r *http.Request) {
+    w.Text(200, "hello, " + r.QueryParam("name") + "\n" in r.Arena) // per-request arena
 }
 
 func main() {
-    if err := http.ListenAndServe(":8080", handle); err != nil {
+    http.HandleFunc("GET /hello", hello)
+    if err := http.ListenAndServe(":8080", nil); err != nil {
         panic(err)
     }
 }

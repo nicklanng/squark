@@ -1,0 +1,422 @@
+package http
+
+import (
+	"strconv"
+	"strings"
+)
+
+// MaxRoutes is how many patterns HandleFunc can register.
+const MaxRoutes = 64
+
+// MaxPathParams is how many {name} wildcards one pattern may have.
+const MaxPathParams = 8
+
+const maxSegments = 16
+
+// segment is one /-separated piece of a pattern: a literal, or a {name} wildcard.
+type segment struct {
+	lit   string
+	param string
+}
+
+type route struct {
+	pattern string
+	method  string // "" matches every method
+	segs    [maxSegments]segment
+	nsegs   int
+	rest     string // {name...}: the last segment matches the rest of the path
+	subtree  bool   // the pattern ends in "/" (without {$}): everything below it matches
+	slashEnd bool   // the pattern ends in "/{$}": only the path ending in that "/" matches
+	h       HandlerFunc
+}
+
+// routes are the patterns HandleFunc registered (with threads, each scheduler thread registers
+// its own when it runs main).
+var routes [..MaxRoutes]route
+
+// HandleFunc registers h for pattern, as Go's http.HandleFunc does (Go 1.22 patterns). Serve with
+// ListenAndServe(addr, nil) to dispatch to the registered patterns.
+//
+// A pattern is [METHOD ]PATH. A method matches only that method ("GET" also matches HEAD); without
+// one every method matches. PATH is a sequence of /-separated segments, each a literal or a
+// wildcard: {name} matches one segment, {name...} (last) matches the rest of the path, and {$}
+// (last) matches only the path ending there. A path ending in / matches every path below it
+// ("/static/" matches "/static/a/b"); "/{$}" matches only "/". Wildcard values are read with
+// Request.PathValue or PathInt.
+//
+// When several patterns match, the most specific wins: literal segments before wildcards, an
+// exact path before a subtree, a longer subtree before a shorter, and a method before none. A path
+// that matches only patterns for other methods gets 405 Method Not Allowed with an Allow header;
+// one that matches none gets 404 Not Found. Registering a malformed or duplicate pattern, or more
+// than MaxRoutes, panics.
+func HandleFunc(pattern string, h HandlerFunc) {
+	var rt route
+	rt.pattern = pattern
+	rt.h = h
+	p := pattern
+	if sp := strings.IndexByte(p, ' '); sp >= 0 {
+		rt.method = p[:sp]
+		p = strings.TrimSpace(p[sp+1:])
+		if !isToken(rt.method) {
+			panic("http.HandleFunc: invalid method in pattern")
+		}
+	}
+	if len(p) == 0 || p[0] != '/' {
+		panic("http.HandleFunc: a pattern's path must start with /")
+	}
+	p = p[1:]
+	nparams := 0
+	for len(p) > 0 {
+		seg := p
+		more := false
+		if i := strings.IndexByte(p, '/'); i >= 0 {
+			seg, p, more = p[:i], p[i+1:], true
+		} else {
+			p = ""
+		}
+		if len(seg) >= 2 && seg[0] == '{' && seg[len(seg)-1] == '}' {
+			name := seg[1 : len(seg)-1]
+			switch {
+			case name == "$":
+				if more || len(p) > 0 {
+					panic("http.HandleFunc: {$} must end the pattern")
+				}
+				rt.subtree, rt.slashEnd = false, true
+				addRoute(rt)
+				return
+			case strings.HasSuffix(name, "..."):
+				if more {
+					panic("http.HandleFunc: {name...} must end the pattern")
+				}
+				rt.rest = name[:len(name)-3]
+				if !isWildcardName(rt.rest) {
+					panic("http.HandleFunc: invalid wildcard name in pattern")
+				}
+				rt.subtree = false
+				addRoute(rt)
+				return
+			default:
+				if !isWildcardName(name) {
+					panic("http.HandleFunc: invalid wildcard name in pattern")
+				}
+				nparams++
+				if nparams > MaxPathParams {
+					panic("http.HandleFunc: too many wildcards in one pattern (MaxPathParams)")
+				}
+				addSegment(&rt, segment{param: name})
+			}
+		} else {
+			if strings.IndexByte(seg, '{') >= 0 || strings.IndexByte(seg, '}') >= 0 {
+				panic("http.HandleFunc: a wildcard must be a whole segment")
+			}
+			if seg == "" && more {
+				panic("http.HandleFunc: empty segment (//) in pattern")
+			}
+			if seg != "" {
+				addSegment(&rt, segment{lit: seg})
+			}
+		}
+		if more && len(p) == 0 {
+			rt.subtree = true // ends in "/"
+		}
+	}
+	if rt.nsegs == 0 {
+		rt.subtree = true // "/" matches everything
+	}
+	addRoute(rt)
+}
+
+func addSegment(rt *route, s segment) {
+	if rt.nsegs == maxSegments {
+		panic("http.HandleFunc: too many segments in pattern")
+	}
+	rt.segs[rt.nsegs] = s
+	rt.nsegs++
+}
+
+func addRoute(rt route) {
+	for i := range len(routes) {
+		if sameRoute(&routes[i], &rt) {
+			panic("http.HandleFunc: pattern registered twice")
+		}
+	}
+	if len(routes) == MaxRoutes {
+		panic("http.HandleFunc: more than MaxRoutes patterns")
+	}
+	routes.Push(rt)
+}
+
+// sameRoute reports two patterns that match exactly the same requests.
+func sameRoute(a, b *route) bool {
+	if a.method != b.method || a.nsegs != b.nsegs || a.subtree != b.subtree || a.slashEnd != b.slashEnd || (a.rest == "") != (b.rest == "") {
+		return false
+	}
+	for i := range a.nsegs {
+		if (a.segs[i].param == "") != (b.segs[i].param == "") || a.segs[i].lit != b.segs[i].lit {
+			return false
+		}
+	}
+	return true
+}
+
+func isWildcardName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		if !(c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// match reports whether rt's path matches path, and records the wildcard values in r.
+func (rt *route) match(path string, r *Request) bool {
+	if len(path) == 0 || path[0] != '/' {
+		return false
+	}
+	r.nparams = 0
+	p := path[1:]
+	slash := rt.nsegs == 0 // whether the last segment matched was followed by "/" ("/" counts)
+	for i := range rt.nsegs {
+		if p == "" {
+			return false // the path is shorter than the pattern
+		}
+		seg := p
+		slash = false
+		if j := strings.IndexByte(p, '/'); j >= 0 {
+			seg, p, slash = p[:j], p[j+1:], true
+		} else {
+			p = ""
+		}
+		if s := rt.segs[i]; s.param != "" {
+			if seg == "" {
+				return false
+			}
+			r.addParam(s.param, seg)
+		} else if !segEqual(seg, s.lit) {
+			return false
+		}
+	}
+	switch {
+	case rt.rest != "": // "/files/{path...}" matches "/files/" and below, not "/files"
+		if !slash {
+			return false
+		}
+		r.addParam(rt.rest, p)
+		return true
+	case rt.slashEnd: // "/notes/{$}" matches only "/notes/"
+		return slash && p == ""
+	case rt.subtree: // "/static/" matches "/static/" and below
+		return slash
+	}
+	return !slash && p == "" // exact
+}
+
+// segEqual compares a raw path segment, %XX escapes and all, with a literal.
+func segEqual(raw, lit string) bool {
+	j := 0
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == '%' && i+2 < len(raw) && isHex(raw[i+1]) && isHex(raw[i+2]) {
+			c = unhex(raw[i+1])<<4 | unhex(raw[i+2])
+			i += 2
+		}
+		if j >= len(lit) || lit[j] != c {
+			return false
+		}
+		j++
+	}
+	return j == len(lit)
+}
+
+// moreSpecific reports whether a should win over b when both match a request.
+func moreSpecific(a, b *route) bool {
+	n := min(a.nsegs, b.nsegs)
+	for i := range n {
+		al, bl := a.segs[i].param == "", b.segs[i].param == ""
+		if al != bl {
+			return al // a literal before a wildcard
+		}
+	}
+	aExact := !a.subtree && a.rest == "" // slashEnd counts as exact
+	bExact := !b.subtree && b.rest == ""
+	if aExact != bExact {
+		return aExact // an exact path before a subtree or {rest...}
+	}
+	if a.nsegs != b.nsegs {
+		return a.nsegs > b.nsegs // a longer prefix before a shorter
+	}
+	if (a.rest != "") != (b.rest != "") {
+		return a.rest != "" // {rest...} names its tail; equal otherwise
+	}
+	return a.method != "" && b.method == ""
+}
+
+func (r *Request) addParam(name, value string) {
+	if r.nparams < len(r.params) {
+		r.params[r.nparams] = Header{Name: name, Value: value}
+		r.nparams++
+	}
+}
+
+func methodMatches(pattern, method string) bool {
+	return pattern == "" || pattern == method || pattern == "GET" && method == "HEAD"
+}
+
+// serveMux dispatches to the patterns HandleFunc registered (ListenAndServe(addr, nil)).
+func serveMux(w *ResponseWriter, r *Request) {
+	best := -1
+	var allow [..MaxRoutes]string
+	for i := range len(routes) {
+		rt := &routes[i]
+		if !rt.match(r.Path, r) {
+			continue
+		}
+		if !methodMatches(rt.method, r.Method) {
+			allow.TryPush(rt.method)
+			continue
+		}
+		if best < 0 || moreSpecific(rt, &routes[best]) {
+			best = i
+		}
+	}
+	if best < 0 {
+		if len(allow) == 0 {
+			Error(w, 404)
+			return
+		}
+		var buf [256]byte
+		b := buf[:0]
+		for i, m := range allow {
+			if i > 0 {
+				b = append(b, ", "...)
+			}
+			if len(b)+len(m)+6 > len(buf) {
+				break
+			}
+			b = append(b, m...)
+			if m == "GET" {
+				b = append(b, ", HEAD"...)
+			}
+		}
+		w.SetHeader("Allow", string(b))
+		Error(w, 405)
+		return
+	}
+	routes[best].match(r.Path, r) // the winner's wildcard values
+	routes[best].h(w, r)
+}
+
+// PathValue returns the value of the {name} or {name...} wildcard in the pattern that matched
+// this request, unescaped (%XX), or "" if there is none.
+func (r *Request) PathValue(name string) string from r {
+	for i := range r.nparams {
+		if r.params[i].Name == name {
+			return unescape(r.params[i].Value, false, r.Arena)
+		}
+	}
+	return ""
+}
+
+// PathInt returns the {name} wildcard as a decimal integer; ok is false if it is missing or isn't
+// one (the handler decides what that means: usually http.Error(w, 404)).
+func (r *Request) PathInt(name string) (int, bool) {
+	return atoiStrict(r.PathValue(name))
+}
+
+// QueryParam returns the value of key in the query string, unescaped (%XX, and + as a space), or
+// "" (QueryValue returns it raw). An unescaped copy is made in the request's arena only when the
+// value has escapes.
+func (r *Request) QueryParam(key string) string from r {
+	return unescape(r.QueryValue(key), true, r.Arena)
+}
+
+// QueryInt returns the query value of key as a decimal integer; ok is false if it is missing or
+// isn't one.
+func (r *Request) QueryInt(key string) (int, bool) {
+	return atoiStrict(r.QueryParam(key))
+}
+
+func atoiStrict(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil
+}
+
+// unescape decodes %XX escapes (and + as a space, for queries) into memory from a; s itself is
+// returned when there is nothing to decode. A % not followed by two hex digits is kept as it is.
+func unescape(s string, plus bool, a arena) string from s, a {
+	need := false
+	for i := range len(s) {
+		if s[i] == '%' || plus && s[i] == '+' {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return s
+	}
+	b := make([]byte, len(s)) in a
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]):
+			c = unhex(s[i+1])<<4 | unhex(s[i+2])
+			i += 2
+		case c == '+' && plus:
+			c = ' '
+		}
+		b[n] = c
+		n++
+	}
+	return string(b[:n])
+}
+
+func isHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' }
+
+func unhex(c byte) byte {
+	switch {
+	case c >= 'a':
+		return c - 'a' + 10
+	case c >= 'A':
+		return c - 'A' + 10
+	}
+	return c - '0'
+}
+
+// Error replies with status code and its standard text as a plain-text body ("404 Not Found").
+// Like Go's http.Error, it doesn't end the handler: return after calling it.
+func Error(w *ResponseWriter, code int) {
+	w.SetHeader("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(code)
+	w.WriteInt(code)
+	w.WriteByte(' ')
+	w.WriteString(StatusText(code))
+	w.WriteByte('\n')
+}
+
+// Text replies with status code and s as a plain-text body.
+func (w *ResponseWriter) Text(code int, s string) {
+	w.SetHeader("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(code)
+	w.WriteString(s)
+}
+
+// ContentType sets the response's Content-Type header.
+func (w *ResponseWriter) ContentType(t string) {
+	w.SetHeader("Content-Type", t)
+}
+
+var portBuf [8]byte
+
+// Port returns the listen address ":n" for ListenAndServe(http.Port(8080), nil). The string is in
+// a buffer the next call reuses.
+func Port(n int) string {
+	return string(strconv.AppendInt(append(portBuf[:0], ':'), n))
+}

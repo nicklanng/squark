@@ -215,6 +215,190 @@ func WithCode(code int, msg static string) error
 // Is reports whether err is target.
 func Is(err error, target error) bool
 
+// Package utf8 encodes and decodes UTF-8.
+package utf8
+
+const RuneError = 65533
+const MaxRune = 1114111
+
+// AppendRune appends the UTF-8 encoding of r to dst.
+func AppendRune(dst []byte, r int32) []byte from dst
+// RuneLen returns the number of bytes needed to encode r.
+func RuneLen(r int32) int
+// DecodeRuneInString returns the first rune of s and its width in bytes. Invalid UTF-8 gives
+// (RuneError, 1); an empty string gives (RuneError, 0).
+func DecodeRuneInString(s string) (int32, int)
+// RuneCountInString counts the runes in s.
+func RuneCountInString(s string) int
+
+// Package json writes and reads JSON without allocating: encoding appends to caller buffers (an
+// Encoder adds the commas and nesting), decoding is a pull parser whose strings are views of the
+// input or of caller buffers, or are copied into an arena.
+package json
+
+// MaxDepth is how deeply Skip follows nested arrays and objects (a deeper value is ErrSyntax),
+// and how deeply an Encoder nests them (ErrDepth). Neither allocates, so each keeps its bracket
+// stack in a fixed array of MaxDepth bits.
+const MaxDepth = 1024
+
+const ErrSyntax = error(1, "json: syntax error")
+const ErrType = error(2, "json: unexpected value type")
+const ErrBuffer = error(3, "json: string does not fit in buffer")
+const ErrFull = error(4, "json: output does not fit in buffer")
+const ErrMisuse = error(5, "json: encoder call out of place")
+const ErrDepth = error(6, "json: nested too deeply")
+const ErrFloat = error(7, "json: NaN or infinity has no JSON form")
+const ErrNoArena = error(8, "json: decoder has no arena")
+
+// Encoder writes one JSON value, usually an object or an array, adding the commas, colons and
+// quotes itself. Object and Array open a container and End closes the innermost one; inside an
+// object, Key names the member whose value comes next. Values are String, Int, Float, Bool, Null
+// and Raw (JSON encoded already):
+//
+// 	e := json.NewEncoder(buf[:0])
+// 	e.Object()
+// 	e.Key("id")
+// 	e.Int(7)
+// 	e.Key("tags")
+// 	e.Array()
+// 	e.String("a")
+// 	e.End()
+// 	e.End()
+// 	if e.Finish() == nil {
+// 		w.Write(e.Bytes()) // {"id":7,"tags":["a"]}
+// 	}
+//
+// Nothing is written that would make the output invalid: a call out of place (a value in an object
+// without a Key, Key outside an object or twice, End with nothing open or right after a Key, a
+// second top-level value) sets Err to ErrMisuse, nesting deeper than MaxDepth sets ErrDepth, a NaN
+// or infinite Float sets ErrFloat, and Raw of invalid JSON sets ErrSyntax. The first error is kept,
+// and every call after it writes nothing. Finish also checks that the value is complete.
+//
+// The output is appended to the slice given to NewEncoder. When it is full, a call sets ErrFull
+// and writes nothing at all (each call writes all of its output or none); with NewEncoderIn the
+// slice grows into the arena instead. To stream through a small buffer, write e.Bytes() out and
+// call e.Clear() whenever it fills: Clear empties the buffer but keeps the nesting and comma state,
+// so the next call continues the same document. A call that fails with ErrFull can be retried
+// after draining: set e.Err = nil first.
+type Encoder struct {
+	Err error
+	// unexported fields
+}
+// Bytes returns the output written so far (since the last Clear).
+func (e *json.Encoder) Bytes() []byte from e
+// Clear empties the output buffer but keeps the encoder's state (the open containers, whether a
+// comma comes next, Err), so the calls after it continue the same document: write e.Bytes()
+// somewhere, then call e.Clear(), to stream a large document through a small buffer.
+func (e *json.Encoder) Clear()
+// Finish returns Err, after setting it to ErrMisuse if the document isn't complete: nothing was
+// written, or an array or object is still open.
+func (e *json.Encoder) Finish() error
+// Object starts an object: Key and a value for each member, then End.
+func (e *json.Encoder) Object()
+// Array starts an array: its elements, then End.
+func (e *json.Encoder) Array()
+// End closes the innermost open object or array.
+func (e *json.Encoder) End()
+// Key writes the name of an object's next member; its value comes next.
+func (e *json.Encoder) Key(name string)
+// String writes s as a JSON string, escaped exactly as AppendString does.
+func (e *json.Encoder) String(s string)
+// Int writes an integer.
+func (e *json.Encoder) Int(v int)
+// Float writes the shortest decimal that reads back as v (strconv.AppendFloat with prec -1:
+// exponent notation below 1e-6 and from 1e21, as JavaScript writes numbers). JSON has no NaN or
+// infinity: those set ErrFloat.
+func (e *json.Encoder) Float(v float64)
+// Bool writes true or false.
+func (e *json.Encoder) Bool(v bool)
+// Null writes null.
+func (e *json.Encoder) Null()
+// Raw writes b, one complete JSON value encoded already (from another Encoder, a database, a
+// file), as the next value. It is checked as Decoder.Skip checks a value: invalid JSON sets
+// ErrSyntax and writes nothing.
+func (e *json.Encoder) Raw(b []byte)
+// RawStart is Raw for a value the caller writes itself, for one too large to go through the
+// buffer: it writes what comes before a value here (a comma or nothing) and counts the value as
+// written. The caller then writes exactly one complete JSON value straight after e.Bytes() (drain
+// the buffer and Clear, then json.WriteString(w, s) for a long string, say); it isn't checked.
+// False, writing nothing, if a value can't come next (Err is set).
+func (e *json.Encoder) RawStart() bool
+// Decoder pulls values out of a JSON document. The first error is kept in Err, and every call
+// after it fails.
+type Decoder struct {
+	Err error
+	// unexported fields
+}
+// BeginObject consumes '{'.
+func (d *json.Decoder) BeginObject() bool
+// BeginArray consumes '['.
+func (d *json.Decoder) BeginArray() bool
+// More reports whether the current array has another element (and consumes the separator).
+func (d *json.Decoder) More() bool
+// Field reads the next object key into keybuf, returning false at the end of the object.
+func (d *json.Decoder) Field(keybuf []byte) (string, bool) from keybuf
+// Key reads the next object key, as Field does, into the decoder's arena (NewDecoderIn) at its
+// exact size (see NewDecoderIn for how long it may be kept). ErrNoArena on a decoder from
+// NewDecoder, ErrBuffer if the arena is full.
+func (d *json.Decoder) Key() (string, bool) from d
+// String decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD,
+// as in Go. ErrBuffer if the decoded string doesn't fit in buf.
+func (d *json.Decoder) String(buf []byte) (string, bool) from buf
+// Text decodes a JSON string, as String does, into the decoder's arena (NewDecoderIn) at its exact
+// size (see NewDecoderIn for how long it may be kept). ErrNoArena on a decoder from NewDecoder,
+// ErrBuffer if the arena is full; the decoded string is measured first, so a full arena uses none
+// of it.
+func (d *json.Decoder) Text() (string, bool) from d
+// Int decodes an integer. A number with a fraction or exponent is ErrType (it is consumed).
+func (d *json.Decoder) Int() (int, bool)
+// Float decodes a number as the nearest float64 (an integer too). Too large for a float64 is
+// ErrType.
+func (d *json.Decoder) Float() (float64, bool)
+// Bool decodes true or false.
+func (d *json.Decoder) Bool() (bool, bool)
+// Null consumes a null if it is the next value and reports whether it was (a missing or optional
+// value; anything else is left for the other methods).
+func (d *json.Decoder) Null() bool
+// Skip skips one value of any type, checking that it is valid JSON: brackets match, commas and
+// colons are where they belong, escapes are valid and strings hold no raw control characters
+// (invalid UTF-8 is accepted, as by String). It works iteratively; arrays and objects may nest up
+// to MaxDepth deep.
+func (d *json.Decoder) Skip() bool
+// Offset returns how many bytes of the input have been consumed (at most len(data)).
+func (d *json.Decoder) Offset() int
+// Line returns the 1-based line the decoder has reached (where an error was found, after one).
+func (d *json.Decoder) Line() int
+// End reports whether only whitespace remains.
+func (d *json.Decoder) End() bool
+
+// NewEncoder appends to dst, up to its capacity (ErrFull beyond it).
+func NewEncoder(dst []byte) json.Encoder from dst
+// NewEncoderIn appends to dst (nil is fine) and grows it into a when it is full, doubling as
+// append in an arena does: in place while the buffer is a's latest allocation, by copying (the old
+// buffer stays allocated until a ends) otherwise. ErrFull if a can't hold the larger buffer.
+func NewEncoderIn(dst []byte, a arena) json.Encoder from dst, a
+// AppendString appends s as a quoted, escaped JSON string. Invalid UTF-8 becomes U+FFFD, and
+// U+2028 and U+2029 are escaped, as Go does.
+func AppendString(dst []byte, s string) []byte from dst
+// WriteString writes s to w as a JSON string literal, escaped as AppendString does, without
+// building it in memory first: runs that need no escaping go straight to w. w is any writer with
+// Write([]byte) and WriteString(string) methods (a *bytes.Buffer, *http.ResponseWriter, net.Conn
+// or os.File); their results are ignored. On an unbuffered writer (a Conn or File) each run is a
+// write: wrap it in a bytes.Buffer for strings with many escapes.
+func WriteString(w anytype, s string)
+// AppendInt appends a JSON number.
+func AppendInt(dst []byte, v int) []byte from dst
+// AppendBool appends true or false.
+func AppendBool(dst []byte, v bool) []byte from dst
+// NewDecoder reads data. Strings are decoded into caller buffers (String, Field).
+func NewDecoder(data []byte) json.Decoder from data
+// NewDecoderIn reads data and can also decode strings into a, at their exact size (Text, Key), so
+// callers don't size buffers. Their results are checked as references into the decoder (into both
+// data and a), so they may be kept wherever both live: with a request's Body and Arena,
+// `title, ok := d.Text()` may go into anything that lives until the response is done, and not into
+// a package variable. String and Field work as with NewDecoder.
+func NewDecoderIn(data []byte, a arena) json.Decoder from data, a
+
 // Package os is a thin, heap-free interface to the operating system.
 package os
 
@@ -366,6 +550,10 @@ const IdleRelease time.Duration = 100000000
 const MaxServers = 16
 // ClientTimeout is a new Client's Timeout.
 const ClientTimeout time.Duration = 30000000000
+// MaxRoutes is how many patterns HandleFunc can register.
+const MaxRoutes = 64
+// MaxPathParams is how many {name} wildcards one pattern may have.
+const MaxPathParams = 8
 
 // ReadHeaderTimeout (5 seconds) is how long a client has to send a request's line and headers,
 // counted from when the request starts arriving. A connection that takes longer gets a 408 and is
@@ -416,8 +604,22 @@ func (r *http.Request) HeaderValue(name string) string from r
 // NumHeaders and HeaderAt iterate the request headers.
 func (r *http.Request) NumHeaders() int
 func (r *http.Request) HeaderAt(i int) http.Header from r
-// QueryValue returns the raw (not unescaped) value of key in the query string.
+// QueryValue returns the raw (not unescaped) value of key in the query string; QueryParam
+// unescapes it.
 func (r *http.Request) QueryValue(key string) string from r
+// PathValue returns the value of the {name} or {name...} wildcard in the pattern that matched
+// this request, unescaped (%XX), or "" if there is none.
+func (r *http.Request) PathValue(name string) string from r
+// PathInt returns the {name} wildcard as a decimal integer; ok is false if it is missing or isn't
+// one (the handler decides what that means: usually http.Error(w, 404)).
+func (r *http.Request) PathInt(name string) (int, bool)
+// QueryParam returns the value of key in the query string, unescaped (%XX, and + as a space), or
+// "" (QueryValue returns it raw). An unescaped copy is made in the request's arena only when the
+// value has escapes.
+func (r *http.Request) QueryParam(key string) string from r
+// QueryInt returns the query value of key as a decimal integer; ok is false if it is missing or
+// isn't one.
+func (r *http.Request) QueryInt(key string) (int, bool)
 // ResponseWriter stages the response in the connection goroutine's write buffer.
 type ResponseWriter struct {
 	// unexported fields
@@ -436,6 +638,15 @@ func (w *http.ResponseWriter) WriteByte(c byte) error
 func (w *http.ResponseWriter) WriteInt(v int)
 // Status returns the status code that will be (or was) sent.
 func (w *http.ResponseWriter) Status() int
+// JSON sets the response's Content-Type to application/json (unless already set) and returns a
+// JSON writer for its body, which builds the document straight into the response's buffer. Set
+// the status with WriteHeader first if it isn't 200, and don't write to w directly while the
+// document is open.
+func (w *http.ResponseWriter) JSON() *http.JSON from w
+// Text replies with status code and s as a plain-text body.
+func (w *http.ResponseWriter) Text(code int, s string)
+// ContentType sets the response's Content-Type header.
+func (w *http.ResponseWriter) ContentType(t string)
 // HandlerFunc handles one request.
 type HandlerFunc func(*http.ResponseWriter, *http.Request)
 // Response is a response read by a Client. Its strings and Body are views of the client's buffer,
@@ -497,8 +708,52 @@ func (c *http.Client) Do(method string, path string, headers []http.Header, body
 // RoundTrip sends req, one complete request (from AppendRequest, say), as it is and reads the
 // response. A load generator can build its requests once and send them many times.
 func (c *http.Client) RoundTrip(req []byte) (http.Response, error) from c
+// JSON writes a JSON document into a response as it is built, with commas, nesting and escaping
+// handled (a json.Encoder underneath, writing into the response's own buffer). A document of any
+// size takes no memory beyond the response's buffer, and long strings are written without being
+// copied:
+//
+// 	j := w.JSON()
+// 	j.Object()
+// 	j.Key("id")
+// 	j.Int(7)
+// 	j.Key("tags")
+// 	j.Array()
+// 	j.String("a")
+// 	j.End()
+// 	j.End()                    // {"id":7,"tags":["a"]}
+//
+// A call out of place (a value in an object without a Key, End with nothing open) records an
+// error instead of writing invalid JSON, and later calls write nothing: Finish reports it.
+type JSON struct {
+	// unexported fields
+}
+// Object starts an object; End closes it.
+func (j *http.JSON) Object()
+// Array starts an array; End closes it.
+func (j *http.JSON) Array()
+// End closes the innermost object or array.
+func (j *http.JSON) End()
+// Key names the next value inside an object.
+func (j *http.JSON) Key(name string)
+// String writes a string value (invalid UTF-8 becomes U+FFFD, as json.AppendString does).
+func (j *http.JSON) String(s string)
+// Int writes an integer value.
+func (j *http.JSON) Int(v int)
+// Float writes a number in its shortest form; NaN and infinities have none (Finish reports it).
+func (j *http.JSON) Float(v float64)
+// Bool writes true or false.
+func (j *http.JSON) Bool(v bool)
+// Null writes null.
+func (j *http.JSON) Null()
+// Raw writes b, which must be one complete JSON value (it is checked).
+func (j *http.JSON) Raw(b []byte)
+// Finish reports the first misuse (json.ErrMisuse, ErrDepth, ErrFloat, ...), or an unclosed
+// document. It writes nothing.
+func (j *http.JSON) Finish() error
 
-// ListenAndServe listens on addr and serves each connection in its own goroutine.
+// ListenAndServe listens on addr and serves each connection in its own goroutine. With a nil h it
+// dispatches to the patterns registered with HandleFunc.
 func ListenAndServe(addr string, h http.HandlerFunc) error
 // Serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`Name : v`, folded lines), a
@@ -520,87 +775,28 @@ func NewClient(conn net.Conn, host string, buf []byte) http.Client from host, bu
 // AppendRequest appends a request to dst as Do would send it, for RoundTrip. It fails with
 // ErrRequestTooLarge, appending nothing, if the request doesn't fit in cap(dst).
 func AppendRequest(dst []byte, method string, host string, path string, headers []http.Header, body []byte) ([]byte, error) from dst
-
-// Package utf8 encodes and decodes UTF-8.
-package utf8
-
-const RuneError = 65533
-const MaxRune = 1114111
-
-// AppendRune appends the UTF-8 encoding of r to dst.
-func AppendRune(dst []byte, r int32) []byte from dst
-// RuneLen returns the number of bytes needed to encode r.
-func RuneLen(r int32) int
-// DecodeRuneInString returns the first rune of s and its width in bytes. Invalid UTF-8 gives
-// (RuneError, 1); an empty string gives (RuneError, 0).
-func DecodeRuneInString(s string) (int32, int)
-// RuneCountInString counts the runes in s.
-func RuneCountInString(s string) int
-
-// Package json writes and reads JSON without allocating: encoding appends to caller buffers,
-// decoding is a pull parser whose strings are views of the input or of caller buffers.
-package json
-
-// MaxDepth is how deeply Skip follows nested arrays and objects; a deeper value is ErrSyntax.
-// (The decoder doesn't allocate, so Skip keeps its bracket stack in a fixed array.)
-const MaxDepth = 1024
-
-const ErrSyntax = error(1, "json: syntax error")
-const ErrType = error(2, "json: unexpected value type")
-const ErrBuffer = error(3, "json: string does not fit in buffer")
-
-// Decoder pulls values out of a JSON document.
-type Decoder struct {
-	Err error
-	// unexported fields
-}
-// BeginObject consumes '{'.
-func (d *json.Decoder) BeginObject() bool
-// BeginArray consumes '['.
-func (d *json.Decoder) BeginArray() bool
-// More reports whether the current array has another element (and consumes the separator).
-func (d *json.Decoder) More() bool
-// Field reads the next object key into keybuf, returning false at the end of the object.
-func (d *json.Decoder) Field(keybuf []byte) (string, bool) from keybuf
-// String decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD,
-// as in Go. ErrBuffer if the decoded string doesn't fit in buf.
-func (d *json.Decoder) String(buf []byte) (string, bool) from buf
-// Int decodes an integer. A number with a fraction or exponent is ErrType (it is consumed).
-func (d *json.Decoder) Int() (int, bool)
-// Float decodes a number as the nearest float64 (an integer too). Too large for a float64 is
-// ErrType.
-func (d *json.Decoder) Float() (float64, bool)
-// Bool decodes true or false.
-func (d *json.Decoder) Bool() (bool, bool)
-// Null consumes a null if it is the next value and reports whether it was (a missing or optional
-// value; anything else is left for the other methods).
-func (d *json.Decoder) Null() bool
-// Skip skips one value of any type, checking that it is valid JSON: brackets match, commas and
-// colons are where they belong, escapes are valid and strings hold no raw control characters
-// (invalid UTF-8 is accepted, as by String). It works iteratively; arrays and objects may nest up
-// to MaxDepth deep.
-func (d *json.Decoder) Skip() bool
-// Offset returns how many bytes of the input have been consumed (at most len(data)).
-func (d *json.Decoder) Offset() int
-// Line returns the 1-based line the decoder has reached (where an error was found, after one).
-func (d *json.Decoder) Line() int
-// End reports whether only whitespace remains.
-func (d *json.Decoder) End() bool
-
-// AppendString appends s as a quoted, escaped JSON string. Invalid UTF-8 becomes U+FFFD, and
-// U+2028 and U+2029 are escaped, as Go does.
-func AppendString(dst []byte, s string) []byte from dst
-// WriteString writes s to w as a JSON string literal, escaped as AppendString does, without
-// building it in memory first: runs that need no escaping go straight to w. w is any writer with
-// Write([]byte) and WriteString(string) methods (a *bytes.Buffer, *http.ResponseWriter, net.Conn
-// or os.File); their results are ignored. On an unbuffered writer (a Conn or File) each run is a
-// write: wrap it in a bytes.Buffer for strings with many escapes.
-func WriteString(w anytype, s string)
-// AppendInt appends a JSON number.
-func AppendInt(dst []byte, v int) []byte from dst
-// AppendBool appends true or false.
-func AppendBool(dst []byte, v bool) []byte from dst
-func NewDecoder(data []byte) json.Decoder from data
+// HandleFunc registers h for pattern, as Go's http.HandleFunc does (Go 1.22 patterns). Serve with
+// ListenAndServe(addr, nil) to dispatch to the registered patterns.
+//
+// A pattern is [METHOD ]PATH. A method matches only that method ("GET" also matches HEAD); without
+// one every method matches. PATH is a sequence of /-separated segments, each a literal or a
+// wildcard: {name} matches one segment, {name...} (last) matches the rest of the path, and {$}
+// (last) matches only the path ending there. A path ending in / matches every path below it
+// ("/static/" matches "/static/a/b"); "/{$}" matches only "/". Wildcard values are read with
+// Request.PathValue or PathInt.
+//
+// When several patterns match, the most specific wins: literal segments before wildcards, an
+// exact path before a subtree, a longer subtree before a shorter, and a method before none. A path
+// that matches only patterns for other methods gets 405 Method Not Allowed with an Allow header;
+// one that matches none gets 404 Not Found. Registering a malformed or duplicate pattern, or more
+// than MaxRoutes, panics.
+func HandleFunc(pattern static string, h http.HandlerFunc)
+// Error replies with status code and its standard text as a plain-text body ("404 Not Found").
+// Like Go's http.Error, it doesn't end the handler: return after calling it.
+func Error(w *http.ResponseWriter, code int)
+// Port returns the listen address ":n" for ListenAndServe(http.Port(8080), nil). The string is in
+// a buffer the next call reuses.
+func Port(n int) string static
 
 // Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
 // runs its own copy of main, with its own package variables and goroutines.

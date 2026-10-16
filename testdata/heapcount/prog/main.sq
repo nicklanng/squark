@@ -144,6 +144,32 @@ func main() {
 		if s, ok := d.String(store[:]); ok {
 			sum += len(s)
 		}
+		je := json.NewEncoder(buf[:0])
+		je.Object()
+		je.Key("k")
+		je.String("v é")
+		je.Key("f")
+		je.Float(1.5)
+		je.End()
+		if je.Finish() == nil {
+			sum += len(je.Bytes())
+		}
+		arena ja 1K {
+			jd := json.NewDecoderIn(je.Bytes(), ja)
+			if jd.BeginObject() {
+				if k, ok := jd.Key(); ok {
+					t, _ := jd.Text()
+					sum += len(k) + len(t)
+				}
+			}
+			ge := json.NewEncoderIn(nil, ja)
+			ge.Array()
+			for j := 0; j < 50; j++ {
+				ge.Int(j)
+			}
+			ge.End()
+			sum += len(ge.Bytes())
+		}
 		bb := bytes.NewBuffer(store[:0])
 		bb.WriteString("buffered")
 		sum += bb.Len()

@@ -1,0 +1,74 @@
+package main
+
+// strings from a decoder's arena (Text, Key) and an Encoder's output live as long as the arena
+// and the data: request-scoped variables may keep them, package variables may not
+
+import "json"
+
+var lastTitle string
+var lastKey string
+var lastOut []byte
+var static [64]byte // even with static data, Text's result is in the arena
+
+arena interned 1K
+
+type Req struct {
+	Title string
+	Tags  [..4]string
+}
+
+// handle is shaped like an HTTP handler (body and a are the request's body and arena): req lives
+// as long as the request, so it may keep what Text returns
+func handle(body []byte, a arena, req *Req) []byte {
+	d := json.NewDecoderIn(body, a)
+	d.BeginObject()
+	d.Key()
+	title, ok := d.Text()
+	if ok {
+		req.Title = title
+		req.Tags.TryPush(title)
+	}
+	e := json.NewEncoderIn(nil, a)
+	e.String(title)
+	return e.Bytes()
+}
+
+func main() {
+	var body [64]byte
+	var outer string
+	arena a 1K {
+		var req Req
+		out := handle(body[:], a, &req)
+		_ = out
+		lastOut = handle(body[:], a, &req) // ERROR "cannot escape into static memory (assigned to lastOut)"
+
+		d := json.NewDecoderIn(body[:], a)
+		d.BeginObject()
+		key, _ := d.Key()
+		lastKey = key // ERROR "cannot escape into static memory (assigned to lastKey)"
+		title, _ := d.Text()
+		req.Title = title
+	}
+
+	arena b 1K {
+		d := json.NewDecoderIn(static[:], b)
+		title, _ := d.Text()
+		lastTitle = title // ERROR "cannot escape into static memory (assigned to lastTitle)"
+	}
+	arena c 1K {
+		d := json.NewDecoderIn(body[:], c)
+		title, _ := d.Text()
+		outer = title // ERROR "does not live long enough to be stored in variable outer"
+	}
+	_ = outer
+	arena e 1K {
+		enc := json.NewEncoderIn(nil, e)
+		enc.String("x")
+		lastOut = enc.Bytes() // ERROR "cannot escape into static memory (assigned to lastOut)"
+	}
+
+	// fine: the data and the arena are both static
+	d := json.NewDecoderIn(static[:], interned)
+	t, _ := d.Text()
+	lastTitle = t
+}

@@ -70,66 +70,54 @@ func openStore(path string) error {
 
 // ---- responses ----
 
-func writeError(w *http.ResponseWriter, status int, msg string) {
-	w.SetHeader("Content-Type", "application/json")
+// fail answers with status and {"error": msg}.
+func fail(w *http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
-	w.WriteString(`{"error":"`)
-	w.WriteString(msg)
-	w.WriteString(`"}`)
+	j := w.JSON()
+	j.Object()
+	j.Key("error")
+	j.String(msg)
+	j.End()
 }
 
-func notFound(w *http.ResponseWriter)         { writeError(w, 404, "not found") }
-func badRequest(w *http.ResponseWriter)       { writeError(w, 400, "bad request") }
-func methodNotAllowed(w *http.ResponseWriter) { writeError(w, 405, "method not allowed") }
 func internalError(w *http.ResponseWriter, err error) {
 	println("error:", err.Error())
-	writeError(w, 500, "internal error")
+	fail(w, 500, "internal error")
 }
 
 // writeNote writes the current row of st as {"id":..,"title":..,"body":..}.
-func writeNote(w *http.ResponseWriter, st sqlite.Stmt) error {
-	var title [1024]byte
-	var body [maxBody + 1024]byte
-	t, err := st.ColumnText(1, title[:])
-	if err != nil {
-		return err
-	}
-	b, err := st.ColumnText(2, body[:])
-	if err != nil {
-		return err
-	}
-	w.WriteString(`{"id":`)
-	w.WriteInt(st.ColumnInt(0))
-	w.WriteString(`,"title":`)
-	json.WriteString(w, t)
-	w.WriteString(`,"body":`)
-	json.WriteString(w, b)
-	w.WriteByte('}')
+func writeNote(j *http.JSON, st sqlite.Stmt) error {
+	var title [maxTitle]byte
+	var body [maxBody]byte
+	t := try st.ColumnText(1, title[:])
+	b := try st.ColumnText(2, body[:])
+	j.Object()
+	j.Key("id")
+	j.Int(st.ColumnInt(0))
+	j.Key("title")
+	j.String(t)
+	j.Key("body")
+	j.String(b)
+	j.End()
 	return nil
 }
 
 // ---- handlers ----
 
-func parseID(s string) (int, bool) {
-	if s == "" {
-		return 0, false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return 0, false
-		}
-	}
-	id, err := strconv.Atoi(s)
-	return id, err == nil
-}
+// GET /health
+func health(w *http.ResponseWriter, r *http.Request) { w.Text(200, "ok") }
 
-func listNotes(w *http.ResponseWriter) {
+// GET /notes: the newest listLimit notes
+func listNotes(w *http.ResponseWriter, r *http.Request) {
 	st := store.list
 	defer st.Reset()
-	w.SetHeader("Content-Type", "application/json")
-	w.WriteByte('[')
-	for n := 0; ; n++ {
+	j := w.JSON()
+	j.Array()
+	for {
 		row, err := st.Step()
+		if err == nil && row {
+			err = writeNote(j, st)
+		}
 		if err != nil {
 			internalError(w, err)
 			return
@@ -137,18 +125,17 @@ func listNotes(w *http.ResponseWriter) {
 		if !row {
 			break
 		}
-		if n > 0 {
-			w.WriteByte(',')
-		}
-		if err := writeNote(w, st); err != nil {
-			internalError(w, err)
-			return
-		}
 	}
-	w.WriteByte(']')
+	j.End()
 }
 
-func getNote(w *http.ResponseWriter, id int) {
+// GET /notes/{id}
+func getNote(w *http.ResponseWriter, r *http.Request) {
+	id, ok := r.PathInt("id")
+	if !ok {
+		fail(w, 404, "not found")
+		return
+	}
 	st := store.get
 	defer st.Reset()
 	st.BindInt(1, id)
@@ -158,41 +145,38 @@ func getNote(w *http.ResponseWriter, id int) {
 		return
 	}
 	if !row {
-		notFound(w)
+		fail(w, 404, "not found")
 		return
 	}
-	w.SetHeader("Content-Type", "application/json")
-	if err := writeNote(w, st); err != nil {
+	if err := writeNote(w.JSON(), st); err != nil {
 		internalError(w, err)
 	}
 }
 
+// POST /notes {"title": "...", "body": "..."}
 func createNote(w *http.ResponseWriter, r *http.Request) {
-	var key [32]byte
 	title, body := "", ""
-	hasTitle := false
-	d := json.NewDecoder(r.Body)
+	d := json.NewDecoderIn(r.Body, r.Arena) // decoded strings live in the request's arena
 	if !d.BeginObject() {
-		badRequest(w)
+		fail(w, 400, "bad request")
 		return
 	}
 	for {
-		k, ok := d.Field(key[:])
+		k, ok := d.Key()
 		if !ok {
 			break
 		}
 		switch k {
 		case "title":
-			// decoded strings live in the request's arena, gone once the response is sent
-			title, hasTitle = d.String(make([]byte, maxTitle) in r.Arena)
+			title, _ = d.Text()
 		case "body":
-			body, _ = d.String(make([]byte, maxBody) in r.Arena)
+			body, _ = d.Text()
 		default:
 			d.Skip()
 		}
 	}
-	if d.Err != nil || !d.End() || !hasTitle || title == "" {
-		badRequest(w)
+	if d.Err != nil || !d.End() || title == "" || len(title) > maxTitle || len(body) > maxBody {
+		fail(w, 400, "bad request")
 		return
 	}
 	st := store.insert
@@ -209,14 +193,21 @@ func createNote(w *http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
-	w.SetHeader("Content-Type", "application/json")
 	w.WriteHeader(201)
-	w.WriteString(`{"id":`)
-	w.WriteInt(store.db.LastInsertRowID())
-	w.WriteByte('}')
+	j := w.JSON()
+	j.Object()
+	j.Key("id")
+	j.Int(store.db.LastInsertRowID())
+	j.End()
 }
 
-func deleteNote(w *http.ResponseWriter, id int) {
+// DELETE /notes/{id}
+func deleteNote(w *http.ResponseWriter, r *http.Request) {
+	id, ok := r.PathInt("id")
+	if !ok {
+		fail(w, 404, "not found")
+		return
+	}
 	st := store.del
 	defer st.Reset()
 	st.BindInt(1, id)
@@ -225,48 +216,10 @@ func deleteNote(w *http.ResponseWriter, id int) {
 		return
 	}
 	if store.db.Changes() == 0 {
-		notFound(w)
+		fail(w, 404, "not found")
 		return
 	}
 	w.WriteHeader(204)
-}
-
-func handle(w *http.ResponseWriter, r *http.Request) {
-	path := r.Path
-	switch {
-	case path == "/health":
-		if r.Method != "GET" {
-			methodNotAllowed(w)
-			return
-		}
-		w.SetHeader("Content-Type", "text/plain")
-		w.WriteString("ok")
-	case path == "/notes":
-		switch r.Method {
-		case "GET":
-			listNotes(w)
-		case "POST":
-			createNote(w, r)
-		default:
-			methodNotAllowed(w)
-		}
-	case strings.HasPrefix(path, "/notes/"):
-		id, ok := parseID(path[len("/notes/"):])
-		if !ok {
-			notFound(w)
-			return
-		}
-		switch r.Method {
-		case "GET":
-			getNote(w, id)
-		case "DELETE":
-			deleteNote(w, id)
-		default:
-			methodNotAllowed(w)
-		}
-	default:
-		notFound(w)
-	}
 }
 
 func main() {
@@ -286,10 +239,13 @@ func main() {
 		println("cannot open database:", err.Error())
 		os.Exit(1)
 	}
-	var addrBuf [32]byte
-	addr := strconv.AppendInt(append(addrBuf[:0], ':'), port)
-	println("squark notes listening on", string(addr), "db", dbPath)
-	if err := http.ListenAndServe(string(addr), handle); err != nil {
+	http.HandleFunc("GET /health", health)
+	http.HandleFunc("GET /notes", listNotes)
+	http.HandleFunc("POST /notes", createNote)
+	http.HandleFunc("GET /notes/{id}", getNote)
+	http.HandleFunc("DELETE /notes/{id}", deleteNote)
+	println("squark notes listening on port", port, "db", dbPath)
+	if err := http.ListenAndServe(http.Port(port), nil); err != nil {
 		println("serve:", err.Error())
 		os.Exit(1)
 	}

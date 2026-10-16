@@ -1,0 +1,53 @@
+kinds: {"s":"tab\t\"q\" \\ é\u0001","i":-9223372036854775808,"f":[1.5,0.1,1e+21,1e-7,123456789,0,-2.5e-300],"b":true,"nb":false,"n":null,"raw": {"pre": [1, 2]} ,"empty":{},"nested":[[],{"k\n":[1,{}]},""]}
+scalar: 42
+string true 7 true
+  exact true short true 0
+string true 15 true
+  exact true short true 0
+string true 11 true
+  exact true short true 0
+string true 14 true
+  exact true short true 0
+string true 11 true
+  exact true short true 0
+string true 6 true
+  exact true short true 0
+string true 5 true
+  exact true short true 0
+string true 5 true
+  exact true short true 0
+string true 3 true
+  exact true short true 0
+value without key: { err: json: encoder call out of place
+key at top level:  err: json: encoder call out of place
+key in array: [ err: json: encoder call out of place
+key twice: {"x": err: json: encoder call out of place
+end with nothing open:  err: json: encoder call out of place
+end once too often: [] err: json: encoder call out of place
+end after key: {"x": err: json: encoder call out of place
+two top-level values: 1 err: json: encoder call out of place
+still open: {"a":[ err: json: encoder call out of place
+nothing written:  err: json: encoder call out of place
+after an error: [1,{ err: json: encoder call out of place
+float: [ err: json: NaN or infinity has no JSON form
+float: [ err: json: NaN or infinity has no JSON form
+float: [ err: json: NaN or infinity has no JSON form
+raw: [ err: json: syntax error
+raw: [ err: json: syntax error
+raw: [ err: json: syntax error
+raw: [ err: json: syntax error
+raw: [ err: json: syntax error
+raw: [ err: json: syntax error
+raw: [ err: json: syntax error
+raw: [  [ ]  ]
+raw: [-0.5e3]
+raw: ["é"]
+depth MaxDepth: true 2048
+depth MaxDepth+1: json: nested too deeply 1024
+full: [12345 json: output does not fit in buffer
+retried: [12345,"abcdef"] true
+streamed: true true 267
+{"items":[{"id":0,"name":"item\t\"x\""},{"id":1000,"name":"item\t\"x\""},{"id":2000,"name":"item\t\"x\""},{"id":3000,"name":"item\t\"x\""},{"id":4000,"name":"item\t\"x\""}],"long":"a string much longer than the sixteen-byte buffer, with \"quotes\" and é","after":[]}
+arena: true 1091 2048 2048
+arena copy: true 1301 2048 4168
+arena full: json: output does not fit in buffer 247 true

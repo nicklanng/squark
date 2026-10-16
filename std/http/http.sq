@@ -4,6 +4,7 @@
 package http
 
 import (
+	"json"
 	"net"
 	"strconv"
 	"strings"
@@ -55,6 +56,8 @@ type Request struct {
 
 	headers   [MaxHeaders]Header
 	nheaders  int
+	params    [MaxPathParams + 1]Header // the matched pattern's wildcard values (see HandleFunc)
+	nparams   int
 	keepAlive bool
 	http10    bool
 	expect100 bool
@@ -74,7 +77,8 @@ func (r *Request) HeaderValue(name string) string {
 func (r *Request) NumHeaders() int        { return r.nheaders }
 func (r *Request) HeaderAt(i int) Header  { return r.headers[i] }
 
-// QueryValue returns the raw (not unescaped) value of key in the query string.
+// QueryValue returns the raw (not unescaped) value of key in the query string; QueryParam
+// unescapes it.
 func (r *Request) QueryValue(key string) string {
 	q := r.Query
 	for len(q) > 0 {
@@ -108,6 +112,8 @@ type ResponseWriter struct {
 	http10      bool // an HTTP/1.0 request: no chunked encoding
 	crlf        bool // a chunk's data went out; its closing CRLF leads the next write
 	dropped     int  // body bytes not sent: HEAD (counted for Content-Length) or a status without a body
+	scratch     arena        // the request's arena (for JSON's buffer)
+	enc         json.Encoder // JSON's state
 }
 
 // SetHeader adds a response header. Content-Length, Transfer-Encoding and Date are managed for
@@ -342,7 +348,8 @@ func (w *ResponseWriter) finish() {
 // HandlerFunc handles one request.
 type HandlerFunc func(w *ResponseWriter, r *Request)
 
-// ListenAndServe listens on addr and serves each connection in its own goroutine.
+// ListenAndServe listens on addr and serves each connection in its own goroutine. With a nil h it
+// dispatches to the patterns registered with HandleFunc.
 func ListenAndServe(addr string, h HandlerFunc) error {
 	l, err := net.Listen(addr)
 	if err != nil {
@@ -516,8 +523,12 @@ func serveRequest(c net.Conn, h HandlerFunc, rbuf []byte, n int, wbuf []byte) (i
 			n += m
 		}
 		req.Body = rbuf[end:total]
-		w := ResponseWriter{conn: c, buf: wbuf[:0], hdr: hbuf[:0], status: 200, keepAlive: req.keepAlive, http10: req.http10, head: req.Method == "HEAD"}
-		h(&w, &req)
+		w := ResponseWriter{conn: c, buf: wbuf[:0], hdr: hbuf[:0], status: 200, keepAlive: req.keepAlive, http10: req.http10, head: req.Method == "HEAD", scratch: scratch}
+		if h == nil {
+			serveMux(&w, &req) // called directly: as a func value it would look recursive
+		} else {
+			h(&w, &req)
+		}
 		w.finish()
 		if !w.keepAlive || w.failed {
 			return 0, false

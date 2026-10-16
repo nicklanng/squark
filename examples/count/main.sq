@@ -12,19 +12,16 @@ pool http.serveConn 128
 var db sqlite.DB
 var countStmt sqlite.Stmt
 
-func handle(w *http.ResponseWriter, r *http.Request) {
-	if r.Path != "/count" {
-		w.WriteHeader(404)
-		return
-	}
+// GET /count: how many items the database holds
+func count(w *http.ResponseWriter, r *http.Request) {
 	defer countStmt.Reset()
 	row, err := countStmt.Step()
 	if err != nil || !row {
-		w.WriteHeader(500)
+		http.Error(w, 500)
 		return
 	}
 	var buf [24]byte
-	w.Write(strconv.AppendInt(buf[:0], countStmt.ColumnInt(0)))
+	w.Text(200, string(strconv.AppendInt(buf[:0], countStmt.ColumnInt(0))))
 }
 
 func setup() error {
@@ -43,7 +40,8 @@ func main() {
 		println("setup:", err.Error())
 		return
 	}
-	if err := http.ListenAndServe(":8080", handle); err != nil {
+	http.HandleFunc("GET /count", count)
+	if err := http.ListenAndServe(":8080", nil); err != nil {
 		panic(err)
 	}
 }
