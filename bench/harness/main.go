@@ -1,7 +1,7 @@
 // harness runs the squark-vs-Go comparison: compute benchmarks (time, peak RSS) and the notes
 // HTTP server (throughput, latency, server CPU, RSS, idle-connection memory, startup).
 // It expects binaries in bench/bin (see run.sh). Results go to stdout (markdown) and
-// bench/results/latest.json.
+// bench/results/latest.json (kernels.json with ONLY=kernels).
 package main
 
 import (
@@ -28,7 +28,7 @@ var (
 	conc     = envInt("CONC", 64)
 	idleN    = envInt("IDLE", 5000)
 	runs     = envInt("RUNS", 3)
-	only     = os.Getenv("ONLY") // "compute" or "http"
+	only     = os.Getenv("ONLY") // "compute", "kernels" (just the loop kernels) or "http"
 	// loadgen is the load generator in bin: sq-load (bench/squark/load, the default) or load (the
 	// Go one in bench/load, which also has the -startup mode)
 	loadgen = envStr("LOADGEN", "sq-load")
@@ -112,12 +112,16 @@ func main() {
 	if only != "http" {
 		computeBenchmarks(rep)
 	}
-	if only != "compute" {
+	if only != "compute" && only != "kernels" {
 		httpBenchmarks(rep)
 	}
 	os.MkdirAll("results", 0o755)
 	b, _ := json.MarshalIndent(rep, "", "  ")
-	os.WriteFile("results/latest.json", b, 0o644)
+	out := "results/latest.json"
+	if only == "kernels" {
+		out = "results/kernels.json" // a partial run keeps the full results
+	}
+	os.WriteFile(out, b, 0o644)
 	printReport(rep)
 }
 
@@ -149,45 +153,55 @@ func raiseFDLimit() {
 
 // ---- compute ----
 
-var reReal = regexp.MustCompile(`([0-9.]+) real`)
 var reRSS = regexp.MustCompile(`(\d+)\s+maximum resident set size`)
 
 func timed(bin string, args ...string) (float64, int64, string, error) {
 	cmd := exec.Command("/usr/bin/time", append([]string{"-l", bin}, args...)...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	// wall time from our clock: time(1) reports it in 10ms steps, too coarse for the kernels
+	start := time.Now()
 	if err := cmd.Run(); err != nil {
 		return 0, 0, "", fmt.Errorf("%s %v: %v\n%s", bin, args, err, stderr.String())
 	}
-	m := reReal.FindStringSubmatch(stderr.String())
+	secs := time.Since(start).Seconds()
 	r := reRSS.FindStringSubmatch(stderr.String())
-	if m == nil || r == nil {
+	if r == nil {
 		return 0, 0, "", fmt.Errorf("cannot parse time output: %s", stderr.String())
 	}
-	secs, _ := strconv.ParseFloat(m[1], 64)
 	rss, _ := strconv.ParseInt(r[1], 10, 64)
 	return secs, rss, strings.TrimSpace(stdout.String()), nil
 }
 
+// kernels are the loops in bench/squark/kernels, which a vectorizing compiler should turn into
+// SIMD code; each runs 40000 times over 16Ki elements.
+var kernels = []string{"saxpy", "dot-int32", "sum-float64", "count-byte", "max-int32", "xor-bytes", "add-rows", "brighten"}
+
+const kernelReps = "40000"
+
 func computeBenchmarks(rep *Report) {
-	text := filepath.Join(scratch, "squark-wordfreq-100mb.txt")
-	if _, err := os.Stat(text); err != nil {
-		fmt.Fprintln(os.Stderr, "generating 100 MiB wordfreq input...")
-		if out, err := exec.Command(filepath.Join(binDir, "gocompute"), "gen-text", text, "100").CombinedOutput(); err != nil {
-			fatal("gen-text: %v %s", err, out)
-		}
-	}
 	type bench struct {
 		name   string
 		goArgs []string
 		sqBin  string
 		sqArgs []string
 	}
-	benches := []bench{
-		{"sieve 50M", []string{"sieve", "50000000"}, "sq-sieve", []string{"50000000"}},
-		{"nbody 50M", []string{"nbody", "50000000"}, "sq-nbody", []string{"50000000"}},
-		{"wordfreq 100MiB", []string{"wordfreq", text}, "sq-wordfreq", []string{text}},
-		{"json encode 2M", []string{"json", "2000000"}, "sq-jsonenc", []string{"2000000"}},
+	var benches []bench
+	text := filepath.Join(scratch, "squark-wordfreq-100mb.txt")
+	if only != "kernels" {
+		benches = append(benches, bench{"sieve 50M", []string{"sieve", "50000000"}, "sq-sieve", []string{"50000000"}},
+			bench{"nbody 50M", []string{"nbody", "50000000"}, "sq-nbody", []string{"50000000"}},
+			bench{"wordfreq 100MiB", []string{"wordfreq", text}, "sq-wordfreq", []string{text}},
+			bench{"json encode 2M", []string{"json", "2000000"}, "sq-jsonenc", []string{"2000000"}})
+	}
+	for _, k := range kernels {
+		benches = append(benches, bench{"kernel " + k, []string{"kernel", k, kernelReps}, "sq-kernels", []string{k, kernelReps}})
+	}
+	if _, err := os.Stat(text); err != nil && only != "kernels" {
+		fmt.Fprintln(os.Stderr, "generating 100 MiB wordfreq input...")
+		if out, err := exec.Command(filepath.Join(binDir, "gocompute"), "gen-text", text, "100").CombinedOutput(); err != nil {
+			fatal("gen-text: %v %s", err, out)
+		}
 	}
 	for _, b := range benches {
 		for _, impl := range []string{"go", "squark"} {
@@ -413,6 +427,14 @@ func lastJSON(b []byte) []byte {
 
 // ---- report ----
 
+// secs formats a run time, in milliseconds below 0.1s so a fast kernel's changes still show.
+func secs(s float64) string {
+	if s < 0.1 {
+		return fmt.Sprintf("%.1fms", s*1000)
+	}
+	return fmt.Sprintf("%.2fs", s)
+}
+
 func human(n int64) string {
 	switch {
 	case n >= 1<<30:
@@ -435,7 +457,7 @@ func printReport(rep *Report) {
 			if g.Output != s.Output {
 				same = " ⚠ outputs differ"
 			}
-			fmt.Printf("| %s%s | %.2fs | %.2fs | %s | %s |\n", g.Bench, same, g.Seconds, s.Seconds, human(g.MaxRSS), human(s.MaxRSS))
+			fmt.Printf("| %s%s | %s | %s | %s | %s |\n", g.Bench, same, secs(g.Seconds), secs(s.Seconds), human(g.MaxRSS), human(s.MaxRSS))
 		}
 		fmt.Println()
 	}

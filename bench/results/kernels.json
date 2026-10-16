@@ -1,0 +1,132 @@
+{
+  "date": "2026-10-16T22:46:12+01:00",
+  "machine": "Apple M4, 10 cores, 16 GiB, darwin/arm64",
+  "duration": "10s",
+  "connections": 64,
+  "compute": [
+    {
+      "bench": "kernel saxpy",
+      "impl": "go",
+      "seconds": 0.169197708,
+      "max_rss_bytes": 4849664,
+      "output": "620000"
+    },
+    {
+      "bench": "kernel saxpy",
+      "impl": "squark",
+      "seconds": 0.034005041,
+      "max_rss_bytes": 1769472,
+      "output": "620000"
+    },
+    {
+      "bench": "kernel dot-int32",
+      "impl": "go",
+      "seconds": 0.202866416,
+      "max_rss_bytes": 4833280,
+      "output": "-8919761280"
+    },
+    {
+      "bench": "kernel dot-int32",
+      "impl": "squark",
+      "seconds": 0.033611833,
+      "max_rss_bytes": 1720320,
+      "output": "-8919761280"
+    },
+    {
+      "bench": "kernel sum-float64",
+      "impl": "go",
+      "seconds": 0.392656875,
+      "max_rss_bytes": 4702208,
+      "output": "20643840000"
+    },
+    {
+      "bench": "kernel sum-float64",
+      "impl": "squark",
+      "seconds": 0.335386417,
+      "max_rss_bytes": 1736704,
+      "output": "20643840000"
+    },
+    {
+      "bench": "kernel count-byte",
+      "impl": "go",
+      "seconds": 0.166783458,
+      "max_rss_bytes": 4751360,
+      "output": "2559616"
+    },
+    {
+      "bench": "kernel count-byte",
+      "impl": "squark",
+      "seconds": 0.083000708,
+      "max_rss_bytes": 1736704,
+      "output": "2559616"
+    },
+    {
+      "bench": "kernel max-int32",
+      "impl": "go",
+      "seconds": 0.170399083,
+      "max_rss_bytes": 4718592,
+      "output": "39623749"
+    },
+    {
+      "bench": "kernel max-int32",
+      "impl": "squark",
+      "seconds": 0.023491791,
+      "max_rss_bytes": 1720320,
+      "output": "39623749"
+    },
+    {
+      "bench": "kernel xor-bytes",
+      "impl": "go",
+      "seconds": 0.251733958,
+      "max_rss_bytes": 4784128,
+      "output": "4674688"
+    },
+    {
+      "bench": "kernel xor-bytes",
+      "impl": "squark",
+      "seconds": 0.010980458,
+      "max_rss_bytes": 1720320,
+      "output": "4674688"
+    },
+    {
+      "bench": "kernel add-rows",
+      "impl": "go",
+      "seconds": 0.361499792,
+      "max_rss_bytes": 4767744,
+      "output": "-4234893899"
+    },
+    {
+      "bench": "kernel add-rows",
+      "impl": "squark",
+      "seconds": 0.202193584,
+      "max_rss_bytes": 1736704,
+      "output": "-4234893899"
+    },
+    {
+      "bench": "kernel brighten",
+      "impl": "go",
+      "seconds": 0.218381875,
+      "max_rss_bytes": 4866048,
+      "output": "6778868"
+    },
+    {
+      "bench": "kernel brighten",
+      "impl": "squark",
+      "seconds": 0.130669834,
+      "max_rss_bytes": 1736704,
+      "output": "6778868"
+    }
+  ],
+  "http": null,
+  "servers": null,
+  "binary_sizes": {
+    "gocompute": 3887362,
+    "gonotes": 9501826,
+    "notes": 130664,
+    "sq-jsonenc": 71672,
+    "sq-nbody": 72488,
+    "sq-sieve": 71400,
+    "sq-wordfreq": 89592
+  },
+  "load_generator": "sq-load"
+}

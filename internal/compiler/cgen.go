@@ -71,7 +71,9 @@ type gen struct {
 	constC        map[*Var]string // their C values, inlined where one constant's initializer uses
 	// another (a const variable isn't a constant expression in C); functions read them by name
 	inConstInit bool
-	usesGlobals bool // the function being generated reads or writes a package variable
+	usesGlobals bool                // the function being generated reads or writes a package variable
+	addressed   map[*Var]bool       // its locals whose address is taken (see addressedVars)
+	unchecked   map[*IndexExpr]bool // indexes a loop's unchecked copy leaves unchecked (cgen_loop.go)
 }
 
 // constValue returns a constant's C value (computed once).
@@ -842,6 +844,7 @@ func (g *gen) function(f *Func) string {
 	g.fn = f
 	g.tmpN = 0
 	g.usesGlobals = false
+	g.addressed = nil
 	g.fnPreempt, g.usesPreempt = g.preemptFns[f], false
 	g.topDecls = nil
 	var body strings.Builder

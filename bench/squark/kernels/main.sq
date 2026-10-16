@@ -1,0 +1,180 @@
+// kernels runs one small loop many times: the loops a vectorizing compiler should turn into SIMD
+// code. bench/gocompute/kernels.go is the Go version; outputs must match.
+//
+//	kernels NAME REPS
+//
+// The kernels take slices, not the package arrays, so the compiler can't see their lengths.
+// Each repetition changes one input element, so a repetition can't be skipped.
+package main
+
+import (
+	"os"
+	"strconv"
+)
+
+const n = 16384
+
+var (
+	f32a [n]float32
+	f32b [n]float32
+	f64a [n]float64
+	i32a [n]int32
+	i32b [n]int32
+	u8a  [n]byte
+	u8b  [n]byte
+	u8c  [n]byte
+)
+
+//squark:noinline
+func saxpy(a float32, x []float32, y []float32) {
+	for i := range x {
+		y[i] += a * x[i]
+	}
+}
+
+//squark:noinline
+func dotInt32(a []int32, b []int32) int32 {
+	var s int32
+	for i := 0; i < len(a); i++ {
+		s += a[i] * b[i]
+	}
+	return s
+}
+
+// sumFloat64 adds in order: a vectorized sum would round differently, so it stays scalar
+// until it is written with SIMD types.
+//
+//squark:noinline
+func sumFloat64(x []float64) float64 {
+	var s float64
+	for _, v := range x {
+		s += v
+	}
+	return s
+}
+
+//squark:noinline
+func countByte(b []byte, c byte) int {
+	k := 0
+	for i := range b {
+		if b[i] == c {
+			k++
+		}
+	}
+	return k
+}
+
+//squark:noinline
+func maxInt32(x []int32) int32 {
+	m := x[0]
+	for i := 1; i < len(x); i++ {
+		if x[i] > m {
+			m = x[i]
+		}
+	}
+	return m
+}
+
+//squark:noinline
+func xorBytes(dst []byte, a []byte, b []byte) {
+	for i := range dst {
+		dst[i] = a[i] ^ b[i]
+	}
+}
+
+// addRows adds two w-wide row-major matrices row by row, the index offset by the row start.
+//
+//squark:noinline
+func addRows(dst []int32, a []int32, b []int32, w int) {
+	rows := len(dst) / w
+	for r := 0; r < rows; r++ {
+		base := r * w
+		for j := 0; j < w; j++ {
+			dst[base+j] = a[base+j] + b[base+j]
+		}
+	}
+}
+
+//squark:noinline
+func brighten(dst []byte, src []byte) {
+	for i := range src {
+		v := int(src[i]) * 3 / 2
+		if v > 255 {
+			v = 255
+		}
+		dst[i] = byte(v)
+	}
+}
+
+func main() {
+	if os.NArgs() != 3 {
+		println("usage: kernels NAME REPS")
+		os.Exit(2)
+	}
+	name := os.Arg(1)
+	reps, err := strconv.Atoi(os.Arg(2))
+	if err != nil || reps < 1 {
+		println("REPS must be a positive integer")
+		os.Exit(2)
+	}
+	for i := 0; i < n; i++ {
+		f32a[i] = float32(i % 64)
+		f64a[i] = float64(i % 64)
+		i32a[i] = int32(i%1000 - 500)
+		i32b[i] = int32(i%7 + 1)
+		u8a[i] = byte(i * 7)
+		u8b[i] = byte(i * 13)
+	}
+	var check int64
+	switch name {
+	case "saxpy":
+		for r := 0; r < reps; r++ {
+			// a alternates between 1 and -1, so y stays small and every result is exact
+			saxpy(float32(1-2*(r&1)), f32a[:], f32b[:])
+			check += int64(f32b[r%n])
+			f32a[r%n] = float32(r % 64)
+		}
+	case "dot-int32":
+		for r := 0; r < reps; r++ {
+			check += int64(dotInt32(i32a[:], i32b[:]))
+			i32a[r%n] = int32(r%1000 - 500)
+		}
+	case "sum-float64":
+		for r := 0; r < reps; r++ {
+			check += int64(sumFloat64(f64a[:]))
+			f64a[r%n] = float64(r % 64)
+		}
+	case "count-byte":
+		for r := 0; r < reps; r++ {
+			check += int64(countByte(u8a[:], 7))
+			u8a[r%n] = byte(r)
+		}
+	case "max-int32":
+		for r := 0; r < reps; r++ {
+			check += int64(maxInt32(i32a[:]))
+			i32a[r%n] = int32(r % 1001)
+		}
+	case "xor-bytes":
+		for r := 0; r < reps; r++ {
+			xorBytes(u8c[:], u8a[:], u8b[:])
+			check += int64(u8c[r%n])
+			u8a[r%n] = byte(r)
+		}
+	case "add-rows":
+		for r := 0; r < reps; r++ {
+			addRows(i32b[:], i32a[:], i32b[:], 128)
+			check += int64(i32b[r%n])
+			i32b[r%n] = int32(r % 7)
+		}
+	case "brighten":
+		for r := 0; r < reps; r++ {
+			brighten(u8c[:], u8a[:])
+			check += int64(u8c[r%n])
+			u8a[r%n] = byte(r)
+		}
+	default:
+		println("unknown kernel", name)
+		os.Exit(2)
+	}
+	println(check)
+}

@@ -5,6 +5,7 @@
 //	gocompute nbody [N]          n-body, N steps (default 50_000_000)
 //	gocompute wordfreq FILE      top 10 word frequencies
 //	gocompute json [N]           encode a struct N times (default 2_000_000)
+//	gocompute kernel NAME REPS   run one loop kernel REPS times (see kernels.go)
 //	gocompute gen-text FILE MB   write deterministic text input for wordfreq
 package main
 
@@ -20,6 +21,7 @@ func usage() {
   gocompute nbody [N]          n-body simulation, N steps (default 50000000)
   gocompute wordfreq FILE      print top 10 words as "count word"
   gocompute json [N]           JSON-encode a struct N times (default 2000000)
+  gocompute kernel NAME REPS   run one loop kernel REPS times (see kernels.go)
   gocompute gen-text FILE MB   write MB MiB of deterministic text`)
 	os.Exit(2)
 }
@@ -54,6 +56,11 @@ func main() {
 		err = wordfreq(args[0])
 	case "json":
 		fmt.Println(jsonBench(intArg(args, 0, 2_000_000)))
+	case "kernel":
+		if len(args) != 2 {
+			usage()
+		}
+		kernel(args[0], intArg(args, 1, 0))
 	case "gen-text":
 		if len(args) != 2 {
 			usage()

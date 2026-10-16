@@ -243,6 +243,14 @@ margin. `SQ_STACKCHECK=1` paints stacks at run time and reports the deepest use 
 the proofs; under load the notes server used 97 KB of its proven 186 KB. Every stack has a guard
 page, and the build fails if any squark-compiled object references `malloc` or `free`.
 
+**Loops.** clang vectorizes loops, but a bounds check that can panic mid-loop stops it. For an
+innermost loop that counts up by one, the C generator emits a second copy of the loop without
+the checks on indexes like `x[i+k]`. It runs that copy only when a test before the loop shows
+every index the counter can reach is in range, so a loop that would panic still panics at the
+same iteration. It also reads slice headers into locals: a 24-byte slice parameter is passed in
+memory, and clang can't otherwise tell that a store through its pointer leaves its length alone.
+`TestVectorize` checks clang's remarks for the loops in `testdata/vectorize`.
+
 **Idle connections cost nothing.** A keep-alive connection that is quiet for 100 ms moves to the
 runtime's idle set: it stays registered with kqueue, its task exits, and the stack pages go back to
 the OS.
@@ -257,6 +265,9 @@ the OS.
   about 800k req/s on `/health`, 550k on `/notes/1` and 250k on the write-heavy mix, against
   450k, 290k and 170k for one thread and about 450k, 250k and 95k for Go with `GOMAXPROCS=3`;
   `workers 3` (processes) is similar. See `bench/workers-linux.sh`.
+- `ONLY=kernels bench/run.sh` runs only the loop kernels (`bench/squark/kernels`: saxpy, byte
+  xor, row-wise add and others). Use it to watch vectorization. Results go to
+  `bench/results/kernels.md`. Go doesn't vectorize, so its times are the scalar baseline.
 - The JSON benchmark compares hand-written append code with Go's reflection-based `encoding/json`.
 - wordfreq streams the file and interns words in an arena, while Go's version reads the whole file,
   as idiomatic Go does.

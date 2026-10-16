@@ -803,20 +803,29 @@ func (g *gen) forStmt(s *ForStmt) {
 		}
 		g.hoisted, g.out = prevH, prevOut
 	}
-	g.lineDirective(s.P)
-	g.line("for (;;) {")
-	g.ind++
-	if s.Cond != nil {
-		g.line("if (!(%s)) break;", g.expr(s.Cond))
+	var plan *loopPlan
+	iv, hi, incl := forLoopCounter(s)
+	if hi != nil {
+		plan = g.planLoop(iv, s.Body, hi)
 	}
-	g.open()
-	g.stmts(s.Body.List)
-	g.close()
-	g.line("sq_cont%d:;", id)
-	g.preemptCheck()
-	g.out.WriteString(post.String())
-	g.ind--
-	g.line("}")
+	g.versioned(s, plan, func() loopBound {
+		return loopBound{iv.CName, g.coerce(hi, tInt), incl}
+	}, func() {
+		g.lineDirective(s.P)
+		g.line("for (;;) {")
+		g.ind++
+		if s.Cond != nil {
+			g.line("if (!(%s)) break;", g.expr(s.Cond))
+		}
+		g.open()
+		g.stmts(s.Body.List)
+		g.close()
+		g.line("sq_cont%d:;", g.label(s))
+		g.preemptCheck()
+		g.out.WriteString(post.String())
+		g.ind--
+		g.line("}")
+	})
 	g.line("sq_brk%d:;", id)
 	g.close()
 }
@@ -875,8 +884,13 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		g.open()
 		g.stmts(s.Body.List)
 		g.close()
-		g.line("sq_cont%d:;", id)
+		g.line("sq_cont%d:;", g.label(s)) // not id: an unchecked copy has its own labels
 		g.preemptCheck()
+	}
+	// the counter, when versioning can use it (cgen_loop.go)
+	var iv *Var
+	if s.Define && s.Key != nil && !isBlank(s.Key) {
+		iv = localVar(s.Key)
 	}
 	switch u := xt.Underlying().(type) {
 	case *Basic:
@@ -895,22 +909,26 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 			n := g.tmp()
 			ct := g.ctype(xt)
 			g.line("%s %s = %s;", ct, n, g.expr(s.X))
-			g.line("for (%s %s = 0; %s < %s; %s++) {", ct, i, i, n, i)
-			g.ind++
-			g.rangeVar(s.Key, s.Define, i, xt)
-			body()
-			g.ind--
-			g.line("}")
+			g.versioned(s, g.planLoop(iv, s.Body), func() loopBound { return loopBound{"0", n, false} }, func() {
+				g.line("for (%s %s = 0; %s < %s; %s++) {", ct, i, i, n, i)
+				g.ind++
+				g.rangeVar(s.Key, s.Define, i, xt)
+				body()
+				g.ind--
+				g.line("}")
+			})
 		}
 	case *Slice:
 		sl := g.tmp()
 		g.line("%s %s = %s;", g.ctype(xt), sl, g.expr(s.X))
-		g.line("for (int64_t %s = 0; %s < %s.len; %s++) {", i, i, sl, i)
-		g.ind++
-		g.rangeVars(s, i, tInt, fmt.Sprintf("%s.p[%s]", sl, i), u.Elem)
-		body()
-		g.ind--
-		g.line("}")
+		g.versioned(s, g.planLoop(iv, s.Body), func() loopBound { return loopBound{"0", sl + ".len", false} }, func() {
+			g.line("for (int64_t %s = 0; %s < %s.len; %s++) {", i, i, sl, i)
+			g.ind++
+			g.rangeVars(s, i, tInt, fmt.Sprintf("%s.p[%s]", sl, i), u.Elem)
+			body()
+			g.ind--
+			g.line("}")
+		})
 	case *Array, *Pointer:
 		var a Type = u
 		ptr := g.tmp()
@@ -927,12 +945,14 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		}
 		arr := a.(*Array)
 		g.line("%s *%s = %s;", g.ctype(arr), ptr, src)
-		g.line("for (int64_t %s = 0; %s < %d; %s++) {", i, i, arr.Len, i)
-		g.ind++
-		g.rangeVars(s, i, tInt, fmt.Sprintf("%s->a[%s]", ptr, i), arr.Elem)
-		body()
-		g.ind--
-		g.line("}")
+		g.versioned(s, g.planLoop(iv, s.Body), func() loopBound { return loopBound{"0", fmt.Sprint(arr.Len), false} }, func() {
+			g.line("for (int64_t %s = 0; %s < %d; %s++) {", i, i, arr.Len, i)
+			g.ind++
+			g.rangeVars(s, i, tInt, fmt.Sprintf("%s->a[%s]", ptr, i), arr.Elem)
+			body()
+			g.ind--
+			g.line("}")
+		})
 	case *Map:
 		m := g.tmp()
 		g.line("sq_map *%s = %s;", m, g.expr(s.X))

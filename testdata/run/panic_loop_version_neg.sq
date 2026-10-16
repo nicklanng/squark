@@ -1,0 +1,19 @@
+package main
+
+const minInt = -9223372036854775807 - 1
+
+// i - minInt wraps around to a negative index: the range test must reject the loop (the offset
+// -minInt is minInt again), so the index stays checked and panics.
+func sub(a []int, off int) int {
+	s := 0
+	for i := 0; i < 2; i++ {
+		s += a[i-off]
+	}
+	return s
+}
+
+func main() {
+	a := []int{1, 2, 3}
+	println(sub(a, -1))
+	println(sub(a, minInt))
+}

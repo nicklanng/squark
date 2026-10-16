@@ -34,6 +34,23 @@ static inline int64_t sq_idx(int64_t i, int64_t n, const char *file, int line) {
 }
 #define SQ_IDX(i, n) sq_idx((i), (n), __FILE__, __LINE__)
 
+// sq_inrange reports whether i + off is an index into n elements for every i from lo up to hi
+// (excluded), so a loop over them can run a copy without bounds checks. It says no when the sum
+// overflows. sq_inrange_incl is the same with hi included; it also says no for hi = INT64_MAX,
+// where the counter would wrap.
+static inline bool sq_inrange(int64_t lo, int64_t hi, int64_t off, int64_t n) {
+	int64_t a, b;
+	if (lo >= hi) return true;
+	if (__builtin_add_overflow(lo, off, &a) || __builtin_add_overflow(hi, off, &b)) return false;
+	return a >= 0 && b <= n;
+}
+static inline bool sq_inrange_incl(int64_t lo, int64_t hi, int64_t off, int64_t n) {
+	int64_t a, b;
+	if (lo > hi) return true;
+	if (hi == INT64_MAX || __builtin_add_overflow(lo, off, &a) || __builtin_add_overflow(hi, off, &b)) return false;
+	return a >= 0 && b < n;
+}
+
 // SQ_NN checks a pointer before it is dereferenced. A fault would catch most nil dereferences,
 // but not a large offset from nil, and C lets the compiler assume a dereferenced pointer is
 // non-null; the check also gives the panic a source position.

@@ -212,6 +212,9 @@ func (g *gen) indexExpr(e *IndexExpr) string {
 	xt := e.X.info().T.Underlying()
 	idx := g.coerce(e.Index, tInt)
 	checked := func(n string) string {
+		if g.unchecked[e] {
+			return idx // in range for every value of the loop counter (cgen_loop.go)
+		}
 		if v, ok := constInt(e.Index); ok {
 			_ = v
 			if _, isArr := xt.(*Array); isArr {

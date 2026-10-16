@@ -10,6 +10,7 @@ import (
 	"debug/macho"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -35,6 +36,9 @@ type Options struct {
 	// Sanitize, if set, builds with -fsanitize=<Sanitize> (e.g. "thread") and -g, for the
 	// runtime's own tests. The no-heap check still applies to the program's objects.
 	Sanitize string
+	// Remarks, if set, receives clang's loop-vectorization remarks for the program (which
+	// loops became SIMD code, and why the others didn't). clang only.
+	Remarks io.Writer
 }
 
 type PoolReport struct {
@@ -207,9 +211,16 @@ func Build(opt Options) (*Result, error) {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("C compiler failed on %s (%s): %v\n%s", src, blame, err, stderr.String())
 		}
+		if opt.Remarks != nil && src == "prog.c" {
+			opt.Remarks.Write(stderr.Bytes())
+		}
 		return nil
 	}
-	if err := cc("prog.c", "prog.o", squarkBug); err != nil {
+	var progExtra []string
+	if opt.Remarks != nil {
+		progExtra = []string{"-gline-tables-only", "-Rpass=loop-vectorize", "-Rpass-missed=loop-vectorize", "-Rpass-analysis=loop-vectorize"}
+	}
+	if err := cc("prog.c", "prog.o", squarkBug, progExtra...); err != nil {
 		return nil, err
 	}
 	objs := []string{"prog.o"}

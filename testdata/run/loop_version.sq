@@ -1,0 +1,124 @@
+package main
+
+// Loops whose indexes are the counter plus a fixed offset run a copy without bounds checks when
+// a test before the loop shows every index is in range (cgen_loop.go). These check that both
+// copies compute the same thing.
+
+var g [8]int
+
+func neighbours(a []int, b []int) {
+	for i := 1; i < len(a); i++ {
+		b[i-1] = a[i] + a[i-1]
+	}
+}
+
+func inclusive(a []int, n int) int {
+	s := 0
+	for i := 0; i <= n-1; i++ {
+		s += a[i]
+	}
+	return s
+}
+
+func flipped(a []int) int {
+	s := 0
+	for i := 0; len(a) > i; i++ {
+		s += a[i] * i
+	}
+	return s
+}
+
+// the test fails (b is shorter), so the checked copy runs, and the if keeps it in range
+func guarded(a []int, b []int) int {
+	n := 0
+	for i := range a {
+		if i < len(b) {
+			b[i] = a[i]
+			n++
+		}
+	}
+	return n
+}
+
+// s changes after the loop: the copy read before the loop must not leak out
+func later(s []int) int {
+	t := 0
+	for i := range s {
+		t += s[i]
+	}
+	s = s[1:]
+	return t + len(s)
+}
+
+// s changes in the loop, so its indexes stay checked
+func shrinking(s []int) int {
+	t := 0
+	for i := 0; i < 3; i++ {
+		t += s[i]
+		s = s[1:]
+	}
+	return t
+}
+
+func branches(a []int) int {
+	s := 0
+	for i := 0; i < len(a); i++ {
+		if a[i] == 3 {
+			continue
+		}
+		if a[i] == 6 {
+			break
+		}
+		s += a[i]
+	}
+	return s
+}
+
+func rows(dst []int, a []int, w int) {
+	for r := 0; r < len(dst)/w; r++ {
+		base := r * w
+		for j := 0; j < w; j++ {
+			dst[base+j] = a[base+j] * (r + 1)
+		}
+	}
+}
+
+func viaPointer(p *[8]int) int {
+	s := 0
+	for i := range 8 {
+		s += p[i] + g[i]
+	}
+	return s
+}
+
+func bytesOf(s string, n int) int {
+	t := 0
+	for i := range n {
+		t += int(s[i])
+	}
+	return t
+}
+
+func main() {
+	a := []int{1, 2, 3, 4, 5, 6, 7, 8}
+	var b [8]int
+	neighbours(a, b[:])
+	println(b[0], b[6], b[7])
+	println(inclusive(a, 8), inclusive(a, 0))
+	println(flipped(a))
+	var c [3]int
+	println(guarded(a, c[:]), c[0], c[2])
+	println(later(a))
+	println(shrinking(a))
+	println(branches(a))
+	var d [8]int
+	rows(d[:], a, 4)
+	println(d[0], d[3], d[4], d[7])
+	for i := range g {
+		g[i] = i
+	}
+	var e [8]int
+	copy(e[:], a)
+	println(viaPointer(&e))
+	println(bytesOf("abc", 3), bytesOf("abc", 0))
+}
