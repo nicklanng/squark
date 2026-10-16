@@ -2873,6 +2873,40 @@ static int64_t threads_from_env(int64_t n) {
 	return v;
 }
 
+#if defined(__x86_64__) && defined(SQ_CPU)
+// A program built for a newer x86-64 than the one it runs on (squark build -cpu) would die of an
+// illegal instruction somewhere. This runs before anything else, compiled for the baseline CPU,
+// and names what is missing instead.
+__attribute__((constructor(101), target("arch=x86-64"))) static void sq_check_cpu(void) {
+	__builtin_cpu_init();
+	const char *missing = NULL;
+#ifdef __AVX512F__
+	if (!__builtin_cpu_supports("avx512f")) missing = "AVX-512";
+#endif
+#ifdef __AVX2__
+	if (!__builtin_cpu_supports("avx2")) missing = "AVX2";
+#endif
+#ifdef __FMA__
+	if (!__builtin_cpu_supports("fma")) missing = "FMA";
+#endif
+#ifdef __AVX__
+	if (!__builtin_cpu_supports("avx")) missing = "AVX";
+#endif
+#ifdef __POPCNT__
+	if (!__builtin_cpu_supports("popcnt")) missing = "POPCNT";
+#endif
+#ifdef __SSE4_2__
+	if (!__builtin_cpu_supports("sse4.2")) missing = "SSE4.2";
+#endif
+	if (missing) {
+		char msg[256];
+		int n = snprintf(msg, sizeof msg, "fatal error: this program was built for x86-64 CPUs with %s (squark build -cpu %s), and this CPU doesn't have it\n", missing, SQ_CPU);
+		if (write(2, msg, (size_t)n)) {}
+		_exit(2);
+	}
+}
+#endif
+
 int main(int argc, char **argv) {
 	sq_shard0.next_gid = 1;
 	sq_shard0.pollfd = -1;

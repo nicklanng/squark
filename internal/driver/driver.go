@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -39,7 +40,39 @@ type Options struct {
 	// Remarks, if set, receives clang's loop-vectorization remarks for the program (which
 	// loops became SIMD code, and why the others didn't). clang only.
 	Remarks io.Writer
+	// CPU is the CPU to build for (see cpuFlags); "" means $SQUARK_CPU, or else the baseline.
+	CPU string
 }
+
+// cpuFlags returns the C compiler flags for building for cpu on goarch:
+//
+//	baseline                    every CPU of the architecture (x86-64: SSE2 only), the default
+//	native                      the CPU building the program (the binary may not run elsewhere)
+//	x86-64-v2, -v3, -v4         x86-64 levels: v2 adds SSE4.2, v3 AVX2 and FMA, v4 AVX-512
+//	armv8.1-a … armv9.5-a       arm64 architecture versions
+//
+// On x86-64 a program built for more than the baseline checks the CPU when it starts.
+func cpuFlags(cpu, goarch string) ([]string, error) {
+	switch {
+	case cpu == "" || cpu == "baseline":
+		return nil, nil
+	case cpu == "native" && goarch == "arm64":
+		return []string{"-mcpu=native"}, nil
+	case cpu == "native" && goarch == "amd64":
+		return []string{"-march=native", "-DSQ_CPU=\"native\""}, nil
+	case goarch == "amd64" && (cpu == "x86-64-v2" || cpu == "x86-64-v3" || cpu == "x86-64-v4"):
+		return []string{"-march=" + cpu, "-DSQ_CPU=\"" + cpu + "\""}, nil
+	case goarch == "arm64" && armLevel.MatchString(cpu):
+		return []string{"-march=" + cpu}, nil
+	}
+	levels := "x86-64-v2, x86-64-v3, x86-64-v4"
+	if goarch == "arm64" {
+		levels = "armv8.1-a to armv8.9-a, armv9-a to armv9.5-a"
+	}
+	return nil, fmt.Errorf("unknown CPU %q for %s: use baseline, native or %s", cpu, goarch, levels)
+}
+
+var armLevel = regexp.MustCompile(`^armv(8\.[1-9]|9(\.[1-5])?)-a$`)
 
 type PoolReport struct {
 	Name      string
@@ -178,6 +211,13 @@ func Build(opt Options) (*Result, error) {
 		return nil, err
 	}
 
+	if opt.CPU == "" {
+		opt.CPU = os.Getenv("SQUARK_CPU")
+	}
+	cpu, err := cpuFlags(opt.CPU, runtime.GOARCH)
+	if err != nil {
+		return nil, err
+	}
 	// one section per function and datum, so the linker drops what the program doesn't use
 	cflags := []string{opt.OptFlag, "-std=gnu11", "-pthread", "-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks", "-w", "-fstack-usage", "-ffunction-sections", "-fdata-sections", "-I", work}
 	if runtime.GOOS == "linux" {
@@ -189,6 +229,7 @@ func Build(opt Options) (*Result, error) {
 			cflags = append(cflags, "--param=stack-clash-protection-guard-size=12")
 		}
 	}
+	cflags = append(cflags, cpu...)
 	if opt.Sanitize != "" {
 		cflags = append(cflags, "-fsanitize="+opt.Sanitize, "-g")
 	}

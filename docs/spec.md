@@ -710,12 +710,20 @@ resp := try c.Get("/notes/1")    // resp.Body and resp.HeaderValue(...) view buf
 ## 10. Toolchain
 
 ```sh
-squark build [-o out] [-v] [-work dir] [dir]   # -v prints the memory breakdown (always printed with a budget)
-squark run [-v] dir [args...]
+squark build [-o out] [-v] [-work dir] [-cpu c] [dir]   # -v prints the memory breakdown (always printed with a budget)
+squark run [-v] [-cpu c] dir [args...]
 squark check [dir]                              # type and lifetime check only
 squark doc [dir] [pkg]                          # API with provenance; `squark doc std` for the stdlib
 squark emit-c [dir]                             # the generated C
 ```
+
+`-cpu` (or `SQUARK_CPU` in the environment) picks the CPU to build for: `baseline` (the default:
+every CPU of the architecture, which on x86-64 means SSE2 only), `native` (the building machine's
+CPU; the binary may not run elsewhere), `x86-64-v2`, `x86-64-v3` (AVX2 and FMA: SIMD types and
+vectorized loops use 256-bit registers) or `x86-64-v4` (AVX-512) on x86-64, and `armv8.1-a` to
+`armv9.5-a` on arm64 (which always has 128-bit NEON). On x86-64 a program built for more than the
+baseline checks the CPU when it starts and exits with status 2, naming the missing feature,
+instead of crashing on an illegal instruction.
 
 `squark run` passes SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGALRM, SIGUSR1 and SIGUSR2 on to the program
 and exits with its status (128+n if a signal ended it); one that arrives during the build removes

@@ -239,7 +239,8 @@ func sum(xs []float64) float64 {
 comparisons give masks (`(v == c).Any()`, `m.Select(a, b)`). Plain loops over slices are
 vectorized by clang already (see Loops below); SIMD types are for what it can't do, such as float
 sums, which it keeps in source order, and searches that stop early. Both run 6 to 7 times faster
-than scalar code in `bench/squark/kernels`.
+than scalar code in `bench/squark/kernels`. On x86-64, `squark build -cpu x86-64-v3` (or
+`native`) uses AVX2, as `GOAMD64=v3` does for Go; the default is SSE2, which every x86-64 has.
 
 ### What's deliberately missing
 

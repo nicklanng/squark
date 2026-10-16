@@ -17,8 +17,8 @@ import (
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
-  squark build [-o output] [-v] [-work dir] [dir]   compile a program
-  squark run [-v] dir [args...]                     compile and run
+  squark build [-o output] [-v] [-work dir] [-cpu c] [dir]   compile a program
+  squark run [-v] [-cpu c] dir [args...]                     compile and run
   squark check [dir]                                type and lifetime check only
   squark doc [dir] [pkg]                            list functions with their reference provenance
   squark emit-c [dir]                               print the generated C
@@ -82,6 +82,7 @@ func main() {
 	verbose := fs.Bool("v", false, "print goroutine pool and stack report")
 	work := fs.String("work", "", "keep intermediate C files in this directory")
 	opt := fs.String("opt", "-O3", "C optimization flag")
+	cpu := fs.String("cpu", "", "CPU to build for: baseline, native, x86-64-v3, ... (default $SQUARK_CPU, or baseline)")
 	fs.Parse(os.Args[2:])
 	dir := "."
 	if fs.NArg() > 0 {
@@ -95,7 +96,7 @@ func main() {
 	}
 	switch cmd {
 	case "build":
-		res, err := driver.Build(driver.Options{Dir: dir, Output: *output, WorkDir: *work, Verbose: *verbose, OptFlag: *opt})
+		res, err := driver.Build(driver.Options{Dir: dir, Output: *output, WorkDir: *work, Verbose: *verbose, OptFlag: *opt, CPU: *cpu})
 		if err != nil && res != nil {
 			// budget exceeded: the binary was built but is rejected
 			os.Remove(res.Binary)
@@ -120,7 +121,7 @@ func main() {
 		// the build's own temporary directory goes inside tmp, so a signal removes it too
 		userTmp, hadTmp := os.LookupEnv("TMPDIR")
 		os.Setenv("TMPDIR", tmp)
-		res, err := driver.Build(driver.Options{Dir: dir, Output: bin, WorkDir: *work, OptFlag: *opt})
+		res, err := driver.Build(driver.Options{Dir: dir, Output: bin, WorkDir: *work, OptFlag: *opt, CPU: *cpu})
 		if hadTmp {
 			os.Setenv("TMPDIR", userTmp)
 		} else {
