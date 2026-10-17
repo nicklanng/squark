@@ -1,9 +1,9 @@
-package main
+program
 
-var h [8]int
-var gp *[1 << 36]int
+thread h int[8]
+thread gp *(int[1 << 36])
 
-func main() {
+fn main() {
 	p := gp
 	idx := int(uintptr(rawptr(&h[0])) / 8)
 	p[idx] = 42

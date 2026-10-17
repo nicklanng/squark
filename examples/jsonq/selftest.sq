@@ -1,4 +1,4 @@
-package main
+program
 
 // sample is the input when jsonq runs without a FILE, as in its test (expected.out). Records 4 to
 // 12 are each bad in a different way, and are reported by line: keep their line breaks.
@@ -25,7 +25,7 @@ const sample = `[
 ]
 `
 
-// sampleInput copies the sample into buf.
-func sampleInput(buf []byte) []byte {
+// sample_input copies the sample into buf.
+fn sample_input(buf u8[]) -> u8[] {
 	return buf[:copy(buf, sample)]
 }

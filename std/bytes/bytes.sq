@@ -1,108 +1,106 @@
 // Package bytes provides a fixed-capacity Buffer and byte-slice helpers.
-package bytes
+module bytes
 
-import (
-	"io"
-	"strconv"
-	"strings"
-)
+use io, strconv, strings
 
 // Buffer appends into storage supplied by the caller. It never grows: writes that do not fit
-// are truncated and reported with io.ErrShortBuffer.
-type Buffer struct {
-	buf      []byte
+// are truncated and reported with io.ShortBuffer.
+pub struct Buffer {
+	buf      u8[]
 	overflow bool
 }
 
-// NewBuffer returns a Buffer that writes into storage (its length is ignored, its capacity used).
-func NewBuffer(storage []byte) Buffer from storage {
+// new_buffer returns a Buffer that writes into storage (its length is ignored, its capacity used).
+pub fn new_buffer(storage u8[]) -> Buffer in storage {
 	return Buffer{buf: storage[:0]}
 }
 
-func (b *Buffer) Len() int        { return len(b.buf) }
-func (b *Buffer) Cap() int        { return cap(b.buf) }
-func (b *Buffer) Available() int  { return cap(b.buf) - len(b.buf) }
-func (b *Buffer) Bytes() []byte from b { return b.buf }
-func (b *Buffer) String() string from b { return string(b.buf) }
-func (b *Buffer) Overflowed() bool { return b.overflow }
+impl Buffer {
+	pub fn len(&self) -> int         { return len(self.buf) }
+	pub fn cap(&self) -> int         { return cap(self.buf) }
+	pub fn available(&self) -> int   { return cap(self.buf) - len(self.buf) }
+	pub fn bytes(&self) -> u8[] in self { return self.buf }
+	pub fn string(&self) -> str in self { return str(self.buf) }
+	pub fn overflowed(&self) -> bool { return self.overflow }
 
-func (b *Buffer) Reset() {
-	b.buf = b.buf[:0]
-	b.overflow = false
-}
-
-// Truncate keeps the first n bytes; like Go it panics unless 0 <= n <= Len().
-func (b *Buffer) Truncate(n int) {
-	if n < 0 || n > len(b.buf) {
-		panic("bytes.Buffer: truncation out of range")
+	pub fn reset(&self) {
+		self.buf = self.buf[:0]
+		self.overflow = false
 	}
-	b.buf = b.buf[:n]
-}
 
-// noStorage panics on a write to a Buffer that has no memory to write into: a zero Buffer can't
-// grow (there is no heap), and silently dropping everything would hide the mistake.
-func (b *Buffer) noStorage(n int) {
-	if n > 0 && cap(b.buf) == 0 {
-		panic("bytes.Buffer has no storage: make it with bytes.NewBuffer(storage[:0])")
+	// truncate keeps the first n bytes; like Go it panics unless 0 <= n <= len().
+	pub fn truncate(&self, n int) {
+		if n < 0 or n > len(self.buf) {
+			panic("bytes.Buffer: truncation out of range")
+		}
+		self.buf = self.buf[:n]
+	}
+
+	// no_storage panics on a write to a Buffer that has no memory to write into: a zero Buffer can't
+	// grow (there is no heap), and silently dropping everything would hide the mistake.
+	fn no_storage(&self, n int) {
+		if n > 0 and cap(self.buf) == 0 {
+			panic("bytes.Buffer has no storage: make it with bytes.NewBuffer(storage[:0])")
+		}
+	}
+
+	pub fn write(&self, p u8[]) -> int ! {
+		self.no_storage(len(p))
+		n := len(p)
+		if n > cap(self.buf)-len(self.buf) {
+			n = cap(self.buf) - len(self.buf)
+			self.overflow = true
+		}
+		self.buf = append(self.buf, p[:n]...)
+		if n < len(p) {
+			return n, io.ShortBuffer
+		}
+		return n, nil
+	}
+
+	pub fn write_string(&self, s str) -> int ! {
+		self.no_storage(len(s))
+		n := len(s)
+		if n > cap(self.buf)-len(self.buf) {
+			n = cap(self.buf) - len(self.buf)
+			self.overflow = true
+		}
+		self.buf = append(self.buf, s[:n]...)
+		if n < len(s) {
+			return n, io.ShortBuffer
+		}
+		return n, nil
+	}
+
+	pub fn write_byte(&self, c u8) -> ! {
+		self.no_storage(1)
+		if len(self.buf) == cap(self.buf) {
+			self.overflow = true
+			return io.ShortBuffer
+		}
+		self.buf = append(self.buf, c)
+		return nil
+	}
+
+	// write_int appends the decimal form of v.
+	pub fn write_int(&self, v int) -> ! {
+		var tmp u8[24]
+		_, err := self.write(strconv.append_int(tmp[:0], v))
+		return err
 	}
 }
 
-func (b *Buffer) Write(p []byte) (int, error) {
-	b.noStorage(len(p))
-	n := len(p)
-	if n > cap(b.buf)-len(b.buf) {
-		n = cap(b.buf) - len(b.buf)
-		b.overflow = true
-	}
-	b.buf = append(b.buf, p[:n]...)
-	if n < len(p) {
-		return n, io.ErrShortBuffer
-	}
-	return n, nil
+// equal reports whether a and b are the same bytes.
+pub fn equal(a, b u8[]) -> bool {
+	return str(a) == str(b)
 }
 
-func (b *Buffer) WriteString(s string) (int, error) {
-	b.noStorage(len(s))
-	n := len(s)
-	if n > cap(b.buf)-len(b.buf) {
-		n = cap(b.buf) - len(b.buf)
-		b.overflow = true
-	}
-	b.buf = append(b.buf, s[:n]...)
-	if n < len(s) {
-		return n, io.ErrShortBuffer
-	}
-	return n, nil
-}
-
-func (b *Buffer) WriteByte(c byte) error {
-	b.noStorage(1)
-	if len(b.buf) == cap(b.buf) {
-		b.overflow = true
-		return io.ErrShortBuffer
-	}
-	b.buf = append(b.buf, c)
-	return nil
-}
-
-// WriteInt appends the decimal form of v.
-func (b *Buffer) WriteInt(v int) error {
-	var tmp [24]byte
-	_, err := b.Write(strconv.AppendInt(tmp[:0], v))
-	return err
-}
-
-// Equal reports whether a and b are the same bytes.
-func Equal(a, b []byte) bool {
-	return string(a) == string(b)
-}
-
-// IndexByte returns the index of the first c in s, or -1. (string(s) is a view of s, not a copy,
+// index_byte returns the index of the first c in s, or -1. (str(s) is a view of s, not a copy,
 // so the byte-slice functions are the strings package's.)
-func IndexByte(s []byte, c byte) int { return strings.IndexByte(string(s), c) }
+pub fn index_byte(s u8[], c u8) -> int { return strings.index_byte(str(s), c) }
 
-// Index returns the index of the first sep in s, or -1.
-func Index(s, sep []byte) int { return strings.Index(string(s), string(sep)) }
+// index returns the index of the first sep in s, or -1.
+pub fn index(s, sep u8[]) -> int { return strings.index(str(s), str(sep)) }
 
-// HasPrefix reports whether s begins with prefix.
-func HasPrefix(s, prefix []byte) bool { return strings.HasPrefix(string(s), string(prefix)) }
+// has_prefix reports whether s begins with prefix.
+pub fn has_prefix(s, prefix u8[]) -> bool { return strings.has_prefix(str(s), str(prefix)) }

@@ -1,24 +1,24 @@
-package main
+program
 
-var seen map[string]int cap 16
+thread seen int[str; 16]
 
 // m[k]++ and m[k] op= v insert k just like m[k] = v does
-func count(m map[string]int, w string) { m[w]++ }
-func add(m map[string]int, w string) { m[w] += 10 }
+fn count(m int[str], w str) { m[w]++ }
+fn add(m int[str], w str) { m[w] += 10 }
 
-func main() {
-	var b1, b2, b3, b4 [8]byte
-	seen[string(b1[:])]++     // ERROR "cannot escape into static memory (used as a key in seen)"
-	seen[string(b2[:])] += 10 // ERROR "cannot escape into static memory (used as a key in seen)"
-	count(seen, string(b3[:])) // ERROR "cannot escape into static memory (count stores argument 2 inside argument 1)"
-	add(seen, string(b4[:]))   // ERROR "cannot escape into static memory (add stores argument 2 inside argument 1)"
+fn main() {
+	var b1, b2, b3, b4 u8[8]
+	seen[str(b1[:])]++     // ERROR "cannot escape into static memory (used as a key in seen)"
+	seen[str(b2[:])] += 10 // ERROR "cannot escape into static memory (used as a key in seen)"
+	count(seen, str(b3[:])) // ERROR "cannot escape into static memory (count stores argument 2 inside argument 1)"
+	add(seen, str(b4[:]))   // ERROR "cannot escape into static memory (add stores argument 2 inside argument 1)"
 
 	// fine: static keys, or a local map with a local key
 	seen["hello"]++
 	count(seen, "hello")
-	var buf [8]byte
-	w := string(buf[:])
-	var local map[string]int cap 4
+	var buf u8[8]
+	w := str(buf[:])
+	var local int[str; 4]
 	local[w]++
 	local[w] += 2
 	count(local, w)

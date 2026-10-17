@@ -9,221 +9,224 @@
 //   - one arena holding every decoded string and item slice, sized from the input
 //   - json.Encoder writing JSON without hand-placed quotes and commas
 //   - error values with codes, and try
-//   - sort.Slice with plain functions as comparators
-package main
+//   - sort.slice with plain functions as comparators
+program
 
-import (
-	"io"
-	"json"
-	"os"
-	"sort"
-	"strconv"
-	"strings"
-)
+use io, json, os, sort, strconv, strings
 
 const (
-	maxInput  = 64K
-	maxOrders = 512
-	maxItems  = 16   // per order
-	maxKeys   = 256  // distinct customers, distinct SKUs
-	maxName   = 64   // bytes in a customer name or SKU, so that report lines have a bound
-	bigOrder  = 1500 // cents: settled orders at least this large are re-emitted as JSON
+	max_input  = 64K
+	max_orders = 512
+	max_items  = 16   // per order
+	max_keys   = 256  // distinct customers, distinct SKUs
+	max_name   = 64   // bytes in a customer name or sku, so that report lines have a bound
+	big_order  = 1500 // cents: settled orders at least this large are re-emitted as JSON
 )
 
-const (
-	ErrNotArray  = error(100, "input is not a JSON array")
-	ErrTruncated = error(101, "input ends inside the array")
-	ErrTrailing  = error(102, "data after the closing ]")
-	ErrNotObject = error(103, "record is not an object")
-	ErrNoID      = error(104, "missing or non-positive id")
-	ErrDupID     = error(105, "duplicate id")
-	ErrNoName    = error(106, "missing customer")
-	ErrNoItems   = error(107, "order has no items")
-	ErrBadQty    = error(108, "item quantity must be positive")
-	ErrBadPrice  = error(109, "item price must not be negative")
-	ErrBadStatus = error(110, "unknown status")
-	ErrTooLarge  = error(111, "input larger than 64K")
-	ErrTooMany   = error(112, "too many orders")
-	ErrManyItems = error(113, "too many items in one order")
-	ErrManyKeys  = error(114, "too many distinct customers or SKUs")
-	ErrLongName  = error(115, "customer or SKU longer than 64 bytes")
+fault (
+	NotArray 100 "input is not a JSON array"
+	Truncated 101 "input ends inside the array"
+	Trailing 102 "data after the closing ]"
+	NotObject 103 "record is not an object"
+	NoID 104 "missing or non-positive id"
+	DupID 105 "duplicate id"
+	NoName 106 "missing customer"
+	NoItems 107 "order has no items"
+	BadQty 108 "item quantity must be positive"
+	BadPrice 109 "item price must not be negative"
+	BadStatus 110 "unknown status"
+	TooLarge 111 "input larger than 64K"
+	TooMany 112 "too many orders"
+	ManyItems 113 "too many items in one order"
+	ManyKeys 114 "too many distinct customers or SKUs"
+	LongName 115 "customer or SKU longer than 64 bytes"
 )
 
-const statuses = [4]string{"paid", "pending", "shipped", "refunded"}
+const statuses = str[4]{"paid", "pending", "shipped", "refunded"}
 
-type Item struct {
-	SKU   string
-	Qty   int
-	Price int // cents
+struct Item {
+	sku   str
+	qty   int
+	price int // cents
 }
 
-type Order struct {
-	ID       int
-	Customer string
-	Status   int // index into statuses
-	Items    []Item
+struct Order {
+	id       int
+	customer str
+	status   int // index into statuses
+	items    Item[]
 }
 
-type Tally struct {
-	Key    string
-	Count  int // orders (for customers) or units (for items)
-	Amount int // cents
+impl Order {
+	fn total(&self) -> int {
+		t := 0
+		for it in self.items {
+			t += it.qty * it.price
+		}
+		return t
+	}
 }
 
-// scanner hands out the top-level array's elements one at a time, so that a bad record can be
+struct Tally {
+	key    str
+	count  int // orders (for customers) or units (for items)
+	amount int // cents
+}
+
+// Scanner hands out the top-level array's elements one at a time, so that a bad record can be
 // reported with its line and skipped: a json.Decoder stops at its first error.
-type scanner struct {
-	data      []byte
+struct Scanner {
+	data      u8[]
 	pos, line int
 }
 
-var input [maxInput]byte
-
-// ---- splitting the array into records ----
-
-func (s *scanner) space() {
-	for ; s.pos < len(s.data); s.pos++ {
-		switch s.data[s.pos] {
-		case '\n':
-			s.line++
-		case ' ', '\t', '\r':
-		default:
-			return
+impl Scanner {
+	fn space(&self) {
+		for ; self.pos < len(self.data); self.pos++ {
+			switch self.data[self.pos] {
+			case '\n':
+				self.line++
+			case ' ', '\t', '\r':
+			default:
+				return
+			}
 		}
+	}
+
+	// next returns the next element and the line it starts on, or ok == false after the final ']'.
+	fn next(&self) -> (rec u8[], line int, ok bool, err error) {
+		self.space()
+		line = self.line
+		if self.pos < len(self.data) and self.data[self.pos] == ']' {
+			self.pos++
+			self.space()
+			if self.pos < len(self.data) {
+				return nil, self.line, false, Trailing
+			}
+			return nil, line, false, nil
+		}
+		start, depth, in_str := self.pos, 0, false
+		for ; self.pos < len(self.data); self.pos++ {
+			c := self.data[self.pos]
+			switch {
+			case c == '\n':
+				self.line++
+			case in_str and c == '\\':
+				self.pos++
+			case c == '"':
+				in_str = not in_str
+			case in_str:
+			case c == '{' or c == '[':
+				depth++
+			case c == '}' or c == ']':
+				depth--
+			}
+			if depth < 0 or depth == 0 and not in_str and c == ',' {
+				break
+			}
+		}
+		if self.pos >= len(self.data) {
+			return nil, line, false, Truncated
+		}
+		rec = self.data[start:self.pos]
+		if self.data[self.pos] == ',' {
+			self.pos++
+		}
+		return rec, line, true, nil
 	}
 }
 
-// next returns the next element and the line it starts on, or ok == false after the final ']'.
-func (s *scanner) next() (rec []byte, line int, ok bool, err error) {
-	s.space()
-	line = s.line
-	if s.pos < len(s.data) && s.data[s.pos] == ']' {
-		s.pos++
-		s.space()
-		if s.pos < len(s.data) {
-			return nil, s.line, false, ErrTrailing
-		}
-		return nil, line, false, nil
-	}
-	start, depth, inStr := s.pos, 0, false
-	for ; s.pos < len(s.data); s.pos++ {
-		c := s.data[s.pos]
-		switch {
-		case c == '\n':
-			s.line++
-		case inStr && c == '\\':
-			s.pos++
-		case c == '"':
-			inStr = !inStr
-		case inStr:
-		case c == '{' || c == '[':
-			depth++
-		case c == '}' || c == ']':
-			depth--
-		}
-		if depth < 0 || depth == 0 && !inStr && c == ',' {
-			break
-		}
-	}
-	if s.pos >= len(s.data) {
-		return nil, line, false, ErrTruncated
-	}
-	rec = s.data[start:s.pos]
-	if s.data[s.pos] == ',' {
-		s.pos++
-	}
-	return rec, line, true, nil
-}
+thread input u8[max_input]
 
 // ---- decoding and validating a record ----
 
-// number and text turn the decoder's (value, ok) results into (value, error) for try.
-func number(d *json.Decoder) (int, error) {
-	n, ok := d.Int()
-	if !ok {
-		return 0, d.Err
+// number and text turn the decoder's (value, ok) results into (value, error) for !.
+fn number(d *json.Decoder) -> int ! {
+	n, ok := d.int()
+	if not ok {
+		return 0, d.err
 	}
 	return n, nil
 }
 
-// text decodes a string of at most maxName bytes into the decoder's arena, at its exact size; a
-// longer one is ErrLongName, and takes no room in the arena.
-func text(d *json.Decoder) (string, error) {
-	s, ok := d.TextMax(maxName)
-	if d.Err == json.ErrTooLong {
-		return "", ErrLongName
+// text decodes a string of at most max_name bytes into the decoder's arena, at its exact size; a
+// longer one is LongName, and takes no room in the arena.
+fn text(d *json.Decoder) -> str ! {
+	s, ok := d.text_max(max_name)
+	if d.err == json.TooLong {
+		return "", LongName
 	}
-	if !ok {
-		return "", d.Err
+	if not ok {
+		return "", d.err
 	}
 	return s, nil
 }
 
-func decodeItem(d *json.Decoder) (Item, error) {
+fn decode_item(d *json.Decoder) -> Item ! {
 	var it Item
-	var key [64]byte
-	if !d.BeginObject() {
-		return it, ErrNotObject
+	var key u8[64]
+	if not d.begin_object() {
+		return it, NotObject
 	}
-	for k, ok := d.Field(key[:]); ok; k, ok = d.Field(key[:]) {
+	for k, ok := d.field(key[:]); ok; k, ok = d.field(key[:]) {
 		switch k {
 		case "sku":
-			it.SKU = try text(d)
+			it.sku = text(d)!
 		case "qty":
-			it.Qty = try number(d)
+			it.qty = number(d)!
 		case "price":
-			it.Price = try number(d)
+			it.price = number(d)!
 		default:
-			d.Skip()
+			d.skip()
 		}
 	}
-	return it, d.Err
+	return it, d.err
 }
 
-// decodeOrder decodes one record. The strings it keeps (customer, SKUs) are decoded into a; keys
+// decode_order decodes one record. The strings it keeps (customer, SKUs) are decoded into a; keys
 // and the status are only compared, so they are decoded into buffers on the stack.
-func decodeOrder(rec []byte, a arena) (Order, error) {
-	o := Order{Status: -1}
-	var key, status [64]byte
-	d := json.NewDecoderIn(rec, a)
-	if !d.BeginObject() {
-		return o, ErrNotObject
+fn decode_order(rec u8[], a arena) -> Order ! {
+	o := Order{status: -1}
+	var key, status u8[64]
+	d := json.new_decoder_in(rec, a)
+	if not d.begin_object() {
+		return o, NotObject
 	}
-	for k, ok := d.Field(key[:]); ok; k, ok = d.Field(key[:]) {
+	for k, ok := d.field(key[:]); ok; k, ok = d.field(key[:]) {
 		switch k {
 		case "id":
-			o.ID = try number(&d)
+			o.id = number(&d)!
 		case "customer":
-			o.Customer = try text(&d)
+			o.customer = text(&d)!
 		case "status":
-			s, _ := d.String(status[:])
-			o.Status = statusIndex(s)
+			s, _ := d.string(status[:])
+			o.status = status_index(s)
 		case "items":
-			if !d.BeginArray() {
-				return o, d.Err
+			if not d.begin_array() {
+				return o, d.err
 			}
 			// collect the items on the stack, then copy them into the arena at their exact size
-			// (append(o.Items, it) in a would leave each outgrown slice behind in the arena)
-			var items [..maxItems]Item
-			for d.More() {
-				if !items.TryPush(try decodeItem(&d)) {
-					return o, ErrManyItems
+			// (append(o.items, it) in a would leave each outgrown slice behind in the arena)
+			var items Item[..max_items]
+			while d.more() {
+				if not items.try_push(decode_item(&d)!) {
+					return o, ManyItems
 				}
 			}
-			o.Items = make([]Item, len(items)) in a
-			copy(o.Items, items[:])
+			o.items = make(Item[], len(items)) in a
+			copy(o.items, items[:])
 		default:
-			d.Skip()
+			d.skip()
 		}
 	}
-	if !d.End() {
-		return o, d.Err
+	if not d.end() {
+		return o, d.err
 	}
 	return o, nil
 }
 
-func statusIndex(s string) int {
-	for i, name := range statuses {
+fn status_index(s str) -> int {
+	for i, name in statuses {
 		if s == name {
 			return i
 		}
@@ -231,59 +234,59 @@ func statusIndex(s string) int {
 	return -1
 }
 
-func validate(o *Order, seen map[int]bool) error {
+fn validate(o *Order, seen bool[int]) -> ! {
 	switch {
-	case o.ID <= 0:
-		return ErrNoID
-	case seen[o.ID]:
-		return ErrDupID
-	case o.Customer == "":
-		return ErrNoName
-	case len(o.Items) == 0:
-		return ErrNoItems
-	case o.Status < 0:
-		return ErrBadStatus
+	case o.id <= 0:
+		return NoID
+	case seen[o.id]:
+		return DupID
+	case o.customer == "":
+		return NoName
+	case len(o.items) == 0:
+		return NoItems
+	case o.status < 0:
+		return BadStatus
 	}
-	for _, it := range o.Items {
-		if it.Qty <= 0 {
-			return ErrBadQty
+	for it in o.items {
+		if it.qty <= 0 {
+			return BadQty
 		}
-		if it.Price < 0 {
-			return ErrBadPrice
+		if it.price < 0 {
+			return BadPrice
 		}
 	}
 	return nil
 }
 
-func reject(n, line int, err error) {
-	var msg [128]byte
-	out := strconv.AppendInt(append(msg[:0], "record "...), n)
-	out = strconv.AppendInt(append(out, " (line "...), line)
-	out = append(append(out, "): "...), err.Error()...)
-	out = strconv.AppendInt(append(out, " [code "...), err.Code())
-	os.Stdout.Write(append(out, "]\n"...))
+fn reject(n, line int, err error) {
+	var msg u8[128]
+	out := strconv.append_int(append(msg[:0], "record "...), n)
+	out = strconv.append_int(append(out, " (line "...), line)
+	out = append(append(out, "): "...), err.message()...)
+	out = strconv.append_int(append(out, " [code "...), err.code())
+	os.stdout.write(append(out, "]\n"...))
 }
 
-// decodeAll decodes the array in data into orders, reporting and skipping the bad records, and
+// decode_all decodes the array in data into orders, reporting and skipping the bad records, and
 // returns how many it skipped.
-func decodeAll(data []byte, a arena, orders *[..maxOrders]Order) (int, error) {
-	s := scanner{data: data, line: 1}
-	if s.space(); s.pos >= len(data) || data[s.pos] != '[' {
-		return 0, ErrNotArray
+fn decode_all(data u8[], a arena, orders *(Order[..max_orders])) -> int ! {
+	s := Scanner{data: data, line: 1}
+	if s.space(); s.pos >= len(data) or data[s.pos] != '[' {
+		return 0, NotArray
 	}
 	s.pos++
-	var seen map[int]bool cap maxOrders
+	var seen bool[int; max_orders]
 	bad := 0
 	for n := 1; ; n++ {
 		rec, line, ok, err := s.next()
-		if !ok {
+		if not ok {
 			if err != nil {
 				reject(n, line, err) // the array itself is broken: report what was read so far
 				bad++
 			}
 			return bad, nil
 		}
-		o, err := decodeOrder(rec, a)
+		o, err := decode_order(rec, a)
 		if err == nil {
 			err = validate(&o, seen)
 		}
@@ -292,157 +295,149 @@ func decodeAll(data []byte, a arena, orders *[..maxOrders]Order) (int, error) {
 			bad++
 			continue
 		}
-		if !orders.TryPush(o) {
-			return bad, ErrTooMany
+		if not orders.try_push(o) {
+			return bad, TooMany
 		}
-		seen[o.ID] = true
+		seen[o.id] = true
 	}
 }
 
 // ---- the report ----
 
-func (o *Order) Total() int {
-	t := 0
-	for _, it := range o.Items {
-		t += it.Qty * it.Price
+fn by_amount(a, b Tally) -> bool {
+	if a.amount != b.amount {
+		return a.amount > b.amount
 	}
-	return t
+	return a.key < b.key
 }
 
-func byAmount(a, b Tally) bool {
-	if a.Amount != b.Amount {
-		return a.Amount > b.Amount
+fn by_count(a, b Tally) -> bool {
+	if a.count != b.count {
+		return a.count > b.count
 	}
-	return a.Key < b.Key
-}
-
-func byCount(a, b Tally) bool {
-	if a.Count != b.Count {
-		return a.Count > b.Count
-	}
-	return a.Key < b.Key
+	return a.key < b.key
 }
 
 // add adds to key's tally in v, creating it if index doesn't have it yet.
-func add(v *[..maxKeys]Tally, index map[string]int, key string, count, amount int) error {
+fn add(v *(Tally[..max_keys]), index int[str], key str, count, amount int) -> ! {
 	i, ok := index[key]
-	if !ok {
+	if not ok {
 		i = len(v)
-		if !v.TryPush(Tally{Key: key}) {
-			return ErrManyKeys
+		if not v.try_push(Tally{key: key}) {
+			return ManyKeys
 		}
 		index[key] = i
 	}
-	v[i].Count += count
-	v[i].Amount += amount
+	v[i].count += count
+	v[i].amount += amount
 	return nil
 }
 
-func appendCents(dst []byte, c int) []byte {
-	dst = strconv.AppendInt(append(dst, '$'), c/100)
-	return strconv.AppendIntPad(append(dst, '.'), c%100, 2, '0')
+fn append_cents(dst u8[], c int) -> u8[] {
+	dst = strconv.append_int(append(dst, '$'), c/100)
+	return strconv.append_int_pad(append(dst, '.'), c%100, 2, '0')
 }
 
-func printTallies(title string, ts []Tally, unit string) {
+fn print_tallies(title str, ts Tally[], unit str) {
 	println(title)
-	var line [128]byte
-	for _, t := range ts {
-		out := strings.AppendPadRight(append(line[:0], "  "...), t.Key, 14, ' ')
-		out = strings.AppendPadRight(strconv.AppendInt(out, t.Count), unit, 9, ' ')
-		os.Stdout.Write(append(appendCents(out, t.Amount), '\n'))
+	var line u8[128]
+	for t in ts {
+		out := strings.append_pad_right(append(line[:0], "  "...), t.key, 14, ' ')
+		out = strings.append_pad_right(strconv.append_int(out, t.count), unit, 9, ' ')
+		os.stdout.write(append(append_cents(out, t.amount), '\n'))
 	}
 }
 
-// emitJSON writes the settled orders of at least bigOrder cents as a JSON array, one order per
+// emit_json writes the settled orders of at least big_order cents as a JSON array, one order per
 // line. An Encoder writes each order; the array around them is written by hand, since an Encoder
 // writes either no line breaks or (with SetIndent) one before every member.
-func emitJSON(orders []Order) error {
-	var buf [8K]byte // the largest order: 17 strings of maxName bytes, escaped 6 bytes to one
-	os.Stdout.WriteString("[")
+fn emit_json(orders Order[]) -> ! {
+	var buf u8[8K] // the largest order: 17 strings of max_name bytes, escaped 6 bytes to one
+	os.stdout.write_string("[")
 	sep := "\n  "
-	for i := range orders {
+	for i, _ in orders {
 		o := &orders[i]
-		if s := statuses[o.Status]; s != "paid" && s != "shipped" || o.Total() < bigOrder {
+		if s := statuses[o.status]; s != "paid" and s != "shipped" or o.total() < big_order {
 			continue
 		}
-		e := json.NewEncoder(buf[:0])
-		e.Object()
-		e.Key("id")
-		e.Int(o.ID)
-		e.Key("customer")
-		e.String(o.Customer)
-		e.Key("skus")
-		e.Array()
-		for _, it := range o.Items {
-			e.String(it.SKU)
+		e := json.new_encoder(buf[:0])
+		e.object()
+		e.key("id")
+		e.int(o.id)
+		e.key("customer")
+		e.string(o.customer)
+		e.key("skus")
+		e.array()
+		for it in o.items {
+			e.string(it.sku)
 		}
-		e.End()
-		e.Key("total")
-		e.Int(o.Total())
-		e.End()
-		try e.Finish()
-		os.Stdout.WriteString(sep)
-		os.Stdout.Write(e.Bytes())
+		e.end()
+		e.key("total")
+		e.int(o.total())
+		e.end()
+		e.finish()!
+		os.stdout.write_string(sep)
+		os.stdout.write(e.bytes())
 		sep = ",\n  "
 	}
-	os.Stdout.WriteString("\n]\n")
+	os.stdout.write_string("\n]\n")
 	return nil
 }
 
-func report(data []byte, a arena) error {
-	var orders [..maxOrders]Order
-	bad := try decodeAll(data, a, &orders)
+fn report(data u8[], a arena) -> ! {
+	var orders Order[..max_orders]
+	bad := decode_all(data, a, &orders)!
 	println(len(orders), "orders accepted,", bad, "rejected")
 	println()
 
-	var customers, items [..maxKeys]Tally
-	var custIndex, skuIndex map[string]int cap maxKeys
-	var byStatus [len(statuses)]int
-	for i := range orders {
+	var customers, items Tally[..max_keys]
+	var cust_index, sku_index int[str; max_keys]
+	var by_status int[len(statuses)]
+	for i, _ in orders {
 		o := &orders[i]
-		try add(&customers, custIndex, o.Customer, 1, o.Total())
-		byStatus[o.Status]++
-		for _, it := range o.Items {
-			try add(&items, skuIndex, it.SKU, it.Qty, it.Qty*it.Price)
+		add(&customers, cust_index, o.customer, 1, o.total())!
+		by_status[o.status]++
+		for it in o.items {
+			add(&items, sku_index, it.sku, it.qty, it.qty*it.price)!
 		}
 	}
-	sort.Slice(customers, byAmount)
-	printTallies("totals by customer:", customers, " orders")
-	sort.Slice(items, byCount)
-	printTallies("top items:", items[:min(len(items), 3)], " units")
+	sort.slice(customers, by_amount)
+	print_tallies("totals by customer:", customers, " orders")
+	sort.slice(items, by_count)
+	print_tallies("top items:", items[:min(len(items), 3)], " units")
 	println("orders by status:")
-	var line [64]byte
-	for i, name := range statuses {
-		out := strings.AppendPadRight(append(line[:0], "  "...), name, 14, ' ')
-		os.Stdout.Write(append(strconv.AppendInt(out, byStatus[i]), '\n'))
+	var line u8[64]
+	for i, name in statuses {
+		out := strings.append_pad_right(append(line[:0], "  "...), name, 14, ' ')
+		os.stdout.write(append(strconv.append_int(out, by_status[i]), '\n'))
 	}
 	println()
-	println("settled orders of", bigOrder/100, "dollars or more:")
-	return emitJSON(orders[:])
+	println("settled orders of", big_order/100, "dollars or more:")
+	return emit_json(orders[:])
 }
 
-func main() {
-	var data []byte
+fn main() {
+	var data u8[]
 	var err error
-	if os.NArgs() > 1 {
-		data, err = os.ReadFile(os.Arg(1), input[:])
+	if os.n_args() > 1 {
+		data, err = os.read_file(os.arg(1), input[:])
 	} else {
-		data = sampleInput(input[:]) // selftest.sq
+		data = sample_input(input[:]) // selftest.sq
 	}
-	if err == io.ErrTooLarge {
-		err = ErrTooLarge // say what the limit is
+	if err == io.TooLarge {
+		err = TooLarge // say what the limit is
 	}
 	if err != nil {
-		println("jsonq:", os.Arg(1), ":", err.Error())
-		os.Exit(1)
+		println("jsonq:", os.arg(1), ":", err.message())
+		os.exit(1)
 	}
 	// A decoded string is no longer than its JSON text and an Item (32 bytes) little more than
 	// the shortest JSON item ({"sku":"","qty":1,"price":0}), so twice the input always fits.
-	arena store 2 * maxInput {
+	with arena store 2 * max_input {
 		if err := report(data, store); err != nil {
-			println("jsonq:", err.Error())
-			os.Exit(1)
+			println("jsonq:", err.message())
+			os.exit(1)
 		}
-		println("arena used", store.Used(), "of", store.Cap(), "bytes")
+		println("arena used", store.used(), "of", store.cap(), "bytes")
 	}
 }

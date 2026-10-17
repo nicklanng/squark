@@ -1,20 +1,20 @@
-package main
+program
 
-type Point struct{ X, Y int }
+struct Point { x, y int }
 
 // package-level storage: static, usable from any goroutine
-var events chan string cap 4
-var index map[string]int cap 64
+thread events str chan[4]
+thread index int[str; 64]
 
-func total(xs []int) int {
+fn total(xs int[]) -> int {
 	t := 0
-	for _, x := range xs {
+	for x in xs {
 		t += x
 	}
 	return t
 }
 
-func count(m map[string]int, w string) { m[w]++ }
+fn count(m int[str], w str) { m[w]++ }
 
 task producer() pool 1 {
 	events <- "one"
@@ -22,29 +22,29 @@ task producer() pool 1 {
 	close(events)
 }
 
-func main() {
-	var v [..8]int
+fn main() {
+	var v int[..8]
 	for i := 1; i <= 5; i++ {
-		v.Push(i * 10)
+		v.push(i * 10)
 	}
 	println(len(v), cap(v), v[0], v[4], total(v[:]), total(v))
-	last := v.Pop()
-	println("popped", last, "len", len(v), v.TryPush(99), len(v))
-	for i, x := range v {
+	last := v.pop()
+	println("popped", last, "len", len(v), v.try_push(99), len(v))
+	for i, x in v {
 		if i > 2 {
 			break
 		}
 		print(x, " ")
 	}
 	println()
-	v.Clear()
+	v.clear()
 	println("cleared", len(v))
 
-	pts := [..4]Point{{1, 2}, {3, 4}}
-	pts.Push(Point{5, 6})
-	println(len(pts), pts[2].X)
+	pts := Point[..4]{{1, 2}, {3, 4}}
+	pts.push(Point{5, 6})
+	println(len(pts), pts[2].x)
 
-	var seen map[string]int cap 16
+	var seen int[str; 16]
 	count(seen, "a")
 	count(seen, "a")
 	count(seen, "b")
@@ -52,13 +52,13 @@ func main() {
 	println(len(seen), seen["a"], seen["b"], seen["c"], seen["zz"])
 	delete(seen, "a")
 	_, ok := seen["a"]
-	println("deleted", !ok, len(seen))
+	println("deleted", not ok, len(seen))
 
 	index["x"] = 1
 	println("index", len(index))
 
-	go producer()
-	for e := range events {
+	start producer()
+	for e in events {
 		println("event", e)
 	}
 	println(len(events), cap(events))

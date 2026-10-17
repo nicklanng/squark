@@ -1,31 +1,27 @@
-package main
+program
 
 // Goroutines waiting on descriptors: Close wakes a blocked Read (and closing a listener a blocked
 // Accept) with an error instead of leaving them parked forever; and one goroutine can read a
 // socket while another is blocked writing to it (epoll used to keep only the last waiter).
 
-import (
-	"net"
-	"strconv"
-	"time"
-)
+use net, strconv, time
 
-var done chan string cap 4
-var c net.Conn
-var big [4 << 20]byte
+thread done str chan[4]
+thread c net.Conn
+thread big u8[4 << 20]
 
 task reader() pool 1 {
-	var buf [64]byte
-	n, err := c.Read(buf[:])
+	var buf u8[64]
+	n, err := c.read(buf[:])
 	if err != nil {
 		done <- "read: error"
 		return
 	}
-	done <- "read: " + string(buf[:n]) in str
+	done <- "read: " + str(buf[:n]) in str_
 }
 
 task writer() pool 1 {
-	_, err := c.Write(big[:]) // far more than the socket buffers: blocks until the peer drains it
+	_, err := c.write(big[:]) // far more than the socket buffers: blocks until the peer drains it
 	if err != nil {
 		done <- "write: error"
 		return
@@ -34,70 +30,70 @@ task writer() pool 1 {
 }
 
 task acceptor(l net.Listener) pool 1 {
-	if _, err := l.Accept(); err != nil {
+	if _, err := l.accept(); err != nil {
 		done <- "accept: error"
 		return
 	}
 	done <- "accept: conn"
 }
 
-arena str 256
+arena str_ 256
 
-func wait() string {
+fn wait() -> str {
 	select {
 	case s := <-done:
 		return s
-	case <-time.After(2 * time.Second):
+	case <-time.after(2 * time.second):
 		return "stuck"
 	}
 }
 
-func addr(port int) string {
-	var b [32]byte
-	return string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), port)) in str
+fn addr(port int) -> str {
+	var b u8[32]
+	return str(strconv.append_int(append(b[:0], "127.0.0.1:"...), port)) in str_
 }
 
-func main() {
-	l, err := net.Listen("127.0.0.1:0")
+fn main() {
+	l, err := net.listen("127.0.0.1:0")
 	if err != nil {
 		panic(err)
 	}
-	a := addr(l.Port())
+	a := addr(l.port())
 
 	// Close wakes a blocked Read
-	c, _ = net.Dial(a)
-	peer, _ := l.Accept()
-	go reader()
-	time.Sleep(10 * time.Millisecond)
-	c.Close()
+	c, _ = net.dial(a)
+	peer, _ := l.accept()
+	start reader()
+	time.sleep(10 * time.millisecond)
+	c.close()
 	println(wait())
-	peer.Close()
+	peer.close()
 
 	// a reader and a writer blocked on one socket
-	c, _ = net.Dial(a)
-	peer, _ = l.Accept()
-	go reader()
-	time.Sleep(10 * time.Millisecond)
-	go writer()
-	time.Sleep(10 * time.Millisecond) // the writer is blocked now, the reader still waiting
-	peer.WriteString("hi")
+	c, _ = net.dial(a)
+	peer, _ = l.accept()
+	start reader()
+	time.sleep(10 * time.millisecond)
+	start writer()
+	time.sleep(10 * time.millisecond) // the writer is blocked now, the reader still waiting
+	peer.write_string("hi")
 	println(wait())
-	var buf [64 << 10]byte
+	var buf u8[64 << 10]
 	total := 0
-	for total < len(big) {
-		n, err := peer.Read(buf[:])
+	while total < len(big) {
+		n, err := peer.read(buf[:])
 		if err != nil {
 			break
 		}
 		total += n
 	}
 	println(wait(), total == len(big))
-	c.Close()
-	peer.Close()
+	c.close()
+	peer.close()
 
 	// closing a listener wakes a blocked Accept
-	go acceptor(l)
-	time.Sleep(10 * time.Millisecond)
-	l.Close()
+	start acceptor(l)
+	time.sleep(10 * time.millisecond)
+	l.close()
 	println(wait())
 }

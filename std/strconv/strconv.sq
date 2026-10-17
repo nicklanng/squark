@@ -1,28 +1,28 @@
 // Package strconv converts between numbers and text using caller-provided buffers.
-package strconv
+module strconv
 
-import "math"
+use math
 
-const ErrSyntax = error(22, "invalid syntax")
-const ErrRange = error(34, "value out of range")
-const ErrBase = error(22, "invalid base")
+pub fault Syntax 22 "invalid syntax"
+pub fault Range 34 "value out of range"
+pub fault Base 22 "invalid base"
 
-// AppendInt appends the decimal form of v to dst.
-func AppendInt(dst []byte, v int) []byte from dst {
+// append_int appends the decimal form of v to dst.
+pub fn append_int(dst u8[], v int) -> u8[] in dst {
 	if v < 0 {
 		dst = append(dst, '-')
-		return AppendUint(dst, uint64(0)-uint64(v))
+		return append_uint(dst, u64(0)-u64(v))
 	}
-	return AppendUint(dst, uint64(v))
+	return append_uint(dst, u64(v))
 }
 
-// AppendUint appends the decimal form of v to dst.
-func AppendUint(dst []byte, v uint64) []byte {
-	var tmp [20]byte
+// append_uint appends the decimal form of v to dst.
+pub fn append_uint(dst u8[], v u64) -> u8[] {
+	var tmp u8[20]
 	i := len(tmp)
-	for {
+	loop {
 		i--
-		tmp[i] = byte('0' + v%10)
+		tmp[i] = u8('0' + v%10)
 		v /= 10
 		if v == 0 {
 			break
@@ -31,25 +31,25 @@ func AppendUint(dst []byte, v uint64) []byte {
 	return append(dst, tmp[i:]...)
 }
 
-// AppendIntBase appends v in base 2 to 36 (lower-case letters for digits over 9), as Go's
-// strconv.AppendInt(dst, v, base) does. Base 16 gives hex.
-func AppendIntBase(dst []byte, v int, base int) []byte from dst {
+// append_int_base appends v in base 2 to 36 (lower-case letters for digits over 9), as Go's
+// strconv.append_int(dst, v, base) does. Base 16 gives hex.
+pub fn append_int_base(dst u8[], v int, base int) -> u8[] in dst {
 	if v < 0 {
 		dst = append(dst, '-')
-		return AppendUintBase(dst, uint64(0)-uint64(v), base)
+		return append_uint_base(dst, u64(0)-u64(v), base)
 	}
-	return AppendUintBase(dst, uint64(v), base)
+	return append_uint_base(dst, u64(v), base)
 }
 
-// AppendUintBase appends v in base 2 to 36.
-func AppendUintBase(dst []byte, v uint64, base int) []byte from dst {
-	if base < 2 || base > 36 {
-		panic(ErrBase)
+// append_uint_base appends v in base 2 to 36.
+pub fn append_uint_base(dst u8[], v u64, base int) -> u8[] in dst {
+	if base < 2 or base > 36 {
+		panic(Base)
 	}
-	var tmp [64]byte
+	var tmp u8[64]
 	i := len(tmp)
-	b := uint64(base)
-	for {
+	b := u64(base)
+	loop {
 		i--
 		tmp[i] = "0123456789abcdefghijklmnopqrstuvwxyz"[v%b]
 		v /= b
@@ -60,12 +60,12 @@ func AppendUintBase(dst []byte, v uint64, base int) []byte from dst {
 	return append(dst, tmp[i:]...)
 }
 
-// AppendIntPad appends v in decimal, padded on the left with pad to at least width bytes
-// (AppendIntPad(dst, 7, 3, '0') appends "007"; a zero-padded negative number keeps its sign first).
-func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst {
-	var tmp [24]byte
-	digits := AppendInt(tmp[:0], v)
-	if pad == '0' && v < 0 {
+// append_int_pad appends v in decimal, padded on the left with pad to at least width bytes
+// (append_int_pad(dst, 7, 3, '0') appends "007"; a zero-padded negative number keeps its sign first).
+pub fn append_int_pad(dst u8[], v int, width int, pad u8) -> u8[] in dst {
+	var tmp u8[24]
+	digits := append_int(tmp[:0], v)
+	if pad == '0' and v < 0 {
 		dst = append(dst, '-')
 		digits = digits[1:]
 		width--
@@ -76,32 +76,32 @@ func AppendIntPad(dst []byte, v int, width int, pad byte) []byte from dst {
 	return append(dst, digits...)
 }
 
-// AppendUintPad appends v in base 2 to 36, padded on the left with pad to at least width bytes
-// (AppendUintPad(dst, 0xbeef, 16, 8, '0') appends "0000beef").
-func AppendUintPad(dst []byte, v uint64, base, width int, pad byte) []byte from dst {
-	var tmp [64]byte
-	digits := AppendUintBase(tmp[:0], v, base)
+// append_uint_pad appends v in base 2 to 36, padded on the left with pad to at least width bytes
+// (append_uint_pad(dst, 0xbeef, 16, 8, '0') appends "0000beef").
+pub fn append_uint_pad(dst u8[], v u64, base, width int, pad u8) -> u8[] in dst {
+	var tmp u8[64]
+	digits := append_uint_base(tmp[:0], v, base)
 	for n := len(digits); n < width; n++ {
 		dst = append(dst, pad)
 	}
 	return append(dst, digits...)
 }
 
-// FormatInt writes v in decimal into buf and returns it as a string view of buf.
-func FormatInt(buf []byte, v int) string {
-	return string(AppendInt(buf[:0], v))
+// format_int writes v in decimal into buf and returns it as a string view of buf.
+pub fn format_int(buf u8[], v int) -> str {
+	return str(append_int(buf[:0], v))
 }
 
-// AppendFloat appends v with prec digits after the decimal point, like Go's
-// strconv.AppendFloat(dst, v, 'f', prec, 64): the exact binary value rounded half to even. The
+// append_float appends v with prec digits after the decimal point, like Go's
+// strconv.append_float(dst, v, 'f', prec, 64): the exact binary value rounded half to even. The
 // result can be long (1e300 has 301 digits), so size dst for it. prec -1 gives the shortest digits
 // that read back to v, in plain notation for 1e-6 <= |v| < 1e21 and exponent notation outside
 // (1.5e+300), as JSON and JavaScript write numbers; other negative precs count as 0.
-func AppendFloat(dst []byte, v float64, prec int) []byte {
+pub fn append_float(dst u8[], v f64, prec int) -> u8[] {
 	if prec == -1 {
-		return appendShortest(dst, v)
+		return append_shortest(dst, v)
 	}
-	bits := math.Float64bits(v)
+	bits := math.float64bits(v)
 	exp := int(bits>>52) & 0x7ff
 	mant := bits & (1<<52 - 1)
 	if exp == 0x7ff {
@@ -127,44 +127,44 @@ func AppendFloat(dst []byte, v float64, prec int) []byte {
 	}
 
 	// digits: buf[1:ni+1] the integer part, then nf fraction digits; buf[0] takes a rounding carry
-	var buf [1 + 309 + 1074]byte
+	var buf u8[1 + 309 + 1074]
 	ni := 0
 	nf := 0
 	if e >= 0 {
-		ni = bigIntDigits(mant, e, buf[1:310])
+		ni = big_int_digits(mant, e, buf[1:310])
 	} else {
 		k := -e
-		var whole, frac uint64
+		var whole, frac u64
 		if k < 64 {
-			whole, frac = mant>>uint(k), mant&(uint64(1)<<uint(k)-1)
+			whole, frac = mant>>uint(k), mant&(u64(1)<<uint(k)-1)
 		} else {
 			frac = mant
 		}
-		var tmp [20]byte
-		t := AppendUint(tmp[:0], whole)
+		var tmp u8[20]
+		t := append_uint(tmp[:0], whole)
 		ni = copy(buf[1:], t)
 		// the fraction is frac / 2^k, held in 32-bit limbs; each step multiplies by 10 and takes
 		// the bits above k as the next digit
-		var f [36]uint64
+		var f u64[36]
 		f[0], f[1] = frac&0xffffffff, frac>>32
 		nl := k/32 + 2
 		hi, sh := k/32, uint(k%32)
-		for nf < prec && nf < 1074 {
-			var carry uint64
+		while nf < prec and nf < 1074 {
+			var carry u64
 			for i := 0; i < nl; i++ {
 				x := f[i]*10 + carry
 				f[i], carry = x&0xffffffff, x>>32
 			}
 			d := f[hi] >> sh
-			f[hi] &= uint64(1)<<sh - 1
+			f[hi] &= u64(1)<<sh - 1
 			if sh > 0 {
 				d |= f[hi+1] << (32 - sh)
 			}
 			f[hi+1] = 0
-			buf[1+ni+nf] = byte('0' + d)
+			buf[1+ni+nf] = u8('0' + d)
 			nf++
 			zero := true
-			for i := 0; i < nl && zero; i++ {
+			for i := 0; i < nl and zero; i++ {
 				zero = f[i] == 0
 			}
 			if zero {
@@ -173,13 +173,13 @@ func AppendFloat(dst []byte, v float64, prec int) []byte {
 		}
 		// round half to even on what is left: compare the remainder with 2^(k-1)
 		hb := (f[(k-1)/32] >> uint((k-1)%32)) & 1
-		rest := f[(k-1)/32] & (uint64(1)<<uint((k-1)%32) - 1)
+		rest := f[(k-1)/32] & (u64(1)<<uint((k-1)%32) - 1)
 		for i := 0; i < (k-1)/32; i++ {
 			rest |= f[i]
 		}
-		if hb == 1 && (rest != 0 || (buf[ni+nf]-'0')%2 == 1) {
+		if hb == 1 and (rest != 0 or (buf[ni+nf]-'0')%2 == 1) {
 			i := ni + nf
-			for buf[i] == '9' {
+			while buf[i] == '9' {
 				buf[i] = '0'
 				i--
 			}
@@ -204,10 +204,10 @@ func AppendFloat(dst []byte, v float64, prec int) []byte {
 	return dst
 }
 
-// bigIntDigits writes the decimal digits of mant * 2^e (e >= 0) to out and returns how many.
-func bigIntDigits(mant uint64, e int, out []byte) int {
+// big_int_digits writes the decimal digits of mant * 2^e (e >= 0) to out and returns how many.
+fn big_int_digits(mant u64, e int, out u8[]) -> int {
 	// 32-bit limbs, least significant first: at most 1024 bits
-	var n [34]uint64
+	var n u64[34]
 	lo := e / 32
 	sh := uint(e % 32)
 	m0, m1 := mant&0xffffffff, mant>>32 // mant < 2^53, so m1 < 2^21
@@ -216,27 +216,27 @@ func bigIntDigits(mant uint64, e int, out []byte) int {
 	n[lo+2] = m1 >> (32 - sh)
 	top := lo + 3
 	// divide by 1e9 repeatedly: chunks come out least significant first
-	var chunks [36]uint64
+	var chunks u64[36]
 	nc := 0
-	for top > 0 {
-		var rem uint64
+	while top > 0 {
+		var rem u64
 		for i := top - 1; i >= 0; i-- {
 			x := rem<<32 | n[i]
 			n[i], rem = x/1000000000, x%1000000000
 		}
 		chunks[nc] = rem
 		nc++
-		for top > 0 && n[top-1] == 0 {
+		while top > 0 and n[top-1] == 0 {
 			top--
 		}
 	}
-	var tmp [20]byte
-	t := AppendUint(tmp[:0], chunks[nc-1])
+	var tmp u8[20]
+	t := append_uint(tmp[:0], chunks[nc-1])
 	w := copy(out, t)
 	for i := nc - 2; i >= 0; i-- {
 		c := chunks[i]
 		for j := 8; j >= 0; j-- {
-			out[w+j] = byte('0' + c%10)
+			out[w+j] = u8('0' + c%10)
 			c /= 10
 		}
 		w += 9
@@ -244,71 +244,71 @@ func bigIntDigits(mant uint64, e int, out []byte) int {
 	return w
 }
 
-// Atoi parses a base-10 integer.
-func Atoi(s string) (int, error) {
-	return ParseInt(s, 10)
+// atoi parses a base-10 integer.
+pub fn atoi(s str) -> int ! {
+	return parse_int(s, 10)
 }
 
-// ParseInt parses an integer in the given base (2 to 36). Unlike Go there is no base 0, so no
+// parse_int parses an integer in the given base (2 to 36). Unlike Go there is no base 0, so no
 // prefixes and no '_' separators.
-func ParseInt(s string, base int) (int, error) {
-	if base < 2 || base > 36 {
-		return 0, ErrBase
+pub fn parse_int(s str, base int) -> int ! {
+	if base < 2 or base > 36 {
+		return 0, Base
 	}
 	if len(s) == 0 {
-		return 0, ErrSyntax
+		return 0, Syntax
 	}
 	neg := false
 	i := 0
-	if s[0] == '-' || s[0] == '+' {
+	if s[0] == '-' or s[0] == '+' {
 		neg = s[0] == '-'
 		i = 1
 		if len(s) == 1 {
-			return 0, ErrSyntax
+			return 0, Syntax
 		}
 	}
-	var n uint64
-	limit := uint64(1) << 63
+	var n u64
+	limit := u64(1) << 63
 	for ; i < len(s); i++ {
 		c := s[i]
-		var d uint64
+		var d u64
 		switch {
-		case c >= '0' && c <= '9':
-			d = uint64(c - '0')
-		case c >= 'a' && c <= 'z':
-			d = uint64(c-'a') + 10
-		case c >= 'A' && c <= 'Z':
-			d = uint64(c-'A') + 10
+		case c >= '0' and c <= '9':
+			d = u64(c - '0')
+		case c >= 'a' and c <= 'z':
+			d = u64(c-'a') + 10
+		case c >= 'A' and c <= 'Z':
+			d = u64(c-'A') + 10
 		default:
-			return 0, ErrSyntax
+			return 0, Syntax
 		}
-		if d >= uint64(base) {
-			return 0, ErrSyntax
+		if d >= u64(base) {
+			return 0, Syntax
 		}
-		if n > (limit+uint64(base)-1)/uint64(base) {
-			return 0, ErrRange
+		if n > (limit+u64(base)-1)/u64(base) {
+			return 0, Range
 		}
-		n = n*uint64(base) + d
+		n = n*u64(base) + d
 		if n > limit {
-			return 0, ErrRange
+			return 0, Range
 		}
 	}
-	if !neg && n == limit {
-		return 0, ErrRange
+	if not neg and n == limit {
+		return 0, Range
 	}
 	if neg {
-		return int(uint64(0) - n), nil
+		return int(u64(0) - n), nil
 	}
 	return int(n), nil
 }
 
-// ParseBool accepts 1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False.
-func ParseBool(s string) (bool, error) {
+// parse_bool accepts 1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False.
+pub fn parse_bool(s str) -> bool ! {
 	switch s {
 	case "1", "t", "T", "TRUE", "true", "True":
 		return true, nil
 	case "0", "f", "F", "FALSE", "false", "False":
 		return false, nil
 	}
-	return false, ErrSyntax
+	return false, Syntax
 }

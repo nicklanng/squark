@@ -1,23 +1,26 @@
-package main
+program
 
-var x anytype // ERROR "anytype is only allowed as the type of a function's parameter"
+thread x anytype // ERROR "anytype is only allowed as the type of a function's parameter"
 
-func ret() anytype { // ERROR "anytype is only allowed as the type of a function's parameter"
+fn ret() -> anytype { // ERROR "anytype is only allowed as the type of a function's parameter"
 	return 0
 }
 
-type T struct{}
+struct T {
+}
 
-func (t T) m(a anytype) {} // fine: methods take anytype too
+impl T {
+	fn m(self, a anytype) {} // fine: methods take anytype too
+}
 
 task tk(a anytype) pool 1 {} // ERROR "anytype is only allowed as the type of a function's parameter"
 
-func many(xs ...anytype) {} // ERROR "a variadic parameter can't be anytype"
+fn many(xs ...anytype) {} // ERROR "a variadic parameter can't be anytype"
 
-func slice(xs []anytype) {} // ERROR "anytype is only allowed as the type of a function's parameter"
+fn slice(xs anytype[]) {} // ERROR "anytype is only allowed as the type of a function's parameter"
 
-func ptr(p *anytype) {} // ERROR "anytype is only allowed as the type of a function's parameter"
+fn ptr(p *anytype) {} // ERROR "anytype is only allowed as the type of a function's parameter"
 
-func fn(f func(anytype)) {} // ERROR "anytype is only allowed as the type of a function's parameter"
+fn fn_(f fn(anytype)) {} // ERROR "anytype is only allowed as the type of a function's parameter"
 
-func main() {}
+fn main() {}

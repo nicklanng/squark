@@ -1,20 +1,24 @@
-package main
+program
 
-type Point struct{ X, Y int }
+struct Point {
+	x, y int
+}
 
-func (p *Point) Move() { p.X++ }
+impl Point {
+	fn move(&self) { self.x++ }
+}
 
-shared var limits = [2]int{10, 20}
-shared var origin = Point{1, 2}
-shared var name = "squark"
+shared limits = int[2]{10, 20}
+shared origin = Point{1, 2}
+shared name = "squark"
 
-func main() {
+fn main() {
 	limits[0] = 1 // ERROR "cannot assign to limits[0] (limits is a shared var, read-only after initialization)"
 	name = "x" // ERROR "cannot assign to name (name is a shared var, read-only after initialization)"
-	p := &origin.X // ERROR "cannot take address of origin.X (origin is a shared var, read-only after initialization)"
+	p := &origin.x // ERROR "cannot take address of origin.x (origin is a shared var, read-only after initialization)"
 	s := limits[:] // ERROR "cannot slice limits"
-	origin.Move() // ERROR "cannot call pointer method Move on origin"
+	origin.move() // ERROR "cannot call pointer method move on origin"
 	c := origin // copies are ordinary variables
-	c.Move()
-	println(p, s, c.X)
+	c.move()
+	println(p, s, c.x)
 }

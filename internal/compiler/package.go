@@ -47,11 +47,11 @@ type Package struct {
 	Scope   *Scope
 	Imports []*Package
 
-	Funcs   []*Func
-	Generics []*Func // functions with anytype parameters (templates; their instances are in Funcs)
-	Globals []*Var
+	Funcs       []*Func
+	Generics    []*Func // functions with anytype parameters (templates; their instances are in Funcs)
+	Globals     []*Var
 	GlobalInits []*ValueSpec
-	Types   []*Named
+	Types       []*Named
 
 	CFiles  []CFile // C shims shipped with the package (.c and .h)
 	Budgets []*Directive
@@ -67,19 +67,19 @@ type CFile struct {
 }
 
 type Program struct {
-	Packages []*Package // dependency order, main last
-	Main     *Package
-	Funcs    []*Func
-	MainFunc *Func
-	InitFunc *Func // synthetic function holding package-level initializer calls
-	Budget   int64 // budget N in package main (0: none)
-	Workers  int64 // workers N in package main: processes to run (default 1; 0: one per core)
-	Threads  int64 // threads N in package main: scheduler threads per process (default 1; 0: one per core)
-	ThreadsSet bool // the program has a threads directive: it is written for threads, so SQUARK_THREADS applies
+	Packages   []*Package // dependency order, main last
+	Main       *Package
+	Funcs      []*Func
+	MainFunc   *Func
+	InitFunc   *Func // synthetic function holding package-level initializer calls
+	Budget     int64 // budget N in package main (0: none)
+	Workers    int64 // workers N in package main: processes to run (default 1; 0: one per core)
+	Threads    int64 // threads N in package main: scheduler threads per process (default 1; 0: one per core)
+	ThreadsSet bool  // the program has a threads directive: it is written for threads, so SQUARK_THREADS applies
 
-	GoSites    []*GoStmt
-	MakeSites  []*CallExpr
-	NumDefers  int
+	GoSites   []*GoStmt
+	MakeSites []*CallExpr
+	NumDefers int
 }
 
 // Loader finds and parses packages.
@@ -100,7 +100,7 @@ func (l *Loader) Load() (*Program, error) {
 		return nil, err
 	}
 	if mainPkg.Name != "main" {
-		return nil, fmt.Errorf("%s: package %s is not a main package", l.MainDir, mainPkg.Name)
+		return nil, fmt.Errorf("%s: this is module %s, not a program", l.MainDir, mainPkg.Name)
 	}
 	prog := &Program{Packages: l.order, Main: mainPkg, Workers: 1, Threads: 1}
 	return prog, nil
@@ -177,7 +177,7 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 			if pkg.Name == "" {
 				pkg.Name = f.Package
 			} else if pkg.Name != f.Package {
-				errs = append(errs, &Error{Pos{File: display, Line: 1, Col: 1}, fmt.Sprintf("package %s; expected %s", f.Package, pkg.Name)})
+				errs = append(errs, &Error{Pos{File: display, Line: 1, Col: 1}, fmt.Sprintf("%s; expected %s", headerName(f.Package), headerName(pkg.Name))})
 			}
 			for _, d := range f.Directives {
 				lit, ok := d.Value.(*BasicLit)
@@ -201,7 +201,7 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 				}
 			}
 			for _, pr := range f.Pragmas {
-				errs = append(errs, &Error{Pos{File: display, Line: 1, Col: 1}, "file pragma //squark:" + pr + " is gone: use link \"lib\", cflags \"...\" or ldflags \"...\""})
+				errs = append(errs, &Error{Pos{File: display, Line: 1, Col: 1}, "file pragma //squark:" + pr + " is gone: use a header directive, program { link \"lib\" } (or cflags \"...\", ldflags \"...\")"})
 			}
 			pkg.Files = append(pkg.Files, f)
 		case strings.HasSuffix(n, ".c") || strings.HasSuffix(n, ".h"):
@@ -257,4 +257,12 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 	l.order = append(l.order, pkg)
 	delete(l.loading, key)
 	return pkg, nil
+}
+
+// headerName is how a file with package name pkg begins: program for main, module NAME otherwise.
+func headerName(pkg string) string {
+	if pkg == "main" {
+		return "program"
+	}
+	return "module " + pkg
 }

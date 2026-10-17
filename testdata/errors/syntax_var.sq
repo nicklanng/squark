@@ -1,0 +1,5 @@
+program
+
+var hits int // ERROR "a package variable is thread (one copy per scheduler thread) or shared"
+
+fn main() {}

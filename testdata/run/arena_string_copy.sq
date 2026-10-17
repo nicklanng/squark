@@ -1,27 +1,27 @@
-package main
+program
 
-// string(s) in a copies s into the arena, whether s is a []byte or already a string: changing
+// str(s) in a copies s into the arena, whether s is a u8[] or already a string: changing
 // the original bytes afterwards doesn't change the copy.
 
 arena keep 256
 
-var kept string
+thread kept str
 
-func remember(s string) {
-	kept = string(s) in keep // a copy in static memory, so s may be on the caller's stack
+fn remember(s str) {
+	kept = str(s) in keep // a copy in static memory, so s may be on the caller's stack
 }
 
-func main() {
-	var buf [5]byte
+fn main() {
+	var buf u8[5]
 	copy(buf[:], "hello")
-	s := string(buf[:])
-	arena a 64 {
-		c := string(s) in a
-		b := string(buf[:]) in a
+	s := str(buf[:])
+	with arena a 64 {
+		c := str(s) in a
+		b := str(buf[:]) in a
 		buf[0] = 'J'
-		println(s, c, b, a.Used())
+		println(s, c, b, a.used())
 	}
 	remember(s)
 	buf[0] = 'Y'
-	println(kept, keep.Used())
+	println(kept, keep.used())
 }

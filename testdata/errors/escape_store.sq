@@ -1,22 +1,22 @@
-package main
+program
 
-type Node struct {
-	name string
+struct Node {
+	name str
 	next *Node
 }
 
-var head *Node
-var keep []byte
+thread head *Node
+thread keep u8[]
 
-func setHead(n *Node) { head = n }
+fn set_head(n *Node) { head = n }
 
-func link(a, b *Node) { a.next = b }
+fn link(a, b *Node) { a.next = b }
 
-func main() {
+fn main() {
 	var n Node
-	setHead(&n) // ERROR "cannot escape into static memory (setHead keeps argument 1 in static memory)"
+	set_head(&n) // ERROR "cannot escape into static memory (set_head keeps argument 1 in static memory)"
 
-	var buf [8]byte
+	var buf u8[8]
 	keep = buf[:] // ERROR "cannot escape into static memory (assigned to keep)"
 
 	var outer Node
@@ -35,6 +35,6 @@ func main() {
 	// fine: same scope, or static data
 	var a, b Node
 	link(&a, &b)
-	setHead(head)
+	set_head(head)
 	keep = keep[:0]
 }

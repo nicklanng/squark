@@ -1,61 +1,60 @@
-package main
+program {
+	threads auto
+}
 
 // The note `squark check` prints with threads: package variables each thread has its own copy of,
 // that the program changes. TestPerThreadNote checks which are listed.
 
-import (
-	"runtime"
-	"strings"
+use runtime, strings, ./counter
 
-	"./counter"
-)
+struct Stats {
+	hits int
+}
 
-threads auto
+impl Stats {
+	fn bump(&self) { self.hits++ }
+}
 
-type Stats struct{ Hits int }
+thread stats Stats             // listed: changed by a pointer method
+thread jobs int chan[4]     // listed: sent on
+thread seen int[int; 8]  // listed: passed to fill, which changes it
+thread cell int                // listed: address taken
+thread buf u8[16]            // listed: sliced
+thread limit = 10              // not listed: only read
+thread thread int              // not listed: only read (and `thread` is still an identifier)
+thread mine int         // not listed: per thread on purpose
+shared all int chan[4] // not listed: one channel for every thread
 
-func (s *Stats) bump() { s.Hits++ }
+thread vec int[..4]             // listed: sliced, so written through the slice
+thread aliased int[int; 4] // listed: a view of it is declared with var
 
-var stats Stats             // listed: changed by a pointer method
-var jobs chan int cap 4     // listed: sent on
-var seen map[int]int cap 8  // listed: passed to fill, which changes it
-var cell int                // listed: address taken
-var buf [16]byte            // listed: sliced
-var limit = 10              // not listed: only read
-var thread int              // not listed: only read (and `thread` is still an identifier)
-thread var mine int         // not listed: per thread on purpose
-shared var all chan int cap 4 // not listed: one channel for every thread
+fn fill(m int[int]) { m[1] = 1 }
 
-var vec [..4]int             // listed: sliced, so written through the slice
-var aliased map[int]int cap 4 // listed: a view of it is declared with var
-
-func fill(m map[int]int) { m[1] = 1 }
-
-func fillAll(s []int) {
-	for i := range s {
+fn fill_all(s int[]) {
+	for i, _ in s {
 		s[i] = 1
 	}
 }
 
-func set(p *int) { *p = 1 }
+fn set(p *int) { *p = 1 }
 
-func main() {
+fn main() {
 	stats.bump()
 	fill(seen)
 	set(&cell)
 	b := buf[:]
 	b[0] = 'x'
 	mine++
-	fillAll(vec[:])
-	var view map[int]int = aliased
+	fill_all(vec[:])
+	var view int[int] = aliased
 	view[2] = 2
-	counter.Add(limit + thread)
-	if runtime.Shard() == 0 {
+	counter.add(limit + thread)
+	if runtime.shard() == 0 {
 		jobs <- 1
 		close(jobs)
-		for j := range jobs {
+		for j in jobs {
 			all <- j
 		}
-		println(<-all, strings.Contains("abc", "b"))
+		println(<-all, strings.contains("abc", "b"))
 	}
 }

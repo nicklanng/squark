@@ -1,9 +1,9 @@
-package main
+program
 
-func main() {
-	var v [..2]int
-	v.Push(1)
-	v.Push(2)
+fn main() {
+	var v int[..2]
+	v.push(1)
+	v.push(2)
 	println("full")
-	v.Push(3)
+	v.push(3)
 }

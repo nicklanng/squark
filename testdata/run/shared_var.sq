@@ -1,21 +1,21 @@
-package main
+program {
+	threads 4
+}
 
-// shared var: initialized once, on the first scheduler thread, before the others start; every
+// shared: initialized once, on the first scheduler thread, before the others start; every
 // shard then reads the same copy
 
-import "runtime"
+use runtime
 
-threads 4
+shared crc_table = make_table()
 
-shared var crcTable = makeTable()
+shared answer = 42
 
-shared var answer = 42
-
-func makeTable() [256]uint32 {
+fn make_table() -> u32[256] {
 	println("table built")
-	var t [256]uint32
-	for i := range 256 {
-		c := uint32(i)
+	var t u32[256]
+	for i in 0..256 {
+		c := u32(i)
 		for k := 0; k < 8; k++ {
 			if c&1 == 1 {
 				c = 0xEDB88320 ^ (c >> 1)
@@ -28,12 +28,12 @@ func makeTable() [256]uint32 {
 	return t
 }
 
-func main() {
+fn main() {
 	// every shard must see the finished table
-	if crcTable[1] != 0x77073096 || crcTable[255] != 0x2D02EF8D || answer != 42 {
+	if crc_table[1] != 0x77073096 or crc_table[255] != 0x2D02EF8D or answer != 42 {
 		panic("shared var not initialized before this shard started")
 	}
-	if runtime.Shard() == 0 {
-		println("ok", runtime.Shards())
+	if runtime.shard() == 0 {
+		println("ok", runtime.shards())
 	}
 }

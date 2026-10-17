@@ -1,13 +1,13 @@
-package main
+program
 
 // a std package has one spelling: "bytes/." used to load bytes a second time
-import (
-	"bytes"
-	b2 "bytes/." // ERROR "invalid import path \"bytes/.\" (write it as \"bytes\")"
+use (
+	bytes
+	bytes/. as b2 // ERROR "invalid import path \"bytes/.\" (write it as \"bytes\")"
 )
 
-func main() {
+fn main() {
 	var x bytes.Buffer
 	_ = x
-	_ = b2.NewBuffer
+	_ = b2.new_buffer
 }

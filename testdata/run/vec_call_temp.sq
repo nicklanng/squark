@@ -1,21 +1,21 @@
-package main
+program
 
 // index, len and range on a call (or receive) that yields a vector: a temporary used as a view
-func mk() [..4]int {
-	var v [..4]int
-	v.Push(7)
-	v.Push(8)
+fn mk() -> int[..4] {
+	var v int[..4]
+	v.push(7)
+	v.push(8)
 	return v
 }
 
-func main() {
+fn main() {
 	println(mk()[0], len(mk()))
-	for _, x := range mk() {
+	for x in mk() {
 		println(x)
 	}
-	var c chan [..2]int cap 1
-	var w [..2]int
-	w.Push(3)
+	var c int[..2] chan[1]
+	var w int[..2]
+	w.push(3)
 	c <- w
 	println(len(<-c))
 }

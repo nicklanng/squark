@@ -1,16 +1,16 @@
-package main
+program
 
-import "os"
+use os
 
 // a call statement can allocate its arguments in an arena
 
-func show(s string) { os.Stdout.WriteString(s) }
+fn show(s str) { os.stdout.write_string(s) }
 
-func main() {
+fn main() {
 	name := "squark"
-	arena a 1K {
+	with arena a 1K {
 		show("hi " + name + "\n") in a
 		(show("bye " + name + "\n")) in a
-		println(a.Used() > 0)
+		println(a.used() > 0)
 	}
 }

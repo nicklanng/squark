@@ -265,7 +265,7 @@ func (l *lifetime) checkContract(fn *Func, inferred *Summary) {
 		if e.From.Level > e.To.Level {
 			src, dst = dst, src
 		}
-		complain(fmt.Sprintf("%s stores %s inside %s, but its signature does not say so: declare the parameter as `%s T into %s`", fn.FullName(), name(src), name(dst), name(src), name(dst)))
+		complain(fmt.Sprintf("%s stores %s inside %s, but its signature does not say so: declare the parameter as `%s T in %s`", fn.FullName(), name(src), name(dst), name(src), name(dst)))
 		rel[src] = append(rel[src], dst)
 	}
 	for _, e := range inferred.Edges {
@@ -277,13 +277,13 @@ func (l *lifetime) checkContract(fn *Func, inferred *Summary) {
 			p = e.To.Index
 		}
 		if !reaches(p, result) && !staticOK[p] {
-			complain(fmt.Sprintf("%s returns a reference into %s, but its signature does not say so: add `from %s` after the results", fn.FullName(), name(p), name(p)))
+			complain(fmt.Sprintf("%s returns a reference into %s, but its signature does not say so: add `in %s` after the results", fn.FullName(), name(p), name(p)))
 			rel[p] = append(rel[p], result)
 		}
 	}
 	for _, p := range inferred.Static {
 		if !staticOK[p.Index] && !p.Result {
-			complain(fmt.Sprintf("%s keeps %s in static memory, but its signature does not say so: declare the parameter as `%s static T`", fn.FullName(), name(p.Index), name(p.Index)))
+			complain(fmt.Sprintf("%s keeps %s in static memory, but its signature does not say so: declare the parameter as `%s T in static`", fn.FullName(), name(p.Index), name(p.Index)))
 		}
 	}
 	if sig.ResultStatic {
@@ -387,11 +387,11 @@ func (l *lifetime) equal(a, b int, w *why) {
 
 // assign records that src is copied into storage typed by dst.
 func (l *lifetime) assign(dst, src vec, w *why) {
-	if dst == nil || src == nil {
+	if len(dst) == 0 || len(src) == 0 {
 		return
 	}
 	l.outlives(src[0], dst[0], w)
-	for k := 1; k < levels; k++ {
+	for k := 1; k < len(dst) && k < len(src); k++ {
 		l.equal(src[k], dst[k], w)
 	}
 }
@@ -818,6 +818,12 @@ func (l *lifetime) vecOf1(e Expr) vec {
 		if e.Obj != nil && e.Obj.Kind == ObjVar {
 			return l.varVec(e.Obj.Var)
 		}
+		if e.Obj != nil && e.Obj.Kind == ObjNil {
+			// nil refers to nothing, so it constrains no level: as constant data, its deeper
+			// levels would be static, and storing or returning it would make the destination's
+			// deeper levels static too, since they are invariant
+			return nil
+		}
 		return l.rodataVec()
 	case *BasicLit:
 		return l.rodataVec()
@@ -1081,6 +1087,17 @@ func (l *lifetime) summaries(e *CallExpr, sig *Signature) []*Summary {
 	return out
 }
 
+// describePos describes a summary position at a call: an argument, the receiver or a result.
+func describePos(p IfacePos, hasRecv bool, nresults int) string {
+	if !p.Result {
+		return describeArg(p.Index, hasRecv)
+	}
+	if nresults == 1 {
+		return "its result"
+	}
+	return fmt.Sprintf("result %d", p.Index+1)
+}
+
 func describeArg(slot int, hasRecv bool) string {
 	if hasRecv {
 		if slot == 0 {
@@ -1152,10 +1169,10 @@ func (l *lifetime) applyCall(e *CallExpr, sig *Signature, slots []vec) []vec {
 			l.outlives(at(se.From), at(se.To), &why{e.P, text, kind})
 		}
 		for _, p := range s.Static {
-			l.outlives(at(p), l.static, &why{e.P, name + " keeps " + describeArg(p.Index, hasRecv) + " in static memory", wStore})
+			l.outlives(at(p), l.static, &why{e.P, name + " keeps " + describePos(p, hasRecv, len(sig.Results)) + " in static memory", wStore})
 		}
 		for _, p := range s.Constant {
-			l.outlives(at(p), l.rodata, &why{e.P, name + " uses " + describeArg(p.Index, hasRecv) + " as constant data", wStore})
+			l.outlives(at(p), l.rodata, &why{e.P, name + " uses " + describePos(p, hasRecv, len(sig.Results)) + " as constant data", wStore})
 		}
 		for _, p := range s.ResStatic {
 			l.outlives(l.static, at(p), &why{e.P, "returned by " + name + ", which may view a package variable", wPass})
@@ -1244,27 +1261,27 @@ func (l *lifetime) call(e *CallExpr) []vec {
 			}
 		}
 		return []vec{res}
-	case "vec.Push", "vec.TryPush":
+	case "vec.push", "vec.try_push":
 		se := unparen(e.Fun).(*SelectorExpr)
 		dst := l.vecOf1(se.X)
 		if v := l.vecOf(e.Args[0]); v != nil && dst != nil {
 			l.assign(dst, v, &why{e.Args[0].Pos(), "pushed onto " + exprString(se.X), wStore})
 		}
 		return nil
-	case "vec.Append", "vec.TryAppend":
+	case "vec.append", "vec.try_append":
 		se := unparen(e.Fun).(*SelectorExpr)
 		dst := l.vecOf1(se.X)
 		if s := l.vecOf(e.Args[0]); s != nil && dst != nil {
 			l.assign(dst, shift(s), &why{e.Args[0].Pos(), "appended to " + exprString(se.X), wStore})
 		}
 		return nil
-	case "vec.Pop":
+	case "vec.pop":
 		se := unparen(e.Fun).(*SelectorExpr)
 		return []vec{l.vecOf1(se.X)}
-	case "vec.Clear":
+	case "vec.clear":
 		l.vecOf1(unparen(e.Fun).(*SelectorExpr).X)
 		return nil
-	case "error.Error", "error.Code", "arena.Used", "arena.Left", "arena.Cap":
+	case "error.message", "error.code", "arena.used", "arena.left", "arena.cap":
 		if se, ok := unparen(e.Fun).(*SelectorExpr); ok {
 			l.vecOf(se.X)
 		}
@@ -1317,7 +1334,11 @@ func (l *lifetime) store(target Expr, value vec, w *why) {
 	if value == nil || tv == nil {
 		return
 	}
-	l.assign(tv, value, w)
+	// Only the levels the target's type has: a struct's fields share levels, so equating a
+	// field's levels below those its type has with the value's would tie them to its siblings'
+	// for no reason (an int[] stored from a package arena made a sibling's contents static).
+	n := min(refLevels(target.info().T), len(tv))
+	l.assign(tv[:n:n], value[:min(n, len(value))], w)
 }
 
 // mapStore handles a write through `m[k]` (=, op= or ++/--), which may insert k: the key must then
@@ -1411,6 +1432,9 @@ func (l *lifetime) stmt(s Stmt) {
 		l.depth--
 	case *RangeStmt:
 		l.depth++
+		if s.Lo != nil {
+			l.vecOf(s.Lo)
+		}
 		x := l.vecOf(s.X)
 		var kv, vv vec
 		switch s.X.info().T.Underlying().(type) {
@@ -1423,7 +1447,7 @@ func (l *lifetime) stmt(s Stmt) {
 		case *Chan:
 			kv = shift(x)
 		}
-		w := &why{s.P, "assigned to a range variable", wCopy}
+		w := &why{s.P, "assigned to a loop variable", wCopy}
 		if s.Key != nil {
 			l.store(s.Key, kv, w)
 		}

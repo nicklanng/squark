@@ -1,100 +1,102 @@
-package main
+program
 
 // Loop versioning (cgen_loop.go) of slices in struct fields and package variables, and of loops
 // counting down: both copies must compute the same thing.
 
-type Matrix struct {
+struct Matrix {
 	n    int
-	data []float32
+	data f32[]
 }
 
-var table [16]int32
-var tab []int32
+thread table i32[16]
+thread tab i32[]
 
-func (m *Matrix) add(o *Matrix) {
-	for i := range m.data {
-		m.data[i] += o.data[i]
-	}
-}
-
-func (m *Matrix) scale(k float32) {
-	for i := 0; i < len(m.data); i++ {
-		m.data[i] *= k
-	}
-}
-
-func (m Matrix) sum() float32 {
-	var s float32
-	for i := range m.data {
-		s += m.data[i]
-	}
-	return s
-}
-
-// the loop changes m.n but not m.data: m.data is still copied
-func (m *Matrix) countPositive() int {
-	m.n = 0
-	for i := 0; i < len(m.data); i++ {
-		if m.data[i] > 0 {
-			m.n++
+impl Matrix {
+	fn add(&self, o *Matrix) {
+		for i, _ in self.data {
+			self.data[i] += o.data[i]
 		}
 	}
-	return m.n
-}
 
-// the loop stores a slice: m.data may change, so its indexes stay checked
-func (m *Matrix) shrink(other []float32) float32 {
-	var s float32
-	for i := 0; i < 3; i++ {
-		s += m.data[i]
-		m.data = other
+	fn scale(&self, k f32) {
+		for i := 0; i < len(self.data); i++ {
+			self.data[i] *= k
+		}
 	}
-	return s
-}
 
-// a nil m with a loop that doesn't run is fine
-func (m *Matrix) firstN(n int) float32 {
-	var s float32
-	for i := 0; i < n; i++ {
-		s += m.data[i]
+	fn sum(self) -> f32 {
+		var s f32
+		for i, _ in self.data {
+			s += self.data[i]
+		}
+		return s
 	}
-	return s
+
+	// the loop changes m.n but not m.data: m.data is still copied
+	fn count_positive(&self) -> int {
+		self.n = 0
+		for i := 0; i < len(self.data); i++ {
+			if self.data[i] > 0 {
+				self.n++
+			}
+		}
+		return self.n
+	}
+
+	// the loop stores a slice: m.data may change, so its indexes stay checked
+	fn shrink(&self, other f32[]) -> f32 {
+		var s f32
+		for i := 0; i < 3; i++ {
+			s += self.data[i]
+			self.data = other
+		}
+		return s
+	}
+
+	// a nil m with a loop that doesn't run is fine
+	fn first_n(&self, n int) -> f32 {
+		var s f32
+		for i := 0; i < n; i++ {
+			s += self.data[i]
+		}
+		return s
+	}
 }
 
-func reverseCopy(dst, src []int32) {
+fn reverse_copy(dst, src i32[]) {
 	for i := len(src) - 1; i >= 0; i-- {
 		dst[len(src)-1-i] = src[i]
 	}
 }
 
-func down(a []int32, n int) int32 {
-	var s int32
+fn down(a i32[], n int) -> i32 {
+	var s i32
 	for i := n; i > 0; i-- {
 		s += a[i-1]
 	}
 	return s
 }
 
-func downTo(a []int32, lo int) int32 {
-	var s int32
+fn down_to(a i32[], lo int) -> i32 {
+	var s i32
 	for i := len(a) - 1; lo <= i; i -= 1 {
-		s += a[i] * int32(i)
+		s += a[i] * i32(i)
 	}
 	return s
 }
 
-func sumTab(n int) int32 {
-	var s int32
+fn sum_tab(n int) -> i32 {
+	var s i32
 	for i := 0; i < n; i++ {
 		s += tab[i]
 	}
 	return s
 }
 
-func main() {
-	var a, b, c [8]float32
-	for i := range a {
-		a[i] = float32(i)
+fn main() {
+	var a, b, c f32[8]
+	for i, _ in a {
+		a[i] = f32(i)
 		b[i] = 10
 		c[i] = -1
 	}
@@ -102,15 +104,15 @@ func main() {
 	o := Matrix{0, b[:]}
 	m.add(&o)
 	m.scale(0.5)
-	println(m.data[0], m.data[7], m.sum(), m.countPositive(), m.n)
+	println(m.data[0], m.data[7], m.sum(), m.count_positive(), m.n)
 	println(m.shrink(c[:]), m.data[0])
 	var none *Matrix
-	println(none.firstN(0))
-	for i := range table {
-		table[i] = int32(i)
+	println(none.first_n(0))
+	for i, _ in table {
+		table[i] = i32(i)
 	}
 	tab = table[:]
-	var r [16]int32
-	reverseCopy(r[:], table[:])
-	println(r[0], r[15], down(table[:], 16), down(table[:], 0), downTo(table[:], 10), downTo(table[:], 20), sumTab(16))
+	var r i32[16]
+	reverse_copy(r[:], table[:])
+	println(r[0], r[15], down(table[:], 16), down(table[:], 0), down_to(table[:], 10), down_to(table[:], 20), sum_tab(16))
 }

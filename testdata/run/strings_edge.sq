@@ -1,26 +1,23 @@
-package main
+program
 
 // strings and utf8 edge cases that follow Go
 
-import (
-	"strings"
-	"utf8"
-)
+use strings, utf8
 
-func show(parts []string) {
+fn show(parts str[]) {
 	print(len(parts), ":")
-	for _, p := range parts {
+	for p in parts {
 		print(" [", p, "]")
 	}
 	println()
 }
 
-func main() {
-	var out [8]string
-	show(strings.Split("abc", "", out[:]))
-	show(strings.Split("héllo", "", out[:3]))
-	show(strings.Split("", "", out[:]))
-	show(strings.Split("a,b,c", ",", out[:2]))
-	println(strings.Count("héllo", ""), strings.Count("", ""), strings.Count("cheese", "e"))
-	println(utf8.RuneLen(0xD800), utf8.RuneLen(0xDFFF), utf8.RuneLen(0xE000), utf8.RuneLen('é'))
+fn main() {
+	var out str[8]
+	show(strings.split("abc", "", out[:]))
+	show(strings.split("héllo", "", out[:3]))
+	show(strings.split("", "", out[:]))
+	show(strings.split("a,b,c", ",", out[:2]))
+	println(strings.count("héllo", ""), strings.count("", ""), strings.count("cheese", "e"))
+	println(utf8.rune_len(0xD800), utf8.rune_len(0xDFFF), utf8.rune_len(0xE000), utf8.rune_len('é'))
 }

@@ -1,40 +1,35 @@
-package main
+program
 
-import (
-	"strconv"
-	"strings"
-)
+use strconv, strings
 
-type Shape struct {
-	Kind string
-	W, H int
+struct Shape {
+	kind str
+	w, h int
 }
 
-func (s Shape) Area() int { return s.W * s.H }
+impl Shape {
+	fn area(self) -> int { return self.w * self.h }
 
-func (s *Shape) Scale(k int) {
-	s.W *= k
-	s.H *= k
+	fn scale(&self, k int) {
+		self.w *= k
+		self.h *= k
+	}
 }
 
-type Celsius float64
+Celsius: f64
 
-const (
-	A = iota * 10
-	B
-	C
-)
+enum Tens { a = 0, b = 10, c = 20 }
 
-func minmax(xs []int) (lo, hi int) {
+fn minmax(xs int[]) -> (lo, hi int) {
 	lo, hi = xs[0], xs[0]
-	for _, x := range xs[1:] {
+	for x in xs[1:] {
 		lo = min(lo, x)
 		hi = max(hi, x)
 	}
 	return
 }
 
-func describe(n int) string {
+fn describe(n int) -> str {
 	switch n {
 	case 0:
 		return "zero"
@@ -44,68 +39,68 @@ func describe(n int) string {
 	return "big"
 }
 
-func main() {
-	s := Shape{Kind: "rect", W: 2, H: 3}
-	s.Scale(2)
-	println(s.Kind, s.Area())
+fn main() {
+	s := Shape{kind: "rect", w: 2, h: 3}
+	s.scale(2)
+	println(s.kind, s.area())
 
-	shapes := []Shape{{"a", 1, 1}, {"b", 2, 2}}
+	shapes := Shape[]{{"a", 1, 1}, {"b", 2, 2}}
 	total := 0
-	for _, sh := range shapes {
-		total += sh.Area()
+	for sh in shapes {
+		total += sh.area()
 	}
 	println("total", total)
 
-	println(A, B, C)
-	lo, hi := minmax([]int{5, -2, 9, 3})
+	println(Tens.a, Tens.b, Tens.c)
+	lo, hi := minmax(int[]{5, -2, 9, 3})
 	println(lo, hi)
 	println(describe(0), describe(2), describe(10))
 
 	var t Celsius = 21.5
 	println(t > 20)
 
-	var u8 uint8 = 250
-	u8 += 10
-	var i8 int8 = 127
-	i8++
-	println(u8, i8, -7/2, -7%2, 1<<62>>61)
+	var u8_ u8 = 250
+	u8_ += 10
+	var i8_ i8 = 127
+	i8_++
+	println(u8_, i8_, -7/2, -7%2, 1<<62>>61)
 
-	var buf [32]byte
-	out := strconv.AppendInt(buf[:0], -12345)
+	var buf u8[32]
+	out := strconv.append_int(buf[:0], -12345)
 	out = append(out, ' ')
-	out = strconv.AppendFloat(out, 3.14159, 3)
-	println(string(out))
+	out = strconv.append_float(out, 3.14159, 3)
+	println(str(out))
 
-	n, err := strconv.Atoi("123x")
-	println(n, err != nil, err.Error())
-	v, _ := strconv.Atoi("-9876")
+	n, err := strconv.atoi("123x")
+	println(n, err != nil, err.message())
+	v, _ := strconv.atoi("-9876")
 	println(v)
 
-	var parts [4]string
-	fields := strings.Split("a,b,c", ",", parts[:])
+	var parts str[4]
+	fields := strings.split("a,b,c", ",", parts[:])
 	println(len(fields), fields[0], fields[2])
-	before, after, found := strings.Cut("key=value", "=")
+	before, after, found := strings.cut("key=value", "=")
 	println(before, after, found)
-	println(strings.TrimSpace("  hi  "), strings.Index("hello", "ll"), strings.EqualFold("Go", "GO"))
+	println(strings.trim_space("  hi  "), strings.index("hello", "ll"), strings.equal_fold("Go", "GO"))
 
-	var m map[int]string cap 16
-	for i := range 10 {
+	var m str[int; 16]
+	for i in 0..10 {
 		m[i] = describe(i)
 	}
 	delete(m, 5)
 	println(len(m), m[2], m[5] == "")
 	count := 0
-	for k, v := range m {
+	for k, v in m {
 		if v == "big" {
 			count += k
 		}
 	}
 	println("sum of big keys", count)
 
-	arr := [5]int{1, 2, 3}
+	arr := int[5]{1, 2, 3}
 	arr2 := arr
 	arr2[0] = 100
-	println(arr[0], arr2[0], len(arr), arr == [5]int{1, 2, 3, 0, 0})
+	println(arr[0], arr2[0], len(arr), arr == int[5]{1, 2, 3, 0, 0})
 
 	x := 10
 	p := &x

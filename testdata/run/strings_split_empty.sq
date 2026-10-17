@@ -1,19 +1,19 @@
-package main
+program
 
-// strings.Split and Fields with an empty or small out: nothing to fill gives nothing, not a panic.
+// strings.split and Fields with an empty or small out: nothing to fill gives nothing, not a panic.
 
-import "strings"
+use strings
 
-func main() {
-	var none [0]string
-	println(len(strings.Split("abc", "", none[:])), len(strings.Split("a,b", ",", none[:])))
-	println(len(strings.Fields("a b", none[:])))
-	var one [1]string
-	r := strings.Split("abc", "", one[:])
+fn main() {
+	var none str[0]
+	println(len(strings.split("abc", "", none[:])), len(strings.split("a,b", ",", none[:])))
+	println(len(strings.fields("a b", none[:])))
+	var one str[1]
+	r := strings.split("abc", "", one[:])
 	println(len(r), r[0])
-	var two [2]string
-	r = strings.Split("abc", "", two[:])
+	var two str[2]
+	r = strings.split("abc", "", two[:])
 	println(len(r), r[0], r[1])
-	r = strings.Fields(" x  y z ", two[:])
+	r = strings.fields(" x  y z ", two[:])
 	println(len(r), r[0], r[1])
 }

@@ -5,47 +5,43 @@
 //
 // It shows:
 //   - a SQLite statement prepared once and reused by every request
-//   - try, where an error only propagates
-package main
-
-import (
-	"http"
-	"sqlite"
-	"strconv"
-)
-
-budget 64M
-pool http.serveConn 128
-
-var db sqlite.DB
-var countStmt sqlite.Stmt
-
-// GET /count: how many items the database holds
-func count(w *http.ResponseWriter, r *http.Request) {
-	defer countStmt.Reset()
-	row, err := countStmt.Step()
-	if err != nil || !row {
-		http.Error(w, 500)
-		return
-	}
-	var buf [24]byte
-	w.Text(200, string(strconv.AppendInt(buf[:0], countStmt.ColumnInt(0))))
+//   - !, where an error only propagates
+program {
+	budget 64M
+	pool http.serve_conn 128
 }
 
-func setup() error {
-	db = try sqlite.Open("app.db")
-	try db.Exec("CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY)")
-	countStmt = try db.Prepare("SELECT count(*) FROM items")
+use http, sqlite, strconv
+
+thread db sqlite.DB
+thread count_stmt sqlite.Stmt
+
+// GET /count: how many items the database holds
+fn count(w *http.ResponseWriter, r *http.Request) {
+	defer count_stmt.reset()
+	row, err := count_stmt.step()
+	if err != nil or not row {
+		http.send_error(w, 500)
+		return
+	}
+	var buf u8[24]
+	w.text(200, str(strconv.append_int(buf[:0], count_stmt.column_int(0))))
+}
+
+fn setup() -> ! {
+	db = sqlite.open("app.db")!
+	db.exec("CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY)")!
+	count_stmt = db.prepare("SELECT count(*) FROM items")!
 	return nil
 }
 
-func main() {
+fn main() {
 	if err := setup(); err != nil {
-		println("setup:", err.Error())
+		println("setup:", err.message())
 		return
 	}
-	http.HandleFunc("GET /count", count)
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	http.handle_func("GET /count", count)
+	if err := http.listen_and_serve(":8080", nil); err != nil {
 		panic(err)
 	}
 }

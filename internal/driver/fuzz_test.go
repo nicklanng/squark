@@ -121,11 +121,12 @@ func fuzzCorpus(t *testing.T) []string {
 
 var identRe = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*\b`)
 
-var keywords = map[string]bool{"package": true, "import": true, "func": true, "var": true, "const": true,
-	"type": true, "struct": true, "map": true, "chan": true, "return": true, "if": true, "else": true,
-	"for": true, "range": true, "switch": true, "case": true, "default": true, "break": true,
-	"continue": true, "go": true, "defer": true, "select": true, "task": true, "pool": true, "arena": true,
-	"in": true, "try": true, "cap": true, "extern": true, "shared": true, "thread": true, "main": true}
+var keywords = map[string]bool{"program": true, "module": true, "use": true, "fn": true, "pub": true, "var": true,
+	"const": true, "fault": true, "type": true, "struct": true, "chan": true, "return": true, "if": true, "else": true,
+	"for": true, "while": true, "loop": true, "switch": true, "case": true, "default": true, "break": true,
+	"continue": true, "start": true, "defer": true, "select": true, "task": true, "pool": true, "stack": true,
+	"arena": true, "with": true, "in": true, "static": true, "extern": true, "shared": true, "thread": true,
+	"not": true, "and": true, "or": true, "main": true}
 
 // mutate applies one to three line or token edits. They are chosen to move references around:
 // dropping a statement (often the one an error test expects to be rejected), duplicating or

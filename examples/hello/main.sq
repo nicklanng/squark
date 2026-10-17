@@ -4,53 +4,55 @@
 //
 // It shows:
 //   - structs, pointer-receiver methods and variadic functions, as in Go
-//   - a vector ([..16]int): fixed storage with a length, filled with Push and viewed as a slice
+//   - a vector (int[..16]): fixed storage with a length, filled with push and viewed as a slice
 //   - a map with a declared capacity, ready to use without make
 //   - range over a string, which yields runes
-package main
+program
 
-import "os"
+use os
 
-type Point struct {
-	X, Y int
+struct Point {
+	x, y int
 }
 
-func (p *Point) Move(dx, dy int) {
-	p.X += dx
-	p.Y += dy
+impl Point {
+	fn move(&self, dx, dy int) {
+		self.x += dx
+		self.y += dy
+	}
 }
 
-func sum(xs ...int) int {
+fn sum(xs ...int) -> int {
 	total := 0
-	for _, x := range xs {
+	for x in xs {
 		total += x
 	}
 	return total
 }
 
-func main() {
+fn main() {
 	println("hello, squark")
-	p := Point{X: 1, Y: 2}
-	p.Move(3, 4)
-	println("point:", p.X, p.Y)
+	p := Point{x: 1, y: 2}
+	p.move(3, 4)
+	println("point:", p.x, p.y)
 
 	// a vector holds its 16 elements inline, here on main's stack: no allocation
-	var squares [..16]int
-	for i := range 10 {
-		squares.Push(i * i)
+	var squares int[..16]
+	for i in 0..10 {
+		squares.push(i * i)
 	}
 	println("len", len(squares), "cap", cap(squares), "sum", sum(squares[:]...), sum(1, 2, 3))
 
 	// declaring the map is the allocation: room for 8 entries
-	var m map[string]int cap 8
+	var m int[str; 8]
 	m["a"] = 1
 	m["b"] += 41
 	v, ok := m["b"]
 	println("map", len(m), v, ok)
 
-	for i, r := range "héllo" {
+	for i, r in "héllo" {
 		print(i, ":", r, " ")
 	}
 	println()
-	os.Stdout.WriteString("written via os\n")
+	os.stdout.write_string("written via os\n")
 }

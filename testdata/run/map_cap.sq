@@ -1,17 +1,17 @@
-package main
+program
 
 // cap of a map is the number of entries its storage holds (0 for a nil map)
 
-var m map[int]int cap 4
+thread m int[int; 4]
 
-func capOf(v map[int]int) int { return cap(v) }
+fn cap_of(v int[int]) -> int { return cap(v) }
 
-func main() {
+fn main() {
 	m[1] = 1
-	var nilm map[int]int
-	println(cap(m), len(m), capOf(m), cap(nilm))
-	arena a 4K {
-		mm := make(map[string]int, 10) in a
+	var nilm int[int]
+	println(cap(m), len(m), cap_of(m), cap(nilm))
+	with arena a 4K {
+		mm := make(int[str], 10) in a
 		println(cap(mm))
 	}
 }

@@ -1,29 +1,25 @@
-package main
+program
 
-// Reading a connection with a timeout. Conn.WithTimeout(d) is a source whose reads give up with
-// net.ErrTimeout after d without input; d <= 0 means no deadline, for it and for ReadTimeout
+// Reading a connection with a timeout. Conn.with_timeout(d) is a source whose reads give up with
+// net.Timeout after d without input; d <= 0 means no deadline, for it and for ReadTimeout
 // (which used to time out at once). bufio.Reader.ReadLine returns a partial last line at io.EOF,
 // but drops it when the source fails otherwise (a timeout), in both the ordinary path and the one
 // for a line that fills the buffer exactly.
 
-import (
-	"bufio"
-	"net"
-	"time"
-)
+use bufio, net, time
 
-const short = 30 * time.Millisecond
+const short = 30 * time.millisecond
 
-var l net.Listener
+thread l net.Listener
 
 // pair returns the two ends of a new connection: the client's, then the server's.
-func pair() (net.Conn, net.Conn) {
-	var b [32]byte
-	c, err := net.Dial(string(net.AppendHostPort(b[:0], "127.0.0.1", l.Port())))
+fn pair() -> (net.Conn, net.Conn) {
+	var b u8[32]
+	c, err := net.dial(str(net.append_host_port(b[:0], "127.0.0.1", l.port())))
 	if err != nil {
 		panic(err)
 	}
-	s, err := l.Accept()
+	s, err := l.accept()
 	if err != nil {
 		panic(err)
 	}
@@ -31,81 +27,81 @@ func pair() (net.Conn, net.Conn) {
 }
 
 // late writes text to s after a delay longer than short.
-task late(s net.Conn, text static string) pool 2 {
-	time.Sleep(3 * short)
-	s.WriteString(text)
+task late(s net.Conn, text str in static) pool 2 {
+	time.sleep(3 * short)
+	s.write_string(text)
 }
 
-func show(what string, n int, err error) {
+fn show(what str, n int, err error) {
 	if err != nil {
-		println(what, "->", err.Error())
+		println(what, "->", err.message())
 		return
 	}
 	println(what, "->", n, "bytes")
 }
 
 // lines reads lines from src until an error, which it repeats once to show it sticks.
-func lines(what string, r *bufio.Reader, src anytype) {
+fn lines(what str, r *bufio.Reader, src anytype) {
 	print(what, ":")
-	for {
-		line, err := r.ReadLine(src)
+	loop {
+		line, err := r.read_line(src)
 		if err != nil {
-			_, again := r.ReadLine(src)
-			print(" <", err.Error(), "> <", again.Error(), ">\n")
+			_, again := r.read_line(src)
+			print(" <", err.message(), "> <", again.message(), ">\n")
 			return
 		}
 		print(" [", line, "]")
 	}
 }
 
-func timeouts() {
+fn timeouts() {
 	c, s := pair()
-	var buf [16]byte
-	n, err := c.WithTimeout(short).Read(buf[:])
+	var buf u8[16]
+	n, err := c.with_timeout(short).read(buf[:])
 	show("WithTimeout(short), nothing sent", n, err)
-	n, err = c.ReadTimeout(buf[:], short)
+	n, err = c.read_timeout(buf[:], short)
 	show("ReadTimeout(short), nothing sent", n, err)
 
-	go late(s, "late")
-	start := time.Now()
-	n, err = c.WithTimeout(0).Read(buf[:])
+	start late(s, "late")
+	start := time.now()
+	n, err = c.with_timeout(0).read(buf[:])
 	show("WithTimeout(0), a late write", n, err)
-	println("  waited for it:", time.Since(start) >= 2*short)
-	go late(s, "later")
-	n, err = c.ReadTimeout(buf[:], -time.Second)
+	println("  waited for it:", time.since(start) >= 2*short)
+	start late(s, "later")
+	n, err = c.read_timeout(buf[:], -time.second)
 	show("ReadTimeout(-1s), a late write", n, err)
 
-	s.WriteString("ready")
-	n, err = c.WithTimeout(short).Read(buf[:])
+	s.write_string("ready")
+	n, err = c.with_timeout(short).read(buf[:])
 	show("WithTimeout(short), input waiting", n, err)
-	c.Close()
-	s.Close()
+	c.close()
+	s.close()
 }
 
 // partial sends text, then either closes the connection (EOF) or leaves it open (a timeout), and
 // reads it back in lines through a buffer of size bytes.
-func partial(text string, size int, eof bool) {
+fn partial(text str, size int, eof bool) {
 	c, s := pair()
-	s.WriteString(text)
+	s.write_string(text)
 	if eof {
-		s.Close()
+		s.close()
 	}
-	var store [8]byte
-	r := bufio.NewReader(store[:size])
+	var store u8[8]
+	r := bufio.new_reader(store[:size])
 	what := "timeout"
 	if eof {
 		what = "eof"
 	}
-	lines(what, &r, c.WithTimeout(short))
-	c.Close()
-	if !eof {
-		s.Close()
+	lines(what, &r, c.with_timeout(short))
+	c.close()
+	if not eof {
+		s.close()
 	}
 }
 
-func main() {
+fn main() {
 	var err error
-	l, err = net.Listen("127.0.0.1:0")
+	l, err = net.listen("127.0.0.1:0")
 	if err != nil {
 		panic(err)
 	}

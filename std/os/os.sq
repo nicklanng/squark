@@ -1,148 +1,150 @@
 // Package os is a thin, heap-free interface to the operating system.
-package os
+module os
 
-import "io"
+use io
 
 // File is an open file descriptor. It is a plain value; copying it does not duplicate the descriptor.
-type File struct {
-	fd int
+pub struct File {
+	sysfd int
 }
 
-var Stdin = File{fd: 0}
-var Stdout = File{fd: 1}
-var Stderr = File{fd: 2}
+pub thread stdin = File{sysfd: 0}
+pub thread stdout = File{sysfd: 1}
+pub thread stderr = File{sysfd: 2}
 
 const (
-	O_RDONLY = 0
-	O_WRONLY = 1
-	O_RDWR   = 2
-	O_CREATE = 0x40
-	O_TRUNC  = 0x200
-	O_APPEND = 0x400
+	pub o_rdonly = 0
+	pub o_wronly = 1
+	pub o_rdwr   = 2
+	pub o_create = 0x40
+	pub o_trunc  = 0x200
+	pub o_append = 0x400
 )
 
-extern "sq_write" func sysWrite(fd int, b []byte) int stack 8K
+extern fn sys_write(fd int, b u8[]) -> int stack 8K c"sq_write"
 
-extern "sq_write_str" func sysWriteStr(fd int, s string) int stack 8K
+extern fn sys_write_str(fd int, s str) -> int stack 8K c"sq_write_str"
 
-extern "sq_read" func sysRead(fd int, b []byte) int stack 8K
+extern fn sys_read(fd int, b u8[]) -> int stack 8K c"sq_read"
 
-extern "sq_close" func sysClose(fd int) int stack 8K
+extern fn sys_close(fd int) -> int stack 8K c"sq_close"
 
-extern "sq_open" func sysOpen(path string, flags int, mode int) int stack 8K
+extern fn sys_open(path str, flags int, mode int) -> int stack 8K c"sq_open"
 
-extern "sq_strerror" func strerror(errno int) string stack 8K
+extern fn strerror(errno int) -> str stack 8K c"sq_strerror"
 
-extern "sq_exit" func Exit(code int) stack 8K
+pub extern fn exit(code int) stack 8K c"sq_exit"
 
-// Getpid returns the process id (with workers N, each worker has its own).
-extern "sq_getpid" func Getpid() int stack 1K
+// getpid returns the process id (with workers N, each worker has its own).
+pub extern fn getpid() -> int stack 1K c"sq_getpid"
 
-extern "sq_argc" func argc() int stack 8K
+extern fn argc() -> int stack 8K c"sq_argc"
 
-extern "sq_argv" func argv(i int) string stack 8K
+extern fn argv(i int) -> str stack 8K c"sq_argv"
 
-extern "sq_getenv" func Getenv(name string) string stack 8K
+pub extern fn getenv(name str) -> str stack 8K c"sq_getenv"
 
-// Errno converts a positive errno value into an error.
-func Errno(n int) error {
+// errno converts a positive errno value into an error.
+pub fn errno(n int) -> ! {
 	return error(n, strerror(n))
 }
 
-// NArgs returns the number of command-line arguments, including the program name.
-func NArgs() int { return argc() }
+// n_args returns the number of command-line arguments, including the program name.
+pub fn n_args() -> int { return argc() }
 
-// Arg returns command-line argument i ("" if out of range). Arg(0) is the program name.
-func Arg(i int) string { return argv(i) }
+// arg returns command-line argument i ("" if out of range). Arg(0) is the program name.
+pub fn arg(i int) -> str { return argv(i) }
 
-func Open(path string) (File, error) { return OpenFile(path, O_RDONLY, 0) }
+pub fn open(path str) -> File ! { return open_file(path, o_rdonly, 0) }
 
-func Create(path string) (File, error) {
-	return OpenFile(path, O_WRONLY|O_CREATE|O_TRUNC, 0o644)
+pub fn create(path str) -> File ! {
+	return open_file(path, o_wronly|o_create|o_trunc, 0o644)
 }
 
-func OpenFile(path string, flag int, perm int) (File, error) {
-	fd := sysOpen(path, flag, perm)
+pub fn open_file(path str, flag int, perm int) -> File ! {
+	fd := sys_open(path, flag, perm)
 	if fd < 0 {
-		return File{fd: -1}, Errno(-fd)
+		return File{sysfd: -1}, errno(-fd)
 	}
-	return File{fd: fd}, nil
+	return File{sysfd: fd}, nil
 }
 
-// FromFd wraps an existing descriptor.
-func FromFd(fd int) File { return File{fd: fd} }
+// from_fd wraps an existing descriptor.
+pub fn from_fd(fd int) -> File { return File{sysfd: fd} }
 
-func (f File) Fd() int { return f.fd }
+impl File {
+	pub fn fd(self) -> int { return self.sysfd }
 
-func (f File) Read(p []byte) (int, error) {
-	n := sysRead(f.fd, p)
-	if n < 0 {
-		return 0, Errno(-n)
-	}
-	if n == 0 && len(p) > 0 {
-		return 0, io.EOF
-	}
-	return n, nil
-}
-
-func (f File) Write(p []byte) (int, error) {
-	n := sysWrite(f.fd, p)
-	if n < 0 {
-		return 0, Errno(-n)
-	}
-	if n < len(p) {
-		return n, io.ErrShortWrite
-	}
-	return n, nil
-}
-
-func (f File) WriteString(s string) (int, error) {
-	n := sysWriteStr(f.fd, s)
-	if n < 0 {
-		return 0, Errno(-n)
-	}
-	if n < len(s) {
-		return n, io.ErrShortWrite
-	}
-	return n, nil
-}
-
-func (f File) Close() error {
-	if r := sysClose(f.fd); r < 0 {
-		return Errno(-r)
-	}
-	return nil
-}
-
-// ReadFull reads into p until it is full, returning how many bytes it read. If the file ends
-// first, the error is io.EOF if nothing was read and io.ErrUnexpectedEOF otherwise, as with Go's
-// io.ReadFull.
-func (f File) ReadFull(p []byte) (int, error) {
-	n := 0
-	for n < len(p) {
-		m, err := f.Read(p[n:])
-		n += m
-		if err == io.EOF && n > 0 {
-			return n, io.ErrUnexpectedEOF
+	pub fn read(self, p u8[]) -> int ! {
+		n := sys_read(self.sysfd, p)
+		if n < 0 {
+			return 0, errno(-n)
 		}
-		if err != nil {
-			return n, err
+		if n == 0 and len(p) > 0 {
+			return 0, io.EOF
 		}
+		return n, nil
 	}
-	return n, nil
+
+	pub fn write(self, p u8[]) -> int ! {
+		n := sys_write(self.sysfd, p)
+		if n < 0 {
+			return 0, errno(-n)
+		}
+		if n < len(p) {
+			return n, io.ShortWrite
+		}
+		return n, nil
+	}
+
+	pub fn write_string(self, s str) -> int ! {
+		n := sys_write_str(self.sysfd, s)
+		if n < 0 {
+			return 0, errno(-n)
+		}
+		if n < len(s) {
+			return n, io.ShortWrite
+		}
+		return n, nil
+	}
+
+	pub fn close(self) -> ! {
+		if r := sys_close(self.sysfd); r < 0 {
+			return errno(-r)
+		}
+		return nil
+	}
+
+	// read_full reads into p until it is full, returning how many bytes it read. If the file ends
+	// first, the error is io.EOF if nothing was read and io.UnexpectedEOF otherwise, as with Go's
+	// io.read_full.
+	pub fn read_full(self, p u8[]) -> int ! {
+		n := 0
+		while n < len(p) {
+			m, err := self.read(p[n:])
+			n += m
+			if err == io.EOF and n > 0 {
+				return n, io.UnexpectedEOF
+			}
+			if err != nil {
+				return n, err
+			}
+		}
+		return n, nil
+	}
 }
 
-// ReadFile reads the whole file at path into buf and returns the part it fills. A file that
-// doesn't fit is io.ErrTooLarge (buf then holds its beginning).
-func ReadFile(path string, buf []byte) ([]byte, error) from buf {
-	f, err := Open(path)
+// read_file reads the whole file at path into buf and returns the part it fills. A file that
+// doesn't fit is io.TooLarge (buf then holds its beginning).
+pub fn read_file(path str, buf u8[]) -> u8[] ! in buf {
+	f, err := open(path)
 	if err != nil {
 		return buf[:0], err
 	}
-	defer f.Close()
+	defer f.close()
 	n := 0
-	for n < len(buf) {
-		m, err := f.Read(buf[n:])
+	while n < len(buf) {
+		m, err := f.read(buf[n:])
 		n += m
 		if err == io.EOF {
 			return buf[:n], nil
@@ -151,9 +153,9 @@ func ReadFile(path string, buf []byte) ([]byte, error) from buf {
 			return buf[:n], err
 		}
 	}
-	var probe [1]byte // a full buffer: is that the whole file?
-	if m, _ := f.Read(probe[:]); m > 0 {
-		return buf[:n], io.ErrTooLarge
+	var probe u8[1] // a full buffer: is that the whole file?
+	if m, _ := f.read(probe[:]); m > 0 {
+		return buf[:n], io.TooLarge
 	}
 	return buf[:n], nil
 }

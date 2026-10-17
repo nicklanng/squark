@@ -1,0 +1,13 @@
+program
+
+// Go habits the parser answers with the new spelling (none of these stops the parse).
+
+fn main() {
+	a, b := true, false
+	if a && b { // ERROR "write and, not &&"
+	}
+	if a || b { // ERROR "write or, not ||"
+	}
+	if !a { // ERROR "write not x"
+	}
+}

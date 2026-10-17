@@ -11,11 +11,11 @@ import (
 // See spec §3.
 
 // simdMethods are the methods every SIMD vector has; the mask ones only on integer vectors.
-var simdMethods = map[string]bool{"Store": true, "Sum": true, "Min": true, "Max": true, "Any": true, "All": true, "Select": true, "Shuffle": true, "Swizzle": true, "First": true, "Last": true, "Lookup": true}
+var simdMethods = map[string]bool{"store": true, "sum": true, "min": true, "max": true, "any": true, "all": true, "select": true, "shuffle": true, "swizzle": true, "first": true, "last": true, "lookup": true}
 
 func isSIMDMaskMethod(name string) bool {
 	switch name {
-	case "Any", "All", "Select", "First", "Last":
+	case "any", "all", "select", "first", "last":
 		return true
 	}
 	return false
@@ -146,9 +146,9 @@ func (c *Checker) simdConversion(e *CallExpr, t Type) {
 			return
 		}
 	}
-	load := fmt.Sprintf("a []%s or [%d]%s (load)", s.Elem, s.Lanes, s.Elem)
+	load := fmt.Sprintf("a %s[] or %s[%d] (load)", s.Elem, s.Elem, s.Lanes)
 	if s.Elem.Kind == Uint8 {
-		load = fmt.Sprintf("a []byte, [%d]byte or string (load)", s.Lanes)
+		load = fmt.Sprintf("a u8[], u8[%d] or str (load)", s.Lanes)
 	}
 	c.errorf(e.P, "cannot convert %s (type %s) to %s: it takes a %s (broadcast), a vector with %d lanes, or %s", exprString(x), xi.T, t, s.Elem, s.Lanes, load)
 	c.invalid(e)
@@ -162,17 +162,17 @@ func (c *Checker) simdMethod(e *SelectorExpr, s *SIMD, name string) *Signature {
 		return nil
 	}
 	switch name {
-	case "Store":
+	case "store":
 		return &Signature{Params: []*Var{{Type: &Slice{Elem: s.Elem}}}}
-	case "Sum", "Min", "Max":
+	case "sum", "min", "max":
 		return &Signature{Results: []*Var{{Type: s.Elem}}}
-	case "Any", "All":
+	case "any", "all":
 		return &Signature{Results: []*Var{{Type: tBool}}}
-	case "First", "Last":
+	case "first", "last":
 		return &Signature{Results: []*Var{{Type: tInt}}}
-	case "Select", "Shuffle", "Swizzle", "Lookup": // checked at the call (simdSelect, simdShuffle, simdLookup)
-		if name == "Lookup" && !isByteTable(s) {
-			c.errorf(e.Sel.P, "%s.Lookup undefined (Lookup is defined on 16-lane byte vectors, int8x16 and uint8x16: the table)", exprString(e.X))
+	case "select", "shuffle", "swizzle", "lookup": // checked at the call (simdSelect, simdShuffle, simdLookup)
+		if name == "lookup" && !isByteTable(s) {
+			c.errorf(e.Sel.P, "%s.lookup undefined (lookup is defined on 16-lane byte vectors, i8x16 and u8x16: the table)", exprString(e.X))
 			return nil
 		}
 		return &Signature{Variadic: true}
@@ -189,7 +189,7 @@ func isByteTable(s *SIMD) bool { return s.Lanes == 16 && sizeofBasic(s.Elem.Kind
 func (c *Checker) simdLookup(e *CallExpr, recv Type) {
 	t := simdOf(recv)
 	if len(e.Args) != 1 {
-		c.errorf(e.P, "wrong number of arguments for Lookup (expected 1, found %d)", len(e.Args))
+		c.errorf(e.P, "wrong number of arguments for lookup (expected 1, found %d)", len(e.Args))
 		c.invalid(e)
 		return
 	}
@@ -200,7 +200,7 @@ func (c *Checker) simdLookup(e *CallExpr, recv Type) {
 	}
 	s := simdOf(x.info().T)
 	if s == nil || sizeofBasic(s.Elem.Kind) != 1 || !isInteger(s.Elem) {
-		c.errorf(x.Pos(), "cannot use %s (type %s) as the indexes of Lookup: they are a vector of bytes (uint8x16 or uint8x32)", exprString(x), x.info().T)
+		c.errorf(x.Pos(), "cannot use %s (type %s) as the indexes of lookup: they are a vector of bytes (u8x16 or u8x32)", exprString(x), x.info().T)
 		c.invalid(e)
 		return
 	}
@@ -216,14 +216,14 @@ func (c *Checker) simdShuffle(e *CallExpr, recv Type, name string) {
 	s := simdOf(recv)
 	args := e.Args
 	limit := s.Lanes
-	if name == "Shuffle" {
+	if name == "shuffle" {
 		if len(args) == 0 {
-			c.errorf(e.P, "not enough arguments for Shuffle (expected a %s and %d lane indexes)", recv, s.Lanes)
+			c.errorf(e.P, "not enough arguments for shuffle (expected a %s and %d lane indexes)", recv, s.Lanes)
 			c.invalid(e)
 			return
 		}
 		c.valueExpr(args[0], recv)
-		if !c.assignable(args[0], recv, "argument to Shuffle") {
+		if !c.assignable(args[0], recv, "argument to shuffle") {
 			c.invalid(e)
 			return
 		}
@@ -257,7 +257,7 @@ func (c *Checker) simdShuffle(e *CallExpr, recv Type, name string) {
 // b have one SIMD type, with m's lane count and lane width.
 func (c *Checker) simdSelect(e *CallExpr, m *SIMD) {
 	if len(e.Args) != 2 {
-		c.errorf(e.P, "wrong number of arguments for Select (expected 2, found %d)", len(e.Args))
+		c.errorf(e.P, "wrong number of arguments for select (expected 2, found %d)", len(e.Args))
 		c.invalid(e)
 		return
 	}
@@ -272,11 +272,11 @@ func (c *Checker) simdSelect(e *CallExpr, m *SIMD) {
 	}
 	s := simdOf(t)
 	if s == nil || s.Lanes != m.Lanes || sizeofBasic(s.Elem.Kind) != sizeofBasic(m.Elem.Kind) {
-		c.errorf(e.P, "invalid arguments for Select: the mask has %d lanes of %d bits, so a and b must be vectors with the same lanes (such as %s)", m.Lanes, sizeofBasic(m.Elem.Kind)*8, m)
+		c.errorf(e.P, "invalid arguments for select: the mask has %d lanes of %d bits, so a and b must be vectors with the same lanes (such as %s)", m.Lanes, sizeofBasic(m.Elem.Kind)*8, m)
 		c.invalid(e)
 		return
 	}
-	if !c.assignable(a, t, "argument to Select") || !c.assignable(b, t, "argument to Select") {
+	if !c.assignable(a, t, "argument to select") || !c.assignable(b, t, "argument to select") {
 		c.invalid(e)
 		return
 	}
@@ -307,7 +307,7 @@ func (c *Checker) simdConst(x Expr, s *SIMD, t Type, context string) bool {
 // ---- code generation ----
 
 // simdC is the C type of a SIMD type (typedefs in sq_rt.h).
-func simdC(s *SIMD) string { return "sq_" + s.Name }
+func simdC(s *SIMD) string { return "sq_" + s.CName }
 
 // simdSplat is a vector with the C scalar v in every lane.
 func (g *gen) simdSplat(s *SIMD, v string) string {
@@ -449,17 +449,17 @@ func (g *gen) simdBuiltin(e *CallExpr) string {
 	ct, et := simdC(s), g.basicC(s.Elem.Kind)
 	recv := fmt.Sprintf("%s %s = %s; ", ct, v, g.expr(se.X))
 	switch e.Builtin {
-	case "simd.Store":
+	case "simd.store":
 		d := g.tmp()
 		return fmt.Sprintf("({ %s%s %s = %s; if (__builtin_expect(%s.len < %d, 0)) sq_panic_index(%d, %s.len, __FILE__, __LINE__); memcpy(%s.p, &%s, sizeof %s); })",
 			recv, g.ctype(e.Args[0].info().T), d, g.expr(e.Args[0]), d, s.Lanes, s.Lanes-1, d, d, v, v)
-	case "simd.Sum":
+	case "simd.sum":
 		return fmt.Sprintf("({ %s(%s)(%s); })", recv, et, g.simdReduce(s, v, func(a, b string) string {
 			return fmt.Sprintf("(%s)(%s + %s)", et, a, b)
 		}))
-	case "simd.Min", "simd.Max":
+	case "simd.min", "simd.max":
 		op := "<"
-		if e.Builtin == "simd.Max" {
+		if e.Builtin == "simd.max" {
 			op = ">"
 		}
 		// as the scalar min and max: the later lane wins unless it is smaller (larger)
@@ -467,9 +467,9 @@ func (g *gen) simdBuiltin(e *CallExpr) string {
 			x, y := g.tmp(), g.tmp()
 			return fmt.Sprintf("({ %s %s = %s, %s = %s; %s %s %s ? %s : %s; })", et, x, a, y, b, y, op, x, y, x)
 		}))
-	case "simd.Any", "simd.All":
+	case "simd.any", "simd.all":
 		op := "||"
-		if e.Builtin == "simd.All" {
+		if e.Builtin == "simd.all" {
 			op = "&&"
 		}
 		return fmt.Sprintf("({ %s(bool)(%s); })", recv, g.simdReduce(s, v, func(a, b string) string {
@@ -481,24 +481,24 @@ func (g *gen) simdBuiltin(e *CallExpr) string {
 			}
 			return fmt.Sprintf("(%s %s %s)", a, op, b)
 		}))
-	case "simd.First", "simd.Last":
+	case "simd.first", "simd.last":
 		if s.Lanes == 16 && sizeofBasic(s.Elem.Kind) == 1 {
 			// each lane narrowed to 4 bits of a uint64 (arm64: shrn; there is no movemask)
 			fn := "sq_first16"
-			if e.Builtin == "simd.Last" {
+			if e.Builtin == "simd.last" {
 				fn = "sq_last16"
 			}
 			return fmt.Sprintf("({ %s%s((sq_int8x16)(%s != 0)); })", recv, fn, v)
 		}
 		i, r := g.tmp(), g.tmp()
 		loop := fmt.Sprintf("for (int %s = 0; %s < %d; %s++) if (%s[%s]) { %s = %s; break; }", i, i, s.Lanes, i, v, i, r, i)
-		if e.Builtin == "simd.Last" {
+		if e.Builtin == "simd.last" {
 			loop = fmt.Sprintf("for (int %s = %d; %s >= 0; %s--) if (%s[%s]) { %s = %s; break; }", i, s.Lanes-1, i, i, v, i, r, i)
 		}
 		return fmt.Sprintf("({ %sint64_t %s = -1; %s %s; })", recv, r, loop, r)
-	case "simd.Shuffle", "simd.Swizzle":
+	case "simd.shuffle", "simd.swizzle":
 		args, other := e.Args, v
-		if e.Builtin == "simd.Shuffle" {
+		if e.Builtin == "simd.shuffle" {
 			other = g.tmp()
 			recv += fmt.Sprintf("%s %s = %s; ", ct, other, g.coerce(e.Args[0], se.X.info().T))
 			args = args[1:]
@@ -513,11 +513,11 @@ func (g *gen) simdBuiltin(e *CallExpr) string {
 			}
 		}
 		return fmt.Sprintf("({ %s(%s){%s}; })", recv, ct, strings.Join(lanes, ", "))
-	case "simd.Lookup":
+	case "simd.lookup":
 		g.usesLookup = true
 		r := simdOf(e.T)
 		return fmt.Sprintf("({ %s(%s)sq_lookup%d((sq_uint8x16)%s, (sq_uint8x%d)(%s)); })", recv, simdC(r), r.Lanes, v, r.Lanes, g.expr(e.Args[0]))
-	case "simd.Select":
+	case "simd.select":
 		t := e.T
 		vt := simdC(simdOf(t))
 		m, x, y := g.tmp(), g.tmp(), g.tmp()

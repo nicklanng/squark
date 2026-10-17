@@ -1,71 +1,66 @@
-package main
+program
 
 // kqueue batches registrations and sends a full batch early. A registration in it that fails (its
 // descriptor was closed before the batch was sent) must not drop the ones after it: here the
 // idle registration of y would be lost and NextIdle would never return it.
 
-import (
-	"net"
-	"runtime"
-	"strconv"
-	"time"
-)
+use net, runtime, strconv, time
 
-var xc net.Conn
-var got chan int cap 1
+thread xc net.Conn
+thread got int chan[1]
 
 task reader() pool 1 {
-	var buf [8]byte
-	xc.Read(buf[:])
+	var buf u8[8]
+	xc.read(buf[:])
 }
 
 task idler() pool 1 {
-	_, tag := net.NextIdle()
+	_, tag := net.next_idle()
 	got <- tag
 }
 
-arena str 64
+arena str_ 64
 
-func addr(port int) string {
-	var b [32]byte
-	return string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), port)) in str
+fn addr(port int) -> str {
+	var b u8[32]
+	return str(strconv.append_int(append(b[:0], "127.0.0.1:"...), port)) in str_
 }
 
-func pair(l net.Listener, a string) (net.Conn, net.Conn) {
-	c, err := net.Dial(a)
+fn pair(l net.Listener, a str) -> (net.Conn, net.Conn) {
+	c, err := net.dial(a)
 	if err != nil {
 		panic(err)
 	}
-	s, err := l.Accept()
+	s, err := l.accept()
 	if err != nil {
 		panic(err)
 	}
 	return c, s
 }
 
-func main() {
-	l, err := net.Listen("127.0.0.1:0")
+fn main() {
+	l, err := net.listen("127.0.0.1:0")
 	if err != nil {
 		panic(err)
 	}
-	a := addr(l.Port())
+	a := addr(l.port())
 	xc, _ = pair(l, a)
 	yc, ys := pair(l, a)
 	_, zs := pair(l, a)
 
-	go reader()
-	runtime.Gosched() // the reader's registration for xc is queued, not yet sent
-	xc.Close()        // so sending it fails
-	ys.ParkIdle(2)
+	start reader()
+	runtime.gosched() // the reader's registration for xc is queued, not yet sent
+	xc.close()        // so sending it fails
+	ys.park_idle(2)
 	for i := 0; i < 300; i++ { // fills the batch: it is sent before the poller runs
-		zs.ParkIdle(3)
+		zs.park_idle(3)
 	}
-	go idler()
-	yc.WriteString("y")
+	start idler()
+	yc.write_string("y")
 	select {
 	case tag := <-got:
 		println("idle:", tag)
-	case <-time.After(2 * time.Second):
+	case <-time.after(2 * time.second):
 		println("y's idle registration was lost")
 	}
 }

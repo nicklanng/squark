@@ -1,13 +1,13 @@
-package main
+program
 
-import "io"
+use io
 
-const ErrMine = error(1, "mine")
+fault Mine 1 "mine"
 
-func main() {
-	p := &ErrMine // ERROR "cannot take address of ErrMine (it is a constant)"
+fn main() {
+	p := &Mine // ERROR "cannot take address of Mine (it is a constant)"
 	q := &io.EOF  // ERROR "cannot take address of io.EOF (it is a constant)"
-	e := ErrMine
+	e := Mine
 	r := &e
 	println(p, q, r)
 }

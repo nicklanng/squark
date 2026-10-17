@@ -1,13 +1,13 @@
-package main
+program
 
-type Bad struct {
-	P *int
+struct Bad {
+	p *int
 }
 
-var n = 3
+thread n = 3
 
-const notConst = [2]int{1, n} // ERROR "const notConst: n is not constant"
-const withSlice = [1][]int{} // ERROR "const withSlice: []int can't be constant data"
-const withPtr = Bad{} // ERROR "const withPtr: *int can't be constant data"
+const not_const = int[2]{1, n} // ERROR "const not_const: n is not constant"
+const with_slice = int[][1]{} // ERROR "const with_slice: int[] can't be constant data"
+const with_ptr = Bad{} // ERROR "const with_ptr: *int can't be constant data"
 
-func main() {}
+fn main() {}

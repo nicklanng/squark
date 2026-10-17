@@ -168,14 +168,14 @@ func TestStdlibDocCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// the generated API is exactly the ```go block (gen.sh adds a trailing newline)
+	// the generated API is exactly the ```squark block (gen.sh adds a trailing newline)
 	doc := string(want)
-	start := strings.Index(doc, "```go\n")
+	start := strings.Index(doc, "```squark\n")
 	end := strings.LastIndex(doc, "```")
 	if start < 0 || end <= start {
-		t.Fatal("docs/stdlib.md has no ```go block")
+		t.Fatal("docs/stdlib.md has no ```squark block")
 	}
-	if block := doc[start+len("```go\n") : end]; strings.TrimRight(block, "\n") != strings.TrimRight(got, "\n") {
+	if block := doc[start+len("```squark\n") : end]; strings.TrimRight(block, "\n") != strings.TrimRight(got, "\n") {
 		t.Errorf("docs/stdlib.md is stale: run docs/gen.sh")
 	}
 }
@@ -195,9 +195,9 @@ func TestImports(t *testing.T) {
 			name: "suffix-alike dirs",
 			main: "app",
 			files: map[string]string{
-				"app/main.sq":    "package main\n\nimport (\n\t\"./mylib\"\n\t\"./lib\"\n\tl2 \"./lib\"\n)\n\nfunc main() { println(mylib.Name(), lib.Name(), l2.Name()) }\n",
-				"app/mylib/a.sq": "package mylib\n\nfunc Name() string { return \"mylib\" }\n",
-				"app/lib/a.sq":   "package lib\n\nfunc Name() string { return \"lib\" }\n",
+				"app/main.sq":    "program\n\nuse ./mylib, ./lib, ./lib as l2\n\nfn main() { println(mylib.name(), lib.name(), l2.name()) }\n",
+				"app/mylib/a.sq": "module mylib\n\npub fn name() -> str { return \"mylib\" }\n",
+				"app/lib/a.sq":   "module lib\n\npub fn name() -> str { return \"lib\" }\n",
 			},
 			want: "mylib lib lib\n",
 		},
@@ -205,9 +205,9 @@ func TestImports(t *testing.T) {
 			name: "parent dir and shared package",
 			main: "app",
 			files: map[string]string{
-				"app/main.sq": "package main\n\nimport (\n\t\"../util\"\n\t\"./b\"\n)\n\nfunc main() { b.Do(); util.Inc(); println(util.N) }\n",
-				"app/b/b.sq":  "package b\n\nimport \"../../util\"\n\nfunc Do() { util.Inc() }\n",
-				"util/u.sq":   "package util\n\nvar N int\n\nfunc Inc() { N++ }\n",
+				"app/main.sq": "program\n\nuse ../util, ./b\n\nfn main() { b.do(); util.inc(); println(util.n) }\n",
+				"app/b/b.sq":  "module b\n\nuse ../../util\n\npub fn do() { util.inc() }\n",
+				"util/u.sq":   "module util\n\npub thread n int\n\npub fn inc() { n++ }\n",
 			},
 			want: "2\n",
 		},
@@ -216,8 +216,8 @@ func TestImports(t *testing.T) {
 			main:  "app",
 			chdir: true,
 			files: map[string]string{
-				"app/main.sq":  "package main\n\nimport (\n\tmyio \"./io\"\n\t\"os\"\n)\n\nfunc main() { os.Stdout.WriteString(myio.Hello()) }\n",
-				"app/io/io.sq": "package io\n\nfunc Hello() string { return \"hi\\n\" }\n",
+				"app/main.sq":  "program\n\nuse ./io as myio, os\n\nfn main() { os.stdout.write_string(myio.hello()) }\n",
+				"app/io/io.sq": "module io\n\npub fn hello() -> str { return \"hi\\n\" }\n",
 			},
 			want: "hi\n",
 		},
@@ -225,10 +225,56 @@ func TestImports(t *testing.T) {
 			name: "duplicate import name",
 			main: "app",
 			files: map[string]string{
-				"app/main.sq":      "package main\n\nimport (\n\t\"strings\"\n\t\"./strings\"\n)\n\nfunc main() { println(strings.Contains(\"abc\", \"z\")) }\n",
-				"app/strings/s.sq": "package strings\n\nfunc Contains(a, b string) bool { return true }\n",
+				"app/main.sq":      "program\n\nuse strings, ./strings\n\nfn main() { println(strings.contains(\"abc\", \"z\")) }\n",
+				"app/strings/s.sq": "module strings\n\npub fn contains(a, b str) -> bool { return true }\n",
 			},
 			wantErr: `strings redeclared in this block (also imported from "strings")`,
+		},
+		{
+			name: "pub",
+			main: "app",
+			files: map[string]string{
+				"app/main.sq":  "program\n\nuse ./lib\n\nfn main() { p := lib.make_point(); println(p.x, lib.hidden()) }\n",
+				"app/lib/a.sq": "module lib\n\npub struct Point {\n\tpub x int\n\ty int\n}\n\npub fn make_point() -> Point { return Point{1, 2} }\n\nfn hidden() -> int { return 3 }\n",
+			},
+			wantErr: "lib.hidden is not pub",
+		},
+		{
+			name: "pub field",
+			main: "app",
+			files: map[string]string{
+				"app/main.sq":  "program\n\nuse ./lib\n\nfn main() { p := lib.make_point(); println(p.x, p.y) }\n",
+				"app/lib/a.sq": "module lib\n\npub struct Point {\n\tpub x int\n\ty int\n}\n\npub fn make_point() -> Point { return Point{1, 2} }\n",
+			},
+			wantErr: "cannot refer to field y: it isn't pub",
+		},
+		{
+			name: "pub enum",
+			main: "app",
+			files: map[string]string{
+				"app/main.sq":  "program\n\nuse ./lib\n\nfn main() { println(lib.Color.blue, lib.paint(lib.Color.red)) }\n",
+				"app/lib/a.sq": "module lib\n\npub enum Color { red, green, blue }\n\npub fn paint(c Color) -> int { return int(c) * 10 }\n",
+			},
+			want: "2 0\n",
+		},
+		{
+			name: "enum not pub",
+			main: "app",
+			files: map[string]string{
+				"app/main.sq":  "program\n\nuse ./lib\n\nfn main() { println(lib.Shade.dark) }\n",
+				"app/lib/a.sq": "module lib\n\nenum Shade { light, dark }\n",
+			},
+			wantErr: "lib.Shade is not pub",
+		},
+		{
+			name: "methods in another file",
+			main: "app",
+			files: map[string]string{
+				"app/main.sq":  "program\n\nuse ./lib\n\nfn main() { var c lib.Counter\n\tc.bump()\n\tc.bump()\n\tprintln(c.get(), lib.Dir.east.flip()) }\n",
+				"app/lib/a.sq": "module lib\n\npub struct Counter {\n\tn int\n}\n\nimpl Counter {\n\tpub fn get(self) -> int { return self.n }\n}\n\npub enum Dir { west, east }\n",
+				"app/lib/b.sq": "module lib\n\nimpl Counter {\n\tpub fn bump(&self) { self.n++ }\n}\n\nimpl Dir {\n\tpub fn flip(self) -> Dir { return Dir(1 - int(self)) }\n}\n",
+			},
+			want: "2 0\n",
 		},
 	}
 	for _, tc := range tests {
@@ -401,13 +447,13 @@ func TestSourceEncoding(t *testing.T) {
 		}
 		return dir
 	}
-	if err := Check(write("\xEF\xBB\xBFpackage main\n\nfunc main() {}\n")); err != nil {
+	if err := Check(write("\xEF\xBB\xBFprogram\n\nfn main() {}\n")); err != nil {
 		t.Errorf("BOM: %v", err)
 	}
 	for _, src := range []string{
-		"package main\n\nfunc main() { s := \"\xff\"; println(s) }\n",
-		"package main\n\nfunc main() { s := `\xff`; println(s) }\n",
-		"package main\n\n// \xff\nfunc main() {}\n",
+		"program\n\nfn main() { s := \"\xff\"; println(s) }\n",
+		"program\n\nfn main() { s := `\xff`; println(s) }\n",
+		"program\n\n// \xff\nfn main() {}\n",
 	} {
 		err := Check(write(src))
 		if err == nil || !strings.Contains(err.Error(), "invalid UTF-8 encoding") {
@@ -419,17 +465,17 @@ func TestSourceEncoding(t *testing.T) {
 // TestShortWrite: a write that stops early (here: file size limit) reports an error.
 func TestShortWrite(t *testing.T) {
 	dir := t.TempDir()
-	src := `package main
+	src := `program
 
-import "os"
+use os
 
-var big [1M]byte
+thread big u8[1M]
 
-func main() {
-	n, err := os.Stdout.WriteString(string(big[:]))
-	if err != nil && n < len(big) {
-		os.Stderr.WriteString("WriteString: ")
-		os.Stderr.WriteString(err.Error())
+fn main() {
+	n, err := os.stdout.write_string(str(big[:]))
+	if err != nil and n < len(big) {
+		os.stderr.write_string("WriteString: ")
+		os.stderr.write_string(err.message())
 	}
 }
 `
@@ -452,24 +498,21 @@ func main() {
 // TestStdinDoesNotBlock: a goroutine waiting on an idle stdin pipe parks alone; others keep running.
 func TestStdinDoesNotBlock(t *testing.T) {
 	dir := t.TempDir()
-	src := `package main
+	src := `program
 
-import (
-	"os"
-	"time"
-)
+use os, time
 
-var buf [64]byte
+thread buf u8[64]
 
 task reader() pool 1 {
-	n, _ := os.Stdin.Read(buf[:])
+	n, _ := os.stdin.read(buf[:])
 	println("read", n)
 }
 
-func main() {
-	go reader()
-	for i := range 3 {
-		time.Sleep(20 * time.Millisecond)
+fn main() {
+	start reader()
+	for i in 0..3 {
+		time.sleep(20 * time.millisecond)
 		println("tick", i)
 	}
 }
@@ -508,7 +551,7 @@ func main() {
 // TestBudget: static data counts against the declared budget, and unreadable sizes are an error.
 func TestBudget(t *testing.T) {
 	dir := t.TempDir()
-	src := "package main\n\nimport \"os\"\n\nbudget 16M\n\nvar big [64 << 20]byte\n\nfunc main() {\n\tbig[os.NArgs()*1000] = 1\n\tprintln(big[os.NArgs()*999])\n}\n"
+	src := "program {\n\tbudget 16M\n}\n\nuse os\n\nthread big u8[64 << 20]\n\nfn main() {\n\tbig[os.n_args()*1000] = 1\n\tprintln(big[os.n_args()*999])\n}\n"
 	if err := os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +564,7 @@ func TestBudget(t *testing.T) {
 	}
 
 	// with workers N everything but code counts N times: 6 MiB fits a 16 MiB budget, 4 workers don't
-	src = "package main\n\nimport \"os\"\n\nbudget 16M\nworkers WORKERS\n\nvar big [6 << 20]byte\n\nfunc main() {\n\tbig[os.NArgs()*1000] = 1\n\tprintln(big[os.NArgs()*999])\n}\n"
+	src = "program {\n\tbudget 16M\n\tworkers WORKERS\n}\n\nuse os\n\nthread big u8[6 << 20]\n\nfn main() {\n\tbig[os.n_args()*1000] = 1\n\tprintln(big[os.n_args()*999])\n}\n"
 	for _, tc := range []struct {
 		workers string
 		fits    bool
@@ -541,8 +584,8 @@ func TestBudget(t *testing.T) {
 func TestPackageC(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
-		"app/main.sq":      "package main\n\nimport \"./util\"\n\nfunc main() { println(util.Add(1, 2)) }\n",
-		"app/util/util.sq": "package util\n\nextern \"util_add\" func Add(a, b int) int stack 1K\n",
+		"app/main.sq":      "program\n\nuse ./util\n\nfn main() { println(util.add(1, 2)) }\n",
+		"app/util/util.sq": "module util\n\npub extern fn add(a, b int) -> int stack 1K c\"util_add\"\n",
 		"app/util/shim.h":  "#include <stdint.h>\n#define SHIM_BIAS 100\n",
 		"app/util/shim.c":  "#include \"shim.h\"\nint64_t util_add(int64_t a, int64_t b) { return a + b + SHIM_BIAS; }\n",
 	}
@@ -577,7 +620,7 @@ func TestPackageC(t *testing.T) {
 // (TestErrors compares lines only).
 func TestErrorPositions(t *testing.T) {
 	dir := t.TempDir()
-	src := "package main\n\nfunc f() (int, int) { return 1, 2 }\n\nfunc main() {\n\taaaa, bbbb, cccc := f()\n\tprintln(aaaa, bbbb, cccc)\n}\n"
+	src := "program\n\nfn f() -> (int, int) { return 1, 2 }\n\nfn main() {\n\taaaa, bbbb, cccc := f()\n\tprintln(aaaa, bbbb, cccc)\n}\n"
 	if err := os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +634,7 @@ func TestDocUnknownPackage(t *testing.T) {
 	if _, err := Doc("std", "nosuchpkg"); err == nil || !strings.Contains(err.Error(), "no package nosuchpkg") {
 		t.Errorf("got %v", err)
 	}
-	if out, err := Doc("std", "strings"); err != nil || !strings.Contains(out, "package strings") {
+	if out, err := Doc("std", "strings"); err != nil || !strings.Contains(out, "module strings") {
 		t.Errorf("strings: %v", err)
 	}
 }
@@ -688,37 +731,33 @@ func TestNotes(t *testing.T) {
 // from an unrelated wait (here time.Sleep). On Linux the epoll registration has to be disarmed.
 func TestStaleFdEvent(t *testing.T) {
 	dir := t.TempDir()
-	src := `package main
+	src := `program
 
-import (
-	"net"
-	"os"
-	"time"
-)
+use net, os, time
 
 task writer(c net.Conn) pool 1 {
-	time.Sleep(100 * time.Millisecond)
-	c.WriteString("x")
+	time.sleep(100 * time.millisecond)
+	c.write_string("x")
 }
 
-func main() {
-	l, err := net.Listen(os.Arg(1))
+fn main() {
+	l, err := net.listen(os.arg(1))
 	if err != nil {
 		panic(err)
 	}
-	client, err := net.Dial(os.Arg(1))
+	client, err := net.dial(os.arg(1))
 	if err != nil {
 		panic(err)
 	}
-	server, err := l.Accept()
+	server, err := l.accept()
 	if err != nil {
 		panic(err)
 	}
-	println(server.WaitReadable(30 * time.Millisecond))
-	go writer(client)
-	start := time.Now()
-	time.Sleep(400 * time.Millisecond)
-	println(time.Since(start) >= 390*time.Millisecond)
+	println(server.wait_readable(30 * time.millisecond))
+	start writer(client)
+	start := time.now()
+	time.sleep(400 * time.millisecond)
+	println(time.since(start) >= 390*time.millisecond)
 }
 `
 	if err := os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644); err != nil {
@@ -774,7 +813,7 @@ func noHeapRun(t *testing.T, dir, lib, env string, src []byte, threads int) {
 	pdir := filepath.Join(dir, fmt.Sprintf("prog%d", threads))
 	os.MkdirAll(pdir, 0o755)
 	os.WriteFile(filepath.Join(pdir, "main.sq"), src, 0o644)
-	os.WriteFile(filepath.Join(pdir, "threads.sq"), []byte(fmt.Sprintf("package main\n\nthreads %d\n", threads)), 0o644)
+	os.WriteFile(filepath.Join(pdir, "threads.sq"), []byte(fmt.Sprintf("program {\n\tthreads %d\n}\n", threads)), 0o644)
 	bin := filepath.Join(pdir, "prog")
 	if _, err := Build(Options{Dir: pdir, Output: bin}); err != nil {
 		t.Fatal(err)
@@ -1221,7 +1260,7 @@ func TestThreadsEnv(t *testing.T) {
 		t.Helper()
 		d := filepath.Join(dir, name)
 		os.MkdirAll(d, 0o755)
-		src := "package main\n\nimport \"runtime\"\n\n" + directives + "\n\nfunc main() {\n\tif runtime.Shard() == 0 {\n\t\tprintln(runtime.Shards())\n\t}\n}\n"
+		src := "program {\n" + directives + "\n}\n\nuse runtime\n\nfn main() {\n\tif runtime.shard() == 0 {\n\t\tprintln(runtime.shards())\n\t}\n}\n"
 		os.WriteFile(filepath.Join(d, "main.sq"), []byte(src), 0o644)
 		bin := filepath.Join(d, "prog")
 		if _, err := Build(Options{Dir: d, Output: bin}); err != nil {
@@ -1258,40 +1297,6 @@ func TestThreadsEnv(t *testing.T) {
 	}
 	if got, warn := run(build("budget", "budget 512M\nthreads 2"), "5"); got != "2" || !strings.Contains(warn, "memory budget was proven for") {
 		t.Errorf("threads 2 with a budget, SQUARK_THREADS=5: %s threads, stderr %q", got, warn)
-	}
-}
-
-// TestPerThreadNote: with threads, the front end lists the package variables each scheduler thread
-// has its own copy of and the program changes (testdata/perthread says which should be listed).
-func TestPerThreadNote(t *testing.T) {
-	note, err := CheckNotes("../../testdata/perthread")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"stats: changed by method bump in main",
-		"jobs: sent on in main (a channel",
-		"seen: passed to a function in main (a map",
-		"cell: address taken in main",
-		"buf: sliced (a writable view) in main",
-		"Total: written in Add",
-		"vec: sliced (a writable view) in main",
-		"aliased: aliased in main",
-	} {
-		if !strings.Contains(note, want) {
-			t.Errorf("note lacks %q:\n%s", want, note)
-		}
-	}
-	for _, not := range []string{"limit", "thread:", "mine", "all:", "strings"} {
-		if strings.Contains(note, not) {
-			t.Errorf("note lists %q:\n%s", not, note)
-		}
-	}
-	// without a threads directive there is one copy of everything: no note
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.sq"), []byte("package main\n\nvar n int\n\nfunc main() {\n\tn++\n\tprintln(n)\n}\n"), 0o644)
-	if note, err := CheckNotes(dir); err != nil || note != "" {
-		t.Errorf("no threads: note %q, err %v", note, err)
 	}
 }
 
@@ -1334,7 +1339,7 @@ func TestBlocking(t *testing.T) {
 		}
 	}
 	run("one", "", 1)
-	os.WriteFile(filepath.Join(dir, "threads.sq"), []byte("package main\n\nthreads 4\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "threads.sq"), []byte("program {\n\tthreads 4\n}\n"), 0o644)
 	run("four", "", 4)
 	if !testing.Short() {
 		run("race", "thread", 4)
@@ -1443,7 +1448,7 @@ func TestDetach(t *testing.T) {
 		}
 	}
 	run("one", "", 1)
-	os.WriteFile(filepath.Join(dir, "threads.sq"), []byte("package main\n\nthreads 4\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "threads.sq"), []byte("program {\n\tthreads 4\n}\n"), 0o644)
 	run("four", "", 4)
 	if !testing.Short() {
 		run("race", "thread", 4)
@@ -1493,7 +1498,7 @@ func TestPreempt(t *testing.T) {
 	}
 	alone := filepath.Join(dir, "alone")
 	os.MkdirAll(alone, 0o755)
-	os.WriteFile(filepath.Join(alone, "main.sq"), []byte("package main\n\nimport \"time\"\n\nfunc main() {\n\tstart := time.Now()\n\tn := 0\n\tfor time.Since(start).Milliseconds() < 150 {\n\t\tn++\n\t}\n\tprintln(n > 0)\n}\n"), 0o644)
+	os.WriteFile(filepath.Join(alone, "main.sq"), []byte("program\n\nuse time\n\nfn main() {\n\tstart := time.now()\n\tn := 0\n\twhile time.since(start).milliseconds() < 150 {\n\t\tn++\n\t}\n\tprintln(n > 0)\n}\n"), 0o644)
 	if out, errs := run(alone, "aloneprog", ""); out != "true\n" || errs != "" {
 		t.Errorf("a goroutine running alone: output %q, stderr %q (want no warning)", out, errs)
 	}
@@ -1503,13 +1508,13 @@ func TestPreempt(t *testing.T) {
 // shared var as a const with its initializer).
 func TestDocVarKinds(t *testing.T) {
 	dir := t.TempDir()
-	src := "package main\n\nshared var Table = makeTable()\nshared var Jobs chan int cap 4\nthread var Hits int\nvar Plain int\n\nfunc makeTable() [4]int { return [4]int{1, 2, 3, 4} }\n\nfunc main() {}\n"
+	src := "program\n\nshared table = make_table()\nshared jobs int chan[4]\nthread hits int\n\nfn make_table() -> int[4] { return int[4]{1, 2, 3, 4} }\n\nfn main() {}\n"
 	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
 	out, err := Doc(dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"shared var Table [4]int", "shared var Jobs chan int cap 4", "thread var Hits int", "var Plain int"} {
+	for _, want := range []string{"shared table int[4]", "shared jobs int chan[4]", "thread hits int"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doc lacks %q:\n%s", want, out)
 		}

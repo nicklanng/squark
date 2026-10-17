@@ -1,0 +1,7 @@
+program
+
+Point: struct { // ERROR "a struct type is declared struct Point { ... }"
+	x int
+}
+
+fn main() {}

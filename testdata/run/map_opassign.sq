@@ -1,10 +1,10 @@
-package main
+program
 
 // m[k] op= v evaluates v before the entry for k exists
 
-var m map[string]int cap 8
+thread m int[str; 8]
 
-func main() {
+fn main() {
 	m["a"] += len(m)
 	m["b"] += len(m) * 10
 	m["c"] <<= len(m)

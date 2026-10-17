@@ -1,8 +1,8 @@
-package main
+program
 
-var ptrs chan *int cap 1
+thread ptrs *int chan[1]
 
-func main() {
+fn main() {
 	x := 1
 	select {
 	case ptrs <- &x: // ERROR "sent on a channel"

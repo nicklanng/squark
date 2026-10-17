@@ -1,17 +1,14 @@
 // math/rand: fixed seeds give fixed sequences (checked against a Go port of xoshiro256** seeded by
 // splitmix64), Intn stays in bounds without bias, Float64 stays in [0, 1), Perm and Shuffle
 // permute, and the per-thread generator works without a seed.
-package main
+program
 
-import (
-	"math/rand"
-	"strconv"
-)
+use math/rand, strconv
 
-func isPerm(p []int) bool {
-	var seen [64]bool
-	for _, v := range p {
-		if v < 0 || v >= len(p) || seen[v] {
+fn is_perm(p int[]) -> bool {
+	var seen bool[64]
+	for v in p {
+		if v < 0 or v >= len(p) or seen[v] {
 			return false
 		}
 		seen[v] = true
@@ -19,62 +16,62 @@ func isPerm(p []int) bool {
 	return true
 }
 
-func main() {
-	r := rand.New(1)
+fn main() {
+	r := rand.new(1)
 	for i := 0; i < 4; i++ {
-		println("uint64:", r.Uint64())
+		println("uint64:", r.uint64())
 	}
-	z := rand.New(0)
-	println("seed 0:", z.Uint64())
+	z := rand.new(0)
+	println("seed 0:", z.uint64())
 
-	r = rand.New(42)
-	println("int63:", r.Int63(), "int:", r.Int())
-	ns := [7]int{1, 2, 6, 1000, 1024, 1 << 40, 3 << 61}
-	for _, n := range ns {
-		println("intn", n, r.Intn(n))
+	r = rand.new(42)
+	println("int63:", r.int63(), "int:", r.next())
+	ns := int[7]{1, 2, 6, 1000, 1024, 1 << 40, 3 << 61}
+	for n in ns {
+		println("intn", n, r.intn(n))
 	}
-	var buf [32]byte
+	var buf u8[32]
 	for i := 0; i < 3; i++ {
-		println("float64:", string(strconv.AppendFloat(buf[:0], r.Float64(), -1)))
+		println("float64:", str(strconv.append_float(buf[:0], r.float64(), -1)))
 	}
-	var p [10]int
-	pv := r.Perm(p[:])
+	var p int[10]
+	pv := r.perm(p[:])
 	print("perm:")
-	for _, v := range pv {
+	for v in pv {
 		print(" ", v)
 	}
 	println()
-	letters := [8]string{"a", "b", "c", "d", "e", "f", "g", "h"}
-	r.Shuffle(letters[:])
+	letters := str[8]{"a", "b", "c", "d", "e", "f", "g", "h"}
+	r.shuffle(letters[:])
 	print("shuffle:")
-	for _, s := range letters {
+	for s in letters {
 		print(" ", s)
 	}
 	println()
-	var v [..5]int
-	v.Append([]int{10, 20, 30, 40, 50})
-	r.Shuffle(v[:])
+	var v int[..5]
+	v.append(int[]{10, 20, 30, 40, 50})
+	r.shuffle(v[:])
 	print("shuffle vector:")
-	for _, x := range v {
+	for x in v {
 		print(" ", x)
 	}
 	println()
 
 	// a copy carries on from the same point
 	c := r
-	println("copy repeats:", c.Uint64() == r.Uint64(), c.Intn(1000) == r.Intn(1000))
+	println("copy repeats:", c.uint64() == r.uint64(), c.intn(1000) == r.intn(1000))
 
 	// a fair die: 60000 rolls, each face within 3% of 10000
-	r = rand.New(7)
-	var faces [6]int
+	r = rand.new(7)
+	var faces int[6]
 	for i := 0; i < 60000; i++ {
-		faces[r.Intn(6)]++
+		faces[r.intn(6)]++
 	}
 	print("faces:")
 	fair := true
-	for _, n := range faces {
+	for n in faces {
 		print(" ", n)
-		fair = fair && n > 9700 && n < 10300
+		fair = fair and n > 9700 and n < 10300
 	}
 	println()
 	println("fair:", fair)
@@ -83,8 +80,8 @@ func main() {
 	const big = 3 << 61
 	low, high := 0, 0
 	for i := 0; i < 10000; i++ {
-		x := r.Intn(big)
-		if x < 0 || x >= big {
+		x := r.intn(big)
+		if x < 0 or x >= big {
 			println("out of range:", x)
 		}
 		if x < big/2 {
@@ -98,8 +95,8 @@ func main() {
 	// Float64: in [0, 1), mean near 1/2
 	lo, hi, sum := 1.0, 0.0, 0.0
 	for i := 0; i < 100000; i++ {
-		f := r.Float64()
-		if f < 0 || f >= 1 {
+		f := r.float64()
+		if f < 0 or f >= 1 {
 			println("float out of range")
 		}
 		lo = min(lo, f)
@@ -108,28 +105,28 @@ func main() {
 	}
 	mean := sum / 100000
 	println("float64 range ok:", lo < 0.0001, hi > 0.9999,
-		"mean near 1/2:", mean > 0.495 && mean < 0.505)
+		"mean near 1/2:", mean > 0.495 and mean < 0.505)
 
 	// Perm is a permutation for every length, 0 included
 	ok := true
-	var q [64]int
+	var q int[64]
 	for n := 0; n <= 64; n++ {
-		ok = ok && isPerm(r.Perm(q[:n]))
+		ok = ok and is_perm(r.perm(q[:n]))
 	}
 	println("perms ok:", ok)
 
 	// the per-thread generator seeds itself; its values vary from run to run, so check bounds only
-	inBounds := true
+	in_bounds := true
 	for i := 0; i < 1000; i++ {
-		x := rand.Intn(10)
-		f := rand.Float64()
-		inBounds = inBounds && x >= 0 && x < 10 && f >= 0 && f < 1 && rand.Int() >= 0 && rand.Int63() >= 0
+		x := rand.intn(10)
+		f := rand.float64()
+		in_bounds = in_bounds and x >= 0 and x < 10 and f >= 0 and f < 1 and rand.next() >= 0 and rand.int63() >= 0
 	}
-	println("package-level in bounds:", inBounds, "varies:", rand.Uint64() != rand.Uint64())
-	println("package-level perm ok:", isPerm(rand.Perm(q[:20])))
-	rand.Shuffle(letters[:])
+	println("package-level in bounds:", in_bounds, "varies:", rand.uint64() != rand.uint64())
+	println("package-level perm ok:", is_perm(rand.perm(q[:20])))
+	rand.shuffle(letters[:])
 	n := 0
-	for _, s := range letters {
+	for s in letters {
 		n += len(s)
 	}
 	println("package-level shuffle kept", n, "letters")

@@ -949,6 +949,136 @@ Not bugs: things the examples had to hand-write. Each is a small, self-contained
   `RowsAffected` while holding the connection, and resets; notes' insert and delete use it; test:
   `testdata/run/sqlite_exec.sq`, TestNotes
 
+## Q: found writing doxasq (2026-10-17)
+
+Found porting the doxa library to squark (`../doxasq`). doxasq works around each; the repros are
+self-contained.
+
+- [x] **Q1. Returning `nil` pins a result's deeper pointer levels to static memory** (bug: a
+  false positive that grows with each call layer) — fixed: `vecOf1` gives `nil` no vector, so it
+  constrains no level; test: `testdata/run/nil_result_lifetime.sq` (functions and methods)
+  `internal/compiler/lifetime.go:821`: `nil` is an `Ident` that isn't a variable, so `vecOf1`
+  gives it `rodataVec()`, whose levels 1 and up are `l.static`. `return nil` assigns it to the
+  result, and `assign` makes every level below 0 *equal*, so the result's deeper levels become
+  static. The function's own callers are unaffected, but a function that passes its result on
+  inherits "keeps argument N in static memory" for any arena whose allocations reach those levels:
+  ```squark
+  program
+
+  struct V {
+  	s str
+  }
+
+  fn all(a arena, src str, n int) -> V[] {
+  	if n == 0 {
+  		return nil
+  	}
+  	out := make(V[], n) in a
+  	out[0] = V{s: str(src) in a}
+  	return out
+  }
+
+  fn wrap(a arena, src str, n int) -> V[] { return all(a, src, n) }
+
+  fn main() {
+  	with arena q 1K {
+  		println(all(q, "x", 1)[0].s)  // accepted
+  		println(wrap(q, "x", 1)[0].s) // "wrap keeps argument 1 in static memory"
+  	}
+  }
+  ```
+  Without the `return nil` (or with `return make(V[], 0) in a`), both calls are accepted, as they
+  should be: `nil` refers to nothing, so it should constrain no level. Likely fix: give `nil` no
+  vector (`return nil` from `vecOf1`, so `assign` skips it). doxasq returns empty arena slices
+  instead (`doxa/query.sq`, `told.sq`, `truth.sq`).
+- [x] **Q2. "keeps its receiver in static memory" names the receiver for a result** (bug: wrong
+  message) — fixed: `describePos` names a result "its result" (or "result N"), for `Static` and
+  `Constant` positions; test: `testdata/errors/static_result_message.sq`
+  `applyCall` (`lifetime.go:1154`) describes each `Summary.Static` position with
+  `describeArg(p.Index, hasRecv)`, but `summarize` also puts *result* positions in `Static`
+  (Q1's), so a method's result 0 is reported as "its receiver". It should say the result: "kb.all
+  returns a reference to static memory" or similar.
+- [x] **Q3. `var v T[..N]` zeroes all N elements** (perf) — fixed: `declStmt` declares a plain
+  vector local without an initializer and sets only `len`; two 256-element vectors passed to a
+  helper went from 224 ns to 10 ns a call; test: `testdata/run/vector_decl_len.sq`
+  A vector's storage past `len` is unobservable (indexing is checked against `len`, `v[:]` has
+  `len == cap == len(v)`, vectors aren't comparable), so a declaration need only set `len = 0`,
+  but the C is `sq_vecN v = (sq_vecN){}`, a memset of the whole array. doxa's queries declared
+  9 KiB of vectors each (room for 256 pieces of evidence) and spent half their time zeroing them:
+  a belief query took 116 ns, 50 ns with 32-element vectors. doxasq now keeps its buffers in the KB
+  instead. Worth doing for locals that are plain vectors (not structs or arrays holding them);
+  `T[..N]{...}` literals still need their elements set.
+
+- [x] **Q4. Storing into one field ties the struct's other fields' deeper levels** (bug: a false
+  positive, found by doxasq's world benchmark) — fixed: `store` relates only the levels the
+  target's type has (`assign` takes shorter vectors); tests: `testdata/run/field_levels.sq`,
+  `testdata/errors/field_levels_escape.sq` (real escapes through fields still caught)
+  A struct's fields share levels, and `store` equated every level below 0 of the value with the
+  target's, including levels the field's type doesn't have. Storing a package arena's `int[]` in
+  one field (its levels 1..3 are static, from `alloc`) made the deeper levels of a sibling field
+  static, so a stack arena reaching them through another field was rejected:
+  ```squark
+  struct Node { ns int[] }
+  struct S { mem arena; node *Node; xs int[] }
+  arena pkg 1K
+  fn new_node(a arena) -> *Node { n := new(Node) in a; n.ns = make(int[], 0, 4) in a; return n }
+  fn fill(s *S) {
+  	s.node = new_node(s.mem)
+  	s.xs = make(int[], 0, 4) in pkg   // "fill keeps argument 1 in static memory" at the call
+  }
+  fn main() { with arena a 1K { var s S; s.mem = a; fill(&s) } }
+  ```
+- [ ] **Q5. Very large `with arena` frames: made resident on entry, and miscompiled from 4 GiB**
+  (bug, macOS/arm64; the residency also applies on Linux)
+  A `with arena x N` is N bytes of the enclosing C frame. Large frames are probed page by page on
+  entry, by clang's `___chkstk_darwin` on macOS and by `-fstack-clash-protection` on Linux
+  (`driver.go:224`), so the whole arena becomes resident at once whether it is used or not:
+  `with arena x 3G` around a 1000-element allocation has an RSS of 1.8 GB. On arm64 macOS clang
+  also passes the frame size to `___chkstk_darwin` in `w9`, a 32-bit register, so a frame of 4 GiB
+  or more is probed (and, at an exact multiple of 4 GiB, laid out) modulo 4 GiB: a 12G arena in a
+  `//squark:noinline` function panics with a nil dereference after use. Repro:
+  ```squark
+  //squark:noinline
+  fn fill(a arena, n int) -> int { s := make(int[], n) in a; s[n-1] = 1; return s[n-1] }
+  //squark:noinline
+  fn run() -> int { with arena x 12G { return fill(x, 1000) } }
+  fn main() { println(run()) }   // 3G: RSS 1.8 GB; 12G: panic
+  ```
+  `-fno-stack-check` (macOS) removes the probe for prog.c and clang then lays out a 12G frame
+  correctly; squark's own frames are proven to fit their stacks, so probing them only guards
+  against a wrong proof. Options: (a) drop the probes for prog.c only, keeping them for C shims
+  (their `stack N` budget is a promise the guard page checks); (b) reject frames over 4 GiB at
+  compile time and document the residency; (c) give large `with arena` blocks storage outside the
+  stack (an mmap'd region per entry, lazily backed). Needs a decision.
+- [ ] **Q6. A package arena over about 2 GiB can't start on macOS** (bug, macOS/arm64)
+  `arena big 3G` (or two of 1500M) puts the static data across 0x180000000, where dyld maps the
+  shared cache: the program dies before `main` with `dyld cache '(null)' not loaded: syscall to map
+  cache into shared region failed` and then cannot load libSystem. 1900M works. Options: map
+  package arenas over some size at start-up (`mmap` with no backing until touched, before any
+  initializer runs) instead of putting them in `__bss`; or link `__DATA` above the shared region.
+  The budget would count them as now. Needs a decision.
+
+- [x] **Q7. A self-containing struct in a `shared` variable crashed the compiler** (bug: compiler
+  crash, found by `TestFuzzSoundness` while checking Q4) — fixed: `checkSharedType` and
+  `containsChan` keep a set of the types they are inside; test: `testdata/errors/shared_recursive.sq`
+  `struct Pair { in Msg chan[4]; id Pair }` is reported as an invalid recursive type, but checking
+  goes on, and `checkSharedType` (`checker.go`) walked into `shared pairs Pair[2]`'s fields for ever
+  (a Go stack overflow). `containsChan` (`types.go`) had the same unguarded walk, hidden only when
+  the channel field comes first.
+
+- [x] **Q8. Two loop variables over an integer crashed the compiler** (bug: compiler crash, found
+  by `TestFuzzSoundness` while checking Q7) — fixed: `storageInSeen` returns nil for a nil type;
+  test: `testdata/errors/range_int_two_vars.sq`
+  `for k, v in 5 { }` reports "permits only one loop variable" and goes on, and `rangeStmt` then
+  asked `storageIn` about the second variable's type, which is nil: a nil dereference.
+- [ ] **Q9. `squark doc` shows a function with `anytype` parameters as `in static`** (bug: wrong
+  doc output)
+  doxa's `KB.believers(a arena, ..., v anytype) -> Entity[]` prints `-> doxa.Entity[] in static`
+  and `Knowledge.hypothesis(v anytype)` `in static`, though the checker treats each instance
+  correctly (calls with a stack arena are accepted, and keeping their results too long is
+  rejected). The doc is printed from the template, which is never analysed. It should show the
+  provenance of an instance, or none.
+
 ## Progress log
 
 Append one line per work session: date, items closed, anything left half-done.
@@ -983,3 +1113,9 @@ Append one line per work session: date, items closed, anything left half-done.
 - 2026-10-16: section S closed (S1–S10): new packages `flag` and `math/rand`, plus `net.WithTimeout`/`AppendHostPort`, `json` TextMax/SetIndent, `sqlite` Stmt.Exec, padding helpers; examples use them. Done in parallel worktrees and merged.
 - 2026-10-16: Z7 (untyped bool from a comparison converted to any type) found by the fuzzer while
   adding SIMD types on the `simd` branch; fixed there.
+- 2026-10-17: section Q logged (Q1-Q3) while porting doxa to squark (`../doxasq`), and closed the
+  same day: `go test ./internal/...` and `SQUARK_FUZZ=5000` TestFuzzSoundness pass. Nothing
+  committed.
+- 2026-10-17: Q4 (field levels), Q7 and Q8 (two compiler crashes the fuzzer found) fixed; Q5, Q6
+  (very large arenas on macOS) and Q9 (doc output) open. `go test ./internal/...` and
+  `SQUARK_FUZZ=5000` pass. Nothing committed.

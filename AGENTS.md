@@ -1,9 +1,10 @@
 # Writing squark
 
-squark is a Go-shaped language without a heap. Before writing or changing `.sq` code, read:
+squark is a language without a heap; it grew out of Go and keeps Go's semantics, but its syntax is
+its own (do not write Go syntax). Before writing or changing `.sq` code, read:
 
-- `docs/spec.md`: the language reference. It covers how squark differs from Go, the memory rules,
-  and a table of compiler errors with their fixes.
+- `docs/spec.md`: the language reference. It covers the syntax, the memory rules, and a table of
+  compiler errors with their fixes.
 - `docs/stdlib.md`: the standard library API with reference provenance (generated; don't edit by
   hand, run `docs/gen.sh`).
 

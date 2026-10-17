@@ -35,20 +35,20 @@ func TestRunASan(t *testing.T) {
 
 // danglingProg keeps a pointer into a returned frame. rawptr bypasses the lifetime checker, so it
 // compiles; BODY runs in main or in a task, to cover the main stack and a goroutine's.
-const danglingProg = `package main
+const danglingProg = `program
 
-import "runtime"
+use runtime
 
 //squark:noinline
-func leak() *int {
+fn leak() -> *int {
 	x := 1234
 	return (*int)(rawptr(&x))
 }
 
 //squark:noinline
-func clobber() int {
-	var junk [64]int
-	for i := range 64 {
+fn clobber() -> int {
+	var junk int[64]
+	for i in 0..64 {
 		junk[i] = -1
 	}
 	return junk[7]
@@ -59,7 +59,7 @@ task t() pool 1 {
 	println(clobber(), *p)
 }
 
-func main() {
+fn main() {
 MAIN}
 `
 
@@ -67,8 +67,8 @@ MAIN}
 func TestASanCatchesDangling(t *testing.T) {
 	needClangASan(t)
 	for where, body := range map[string]string{
-		"main": "\tp := leak()\n\tprintln(clobber(), *p)\n\truntime.Gosched()\n",
-		"task": "\tgo t()\n\truntime.Gosched()\n",
+		"main": "\tp := leak()\n\tprintln(clobber(), *p)\n\truntime.gosched()\n",
+		"task": "\tstart t()\n\truntime.gosched()\n",
 	} {
 		t.Run(where, func(t *testing.T) {
 			dir := t.TempDir()

@@ -1,45 +1,45 @@
-package main
+program
 
 // json.Decoder follows the JSON grammar: numbers (no leading zeros; a fraction or exponent is not
 // an Int), literals that end at a delimiter, and Skip rejects what isn't a value.
 
-import "json"
+use json
 
-var src [128]byte
+thread src u8[128]
 
-func try1(doc string) {
+fn try1(doc str) {
 	n := copy(src[:], doc)
-	d := json.NewDecoder(src[:n])
-	var key [16]byte
-	d.BeginObject()
-	for {
-		k, ok := d.Field(key[:])
-		if !ok {
+	d := json.new_decoder(src[:n])
+	var key u8[16]
+	d.begin_object()
+	loop {
+		k, ok := d.field(key[:])
+		if not ok {
 			break
 		}
 		switch k {
 		case "n":
-			v, _ := d.Int()
+			v, _ := d.int()
 			print("n=", v, " ")
 		case "b":
-			v, _ := d.Bool()
+			v, _ := d.bool()
 			print("b=", v, " ")
 		case "z":
-			print("null=", d.Null(), " ")
+			print("null=", d.null(), " ")
 		default:
-			d.Skip()
+			d.skip()
 		}
 	}
-	end := d.End()
+	end := d.end()
 	print(doc, " -> end=", end, " err=")
-	if d.Err != nil {
-		println(d.Err.Error())
+	if d.err != nil {
+		println(d.err.message())
 	} else {
 		println("nil")
 	}
 }
 
-func main() {
+fn main() {
 	try1(`{"n": 12, "b": true, "x": [1, -0.5e-3, {"y": null}, "s\\\"q"], "z": null}`)
 	try1(`{"n": -0, "b": false, "x": 0}`)
 	try1(`{"x": @@@}`)

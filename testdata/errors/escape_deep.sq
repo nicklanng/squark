@@ -1,23 +1,25 @@
-package main
+program
 
 // A linked list is deeper than the analysis tracks (4 pointer levels): the levels past the last
 // share its region, so a local stored 3 links down still can't reach a static node.
-type Node struct {
+struct Node {
 	next *Node
 	val  *int
 }
 
-var tail Node
+thread tail Node
 
-func (n *Node) setThird(p *int) { n.next.next.next.val = p }
+impl Node {
+	fn set_third(&self, p *int) { self.next.next.next.val = p }
+}
 
-func f() {
+fn f() {
 	x := 1234
 	var b, a, n Node
 	b.next = &tail // ERROR "cannot escape into static memory"
 	a.next = &b
 	n.next = &a
-	n.setThird(&x)
+	n.set_third(&x)
 }
 
-func main() { f() }
+fn main() { f() }

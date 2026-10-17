@@ -1,9 +1,9 @@
-package main
+program
 
 // constant folding must report errors, not crash the compiler
 
-func main() {
-	var x float64 = 2.0 / 0.0 // ERROR "division by zero"
+fn main() {
+	var x f64 = 2.0 / 0.0 // ERROR "division by zero"
 	y := 3.0
 	z := y / 0 // ERROR "division by zero"
 	a := "abc"[1.0] // ERROR "invalid index"

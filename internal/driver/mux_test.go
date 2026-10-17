@@ -178,9 +178,9 @@ func TestMuxBadPatterns(t *testing.T) {
 		t.Run(tc.want, func(t *testing.T) {
 			var regs strings.Builder
 			for _, p := range strings.Split(tc.patterns, ", ") {
-				regs.WriteString("\thttp.HandleFunc(" + p + ", h)\n")
+				regs.WriteString("\thttp.handle_func(" + p + ", h)\n")
 			}
-			src := "package main\n\nimport \"http\"\n\nfunc h(w *http.ResponseWriter, r *http.Request) {}\n\nfunc main() {\n" + regs.String() + "}\n"
+			src := "program\n\nuse http\n\nfn h(w *http.ResponseWriter, r *http.Request) {}\n\nfn main() {\n" + regs.String() + "}\n"
 			dir := t.TempDir()
 			os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
 			bin := filepath.Join(dir, "prog")

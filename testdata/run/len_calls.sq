@@ -1,20 +1,20 @@
-package main
+program
 
 // len and cap of a fixed-size operand still evaluate it when it calls a function or receives
 
-var calls int
+thread calls int
 
-func arr() [3]int     { calls++; return [3]int{} }
-func parr() *[4]int   { calls++; return nil }
-func vec() [..5]int   { calls++; var v [..5]int; return v }
+fn arr() -> int[3]     { calls++; return int[3]{} }
+fn parr() -> *(int[4])   { calls++; return nil }
+fn vec() -> int[..5]   { calls++; var v int[..5]; return v }
 
-const n = len([2]int{}) // still a constant
+const n = len(int[2]{}) // still a constant
 
-func main() {
-	var a [6]int
+fn main() {
+	var a int[6]
 	println(len(arr()), len(parr()), cap(vec()), calls)
 	println(len(a), cap(a), n)
-	var c chan [2]int cap 1
-	c <- [2]int{}
+	var c int[2] chan[1]
+	c <- int[2]{}
 	println(len(<-c), len(c))
 }

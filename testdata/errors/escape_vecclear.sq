@@ -1,11 +1,11 @@
-package main
+program
 
-var g *int
-var gv [..4]int
+thread g *int
+thread gv int[..4]
 
-func keep(p *int) *[..4]int { g = p; return &gv }
+fn keep(p *int) -> *(int[..4]) { g = p; return &gv }
 
-func main() {
+fn main() {
 	x := 1234
-	(*keep(&x)).Clear() // ERROR "cannot escape into static memory (keep keeps argument 1 in static memory)"
+	(*keep(&x)).clear() // ERROR "cannot escape into static memory (keep keeps argument 1 in static memory)"
 }

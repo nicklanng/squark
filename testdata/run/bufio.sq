@@ -1,27 +1,20 @@
-package main
+program
 
 // bufio.Reader reads lines from any source with a Read method (a file, a connection) through a
 // small buffer: CRLF, an empty line, a line too long for the buffer (skipped, reported once), a
 // last line without a newline, and lines split across reads.
 
-import (
-	"bufio"
-	"io"
-	"net"
-	"os"
-	"strconv"
-	"time"
-)
+use bufio, io, net, os, strconv, time
 
-func readAll(r *bufio.Reader, src anytype) {
-	for {
-		line, err := r.ReadLine(src)
+fn read_all(r *bufio.Reader, src anytype) {
+	loop {
+		line, err := r.read_line(src)
 		if err == io.EOF {
 			println("<eof>")
 			return
 		}
 		if err != nil {
-			print("<", err.Error(), ">\n")
+			print("<", err.message(), ">\n")
 			continue
 		}
 		print("[", line, "]\n")
@@ -29,31 +22,31 @@ func readAll(r *bufio.Reader, src anytype) {
 }
 
 task peer(l net.Listener) pool 1 {
-	c, _ := l.Accept()
-	c.WriteString("he")
-	time.Sleep(5 * time.Millisecond)
-	c.WriteString("llo\nwor")
-	time.Sleep(5 * time.Millisecond)
-	c.WriteString("ld\r\nbye")
-	c.Close()
+	c, _ := l.accept()
+	c.write_string("he")
+	time.sleep(5 * time.millisecond)
+	c.write_string("llo\nwor")
+	time.sleep(5 * time.millisecond)
+	c.write_string("ld\r\nbye")
+	c.close()
 }
 
-func main() {
+fn main() {
 	path := "/tmp/squark_bufio_test.txt"
-	f, _ := os.Create(path)
-	f.WriteString("first\r\n\nthis line is far too long for the buffer\nafter\nlast")
-	f.Close()
-	var store [16]byte
-	r := bufio.NewReader(store[:])
-	g, _ := os.Open(path)
-	readAll(&r, g)
-	g.Close()
+	f, _ := os.create(path)
+	f.write_string("first\r\n\nthis line is far too long for the buffer\nafter\nlast")
+	f.close()
+	var store u8[16]
+	r := bufio.new_reader(store[:])
+	g, _ := os.open(path)
+	read_all(&r, g)
+	g.close()
 
-	l, _ := net.Listen("127.0.0.1:0")
-	go peer(l)
-	var b [32]byte
-	c, _ := net.Dial(string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), l.Port())))
-	r2 := bufio.NewReader(store[:])
-	readAll(&r2, c)
-	c.Close()
+	l, _ := net.listen("127.0.0.1:0")
+	start peer(l)
+	var b u8[32]
+	c, _ := net.dial(str(strconv.append_int(append(b[:0], "127.0.0.1:"...), l.port())))
+	r2 := bufio.new_reader(store[:])
+	read_all(&r2, c)
+	c.close()
 }

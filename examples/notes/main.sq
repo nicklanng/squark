@@ -11,43 +11,38 @@
 // It shows:
 //   - requests served without a heap: buffers on the connection goroutine's proven stack
 //   - a memory budget the build checks, with the connection pool sized to fit it
-//   - http.HandleFunc routing, w.JSON() and a JSON request body decoded into r.Arena
+//   - http.handle_func routing, w.json() and a JSON request body decoded into r.arena
 //   - SQLite prepared statements (Exec to write, Step to read rows), one connection per
-//     scheduler thread (thread var)
-package main
+//     scheduler thread (thread)
+program {
+	budget 128M
+	pool http.serve_conn 512
+}
 
-import (
-	"flag"
-	"http"
-	"json"
-	"os"
-	"sqlite"
-)
+use flag, http, json, os, sqlite
 
 // At most 512 connections are served at once (more wait for a slot; idle keep-alive
 // connections don't count). That bounds the server's own worst-case memory.
-budget 128M
-pool http.serveConn 512
 
 const (
-	maxTitle = 200
-	maxBody  = 4000
+	max_title = 200
+	max_body  = 4000
 )
 
 const (
-	sqlPragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
-	sqlSchema  = "CREATE TABLE IF NOT EXISTS notes(" +
+	sql_pragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
+	sql_schema  = "CREATE TABLE IF NOT EXISTS notes(" +
 		"id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL)"
-	sqlInsert = "INSERT INTO notes(title, body) VALUES(?, ?)"
-	sqlGet    = "SELECT id, title, body FROM notes WHERE id = ?"
-	sqlList   = "SELECT id, title, body FROM notes ORDER BY id DESC LIMIT 100"
-	sqlDelete = "DELETE FROM notes WHERE id = ?"
+	sql_insert = "INSERT INTO notes(title, body) VALUES(?, ?)"
+	sql_get    = "SELECT id, title, body FROM notes WHERE id = ?"
+	sql_list   = "SELECT id, title, body FROM notes ORDER BY id DESC LIMIT 100"
+	sql_delete = "DELETE FROM notes WHERE id = ?"
 )
 
 // Store holds the connection and prepared statements. A statement holds the connection from its
-// first Bind or Step until Reset (hence `defer st.Reset()`; Exec does all three in one call), so
+// first Bind or Step until Reset (hence `defer st.reset()`; Exec does all three in one call), so
 // other requests that use it wait meanwhile: it is never used by two requests at once.
-type Store struct {
+struct Store {
 	db     sqlite.DB
 	insert sqlite.Stmt
 	get    sqlite.Stmt
@@ -55,61 +50,61 @@ type Store struct {
 	del    sqlite.Stmt
 }
 
-thread var store Store // each scheduler thread opens its own connection
+thread store Store // each scheduler thread opens its own connection
 
 // ---- store ----
 
-func openStore(path string) error {
-	db := try sqlite.Open(path)
-	try db.Exec(sqlPragmas)
-	try db.Exec(sqlSchema)
+fn open_store(path str) -> ! {
+	db := sqlite.open(path)!
+	db.exec(sql_pragmas)!
+	db.exec(sql_schema)!
 	store.db = db
-	store.insert = try db.Prepare(sqlInsert)
-	store.get = try db.Prepare(sqlGet)
-	store.list = try db.Prepare(sqlList)
-	store.del = try db.Prepare(sqlDelete)
+	store.insert = db.prepare(sql_insert)!
+	store.get = db.prepare(sql_get)!
+	store.list = db.prepare(sql_list)!
+	store.del = db.prepare(sql_delete)!
 	return nil
 }
 
 // ---- responses ----
 
 // fail answers with status and {"error": msg}.
-func fail(w *http.ResponseWriter, status int, msg string) {
-	w.WriteHeader(status)
-	j := w.JSON()
-	j.Object()
-	j.Key("error")
-	j.String(msg)
-	j.End()
+fn fail(w *http.ResponseWriter, status int, msg str) {
+	w.write_header(status)
+	j := w.json()
+	j.object()
+	j.key("error")
+	j.string(msg)
+	j.end()
 }
 
-func internalError(w *http.ResponseWriter, err error) {
-	println("error:", err.Error())
+fn internal_error(w *http.ResponseWriter, err error) {
+	println("error:", err.message())
 	fail(w, 500, "internal error")
 }
 
-// writeNote writes the current row of st as {"id":..,"title":..,"body":..}. The column text is
-// copied into buffers on this goroutine's stack, sized for the longest note createNote accepts.
-func writeNote(j *http.JSON, st sqlite.Stmt) error {
-	var title [maxTitle]byte
-	var body [maxBody]byte
-	t := try st.ColumnText(1, title[:])
-	b := try st.ColumnText(2, body[:])
-	j.Object()
-	j.Key("id")
-	j.Int(st.ColumnInt(0))
-	j.Key("title")
-	j.String(t)
-	j.Key("body")
-	j.String(b)
-	j.End()
+// write_note writes the current row of st as {"id":..,"title":..,"body":..}. The column text is
+// copied into buffers on this goroutine's stack, sized for the longest note create_note accepts.
+fn write_note(j *http.JSON, st sqlite.Stmt) -> ! {
+	var title u8[max_title]
+	var body u8[max_body]
+	t := st.column_text(1, title[:])!
+	b := st.column_text(2, body[:])!
+	j.object()
+	j.key("id")
+	j.int(st.column_int(0))
+	j.key("title")
+	j.string(t)
+	j.key("body")
+	j.string(b)
+	j.end()
 	return nil
 }
 
-// writeNotes writes each remaining row of st.
-func writeNotes(j *http.JSON, st sqlite.Stmt) error {
-	for try st.Step() {
-		try writeNote(j, st)
+// write_notes writes each remaining row of st.
+fn write_notes(j *http.JSON, st sqlite.Stmt) -> ! {
+	while st.step()! {
+		write_note(j, st)!
 	}
 	return nil
 }
@@ -117,119 +112,119 @@ func writeNotes(j *http.JSON, st sqlite.Stmt) error {
 // ---- handlers ----
 
 // GET /health
-func health(w *http.ResponseWriter, r *http.Request) { w.Text(200, "ok") }
+fn health(w *http.ResponseWriter, r *http.Request) { w.text(200, "ok") }
 
 // GET /notes: the newest 100 notes
-func listNotes(w *http.ResponseWriter, r *http.Request) {
+fn list_notes(w *http.ResponseWriter, r *http.Request) {
 	st := store.list
-	defer st.Reset()
-	j := w.JSON()
-	j.Array()
-	if err := writeNotes(j, st); err != nil {
-		internalError(w, err)
+	defer st.reset()
+	j := w.json()
+	j.array()
+	if err := write_notes(j, st); err != nil {
+		internal_error(w, err)
 		return
 	}
-	j.End()
+	j.end()
 }
 
 // GET /notes/{id}
-func getNote(w *http.ResponseWriter, r *http.Request) {
-	id, ok := r.PathInt("id")
-	if !ok {
+fn get_note(w *http.ResponseWriter, r *http.Request) {
+	id, ok := r.path_int("id")
+	if not ok {
 		fail(w, 404, "not found")
 		return
 	}
 	st := store.get
-	defer st.Reset()
-	st.BindInt(1, id)
-	row, err := st.Step()
+	defer st.reset()
+	st.bind_int(1, id)
+	row, err := st.step()
 	if err != nil {
-		internalError(w, err)
+		internal_error(w, err)
 		return
 	}
-	if !row {
+	if not row {
 		fail(w, 404, "not found")
 		return
 	}
-	if err := writeNote(w.JSON(), st); err != nil {
-		internalError(w, err)
+	if err := write_note(w.json(), st); err != nil {
+		internal_error(w, err)
 	}
 }
 
 // POST /notes {"title": "...", "body": "..."}
-func createNote(w *http.ResponseWriter, r *http.Request) {
+fn create_note(w *http.ResponseWriter, r *http.Request) {
 	title, body := "", ""
-	d := json.NewDecoderIn(r.Body, r.Arena) // decoded strings live in the request's arena
-	if !d.BeginObject() {
+	d := json.new_decoder_in(r.body, r.arena) // decoded strings live in the request's arena
+	if not d.begin_object() {
 		fail(w, 400, "bad request")
 		return
 	}
-	for {
-		k, ok := d.Key()
-		if !ok {
+	loop {
+		k, ok := d.key()
+		if not ok {
 			break
 		}
 		switch k {
 		case "title":
-			title, _ = d.TextMax(maxTitle) // a longer one is an error (json.ErrTooLong)
+			title, _ = d.text_max(max_title) // a longer one is an error (json.TooLong)
 		case "body":
-			body, _ = d.TextMax(maxBody)
+			body, _ = d.text_max(max_body)
 		default:
-			d.Skip()
+			d.skip()
 		}
 	}
-	if d.Err != nil || !d.End() || title == "" {
+	if d.err != nil or not d.end() or title == "" {
 		fail(w, 400, "bad request")
 		return
 	}
-	res, err := store.insert.Exec(sqlite.Text(title), sqlite.Text(body))
+	res, err := store.insert.exec(sqlite.text(title), sqlite.text(body))
 	if err != nil {
-		internalError(w, err)
+		internal_error(w, err)
 		return
 	}
-	w.WriteHeader(201)
-	j := w.JSON()
-	j.Object()
-	j.Key("id")
-	j.Int(res.LastInsertID)
-	j.End()
+	w.write_header(201)
+	j := w.json()
+	j.object()
+	j.key("id")
+	j.int(res.last_insert_id)
+	j.end()
 }
 
 // DELETE /notes/{id}
-func deleteNote(w *http.ResponseWriter, r *http.Request) {
-	id, ok := r.PathInt("id")
-	if !ok {
+fn delete_note(w *http.ResponseWriter, r *http.Request) {
+	id, ok := r.path_int("id")
+	if not ok {
 		fail(w, 404, "not found")
 		return
 	}
-	res, err := store.del.Exec(sqlite.Int(id))
+	res, err := store.del.exec(sqlite.integer(id))
 	if err != nil {
-		internalError(w, err)
+		internal_error(w, err)
 		return
 	}
-	if res.RowsAffected == 0 {
+	if res.rows_affected == 0 {
 		fail(w, 404, "not found")
 		return
 	}
-	w.WriteHeader(204)
+	w.write_header(204)
 }
 
-func main() {
-	port := flag.Int("port", 8080, "port to listen on")
-	dbPath := flag.String("db", "notes.db", "the SQLite database `file`")
-	flag.Parse()
-	if err := openStore(*dbPath); err != nil {
-		println("cannot open database:", err.Error())
-		os.Exit(1)
+fn main() {
+	port := flag.int_flag("port", 8080, "port to listen on")
+	db_path := flag.str_flag("db", "notes.db", "the SQLite database `file`")
+	flag.parse()
+	if err := open_store(*db_path); err != nil {
+		println("cannot open database:", err.message())
+		os.exit(1)
 	}
-	http.HandleFunc("GET /health", health)
-	http.HandleFunc("GET /notes", listNotes)
-	http.HandleFunc("POST /notes", createNote)
-	http.HandleFunc("GET /notes/{id}", getNote)
-	http.HandleFunc("DELETE /notes/{id}", deleteNote)
-	println("squark notes listening on port", *port, "db", *dbPath)
-	if err := http.ListenAndServe(http.Port(*port), nil); err != nil {
-		println("serve:", err.Error())
-		os.Exit(1)
+	http.handle_func("GET /health", health)
+	http.handle_func("GET /notes", list_notes)
+	http.handle_func("POST /notes", create_note)
+	http.handle_func("GET /notes/{id}", get_note)
+	http.handle_func("DELETE /notes/{id}", delete_note)
+	println("squark notes listening on port", *port, "db", *db_path)
+	if err := http.listen_and_serve(http.port(*port), nil); err != nil {
+		println("serve:", err.message())
+		os.exit(1)
 	}
 }

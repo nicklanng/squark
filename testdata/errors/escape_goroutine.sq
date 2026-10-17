@@ -1,12 +1,12 @@
-package main
+program
 
-var results chan *int cap 1
+thread results *int chan[1]
 
 task work(p *int) pool 1 {}
 
-func main() {
+fn main() {
 	x := 1
-	go work(&x) // ERROR "to a new goroutine, which can outlive this function"
+	start work(&x) // ERROR "to a new goroutine, which can outlive this function"
 	results <- &x // ERROR "sent on a channel"
 	var g int
 	_ = g

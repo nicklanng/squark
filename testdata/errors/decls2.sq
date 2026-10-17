@@ -1,12 +1,12 @@
-package main
+program
 
-extern "abs" func cabs(x int32) int32 // ERROR "needs a stack budget"
+extern fn cabs(x i32) -> i32 c"abs" // ERROR "needs a stack budget"
 
-task noPool() { // ERROR "needs a pool size"
+task no_pool() { // ERROR "needs a pool size"
 }
 
-task returns() int pool 1 { // ERROR "task returns cannot return values"
+task returns() -> int pool 1 { // ERROR "task returns cannot return values"
 	return 1
 }
 
-func main() {}
+fn main() {}

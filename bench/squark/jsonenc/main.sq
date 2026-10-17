@@ -1,82 +1,78 @@
 // jsonenc encodes an order with 10 items N times into a reused buffer and prints the total
 // number of bytes (counting a trailing newline per document, like Go's json.Encoder).
-package main
+program
 
-import (
-	"json"
-	"os"
-	"strconv"
-)
+use json, os, strconv
 
-type Item struct {
-	SKU        string
-	Name       string
-	Qty        int
-	PriceCents int
+struct Item {
+	sku         str
+	name        str
+	qty         int
+	price_cents int
 }
 
-type Order struct {
-	ID       int
-	Customer string
-	Email    string
-	Paid     bool
-	Items    []Item
+struct Order {
+	id       int
+	customer str
+	email    str
+	paid     bool
+	items    Item[]
 }
 
-func appendOrder(dst []byte, o *Order) []byte {
+fn append_order(dst u8[], o *Order) -> u8[] {
 	dst = append(dst, `{"id":`...)
-	dst = json.AppendInt(dst, o.ID)
+	dst = json.append_int(dst, o.id)
 	dst = append(dst, `,"customer":`...)
-	dst = json.AppendString(dst, o.Customer)
+	dst = json.append_string(dst, o.customer)
 	dst = append(dst, `,"email":`...)
-	dst = json.AppendString(dst, o.Email)
+	dst = json.append_string(dst, o.email)
 	dst = append(dst, `,"paid":`...)
-	dst = json.AppendBool(dst, o.Paid)
+	dst = json.append_bool(dst, o.paid)
 	dst = append(dst, `,"items":[`...)
-	for i, it := range o.Items {
+	for i, it in o.items {
 		if i > 0 {
 			dst = append(dst, ',')
 		}
 		dst = append(dst, `{"sku":`...)
-		dst = json.AppendString(dst, it.SKU)
+		dst = json.append_string(dst, it.sku)
 		dst = append(dst, `,"name":`...)
-		dst = json.AppendString(dst, it.Name)
+		dst = json.append_string(dst, it.name)
 		dst = append(dst, `,"qty":`...)
-		dst = json.AppendInt(dst, it.Qty)
+		dst = json.append_int(dst, it.qty)
 		dst = append(dst, `,"price_cents":`...)
-		dst = json.AppendInt(dst, it.PriceCents)
+		dst = json.append_int(dst, it.price_cents)
 		dst = append(dst, '}')
 	}
 	dst = append(dst, "]}\n"...)
 	return dst
 }
 
-func main() {
+fn main() {
 	n := 2000000
-	if os.NArgs() > 1 {
-		n, _ = strconv.Atoi(os.Arg(1))
+	if os.n_args() > 1 {
+		n, _ = strconv.atoi(os.arg(1))
 	}
 	// item strings are built once into a text arena
-	var text [512]byte
+	var text u8[512]
 	t := text[:0]
-	var items [10]Item
-	for i := range items {
+	var items Item[10]
+	for i, _ in items {
 		s := len(t)
 		t = append(t, "SKU-"...)
-		t = strconv.AppendInt(t, 1000+i)
-		sku := string(t[s:])
+		t = strconv.append_int(t, 1000+i)
+		sku := str(t[s:])
 		s = len(t)
 		t = append(t, "widget "...)
-		t = strconv.AppendInt(t, i)
-		items[i] = Item{SKU: sku, Name: string(t[s:]), Qty: i + 1, PriceCents: 199 * (i + 1)}
+		t = strconv.append_int(t, i)
+		items[i] = Item{sku: sku, name: str(t[s:]), qty: i + 1, price_cents: 199 * (i + 1)}
 	}
-	o := Order{Customer: "Ada Lovelace", Email: "ada@example.com", Items: items[:]}
-	var buf [4096]byte
+	o := Order{customer: "Ada Lovelace", email: "ada@example.com", items: items[:]}
+	var buf u8[4096]
 	total := 0
 	for i := 0; i < n; i++ {
-		o.ID = i
-		o.Paid = i%2 == 0
-		out := appendOrder(buf[:0], &o)
+		o.id = i
+		o.paid = i%2 == 0
+		out := append_order(buf[:0], &o)
 		total += len(out)
 	}
 	println(total)

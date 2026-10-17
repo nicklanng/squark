@@ -1,12 +1,12 @@
-package main
+program
 
-import "errors"
+use errors
 
-func mk(msg string) error { return errors.New(msg) }
+fn mk(msg str) -> ! { return errors.new(msg) }
 
-func main() {
-	var buf [8]byte
+fn main() {
+	var buf u8[8]
 	buf[0] = 'x'
-	_ = errors.New(string(buf[:1])) // ERROR "cannot escape into static memory (errors.New keeps argument 1 in static memory)"
+	_ = errors.new(str(buf[:1])) // ERROR "cannot escape into static memory (errors.new keeps argument 1 in static memory)"
 	_ = mk("static is fine")
 }

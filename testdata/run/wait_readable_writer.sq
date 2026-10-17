@@ -1,21 +1,17 @@
-package main
+program
 
 // A WaitReadable that times out withdraws only its own registration: another goroutine blocked
 // writing the same connection still wakes when the peer drains it (epoll keeps one registration
 // per descriptor for both directions, and the timeout used to clear it whole).
 
-import (
-	"net"
-	"strconv"
-	"time"
-)
+use net, strconv, time
 
-var done chan string cap 4
-var c net.Conn
-var big [4 << 20]byte
+thread done str chan[4]
+thread c net.Conn
+thread big u8[4 << 20]
 
 task writer() pool 1 {
-	if _, err := c.Write(big[:]); err != nil { // far more than the socket buffers: blocks
+	if _, err := c.write(big[:]); err != nil { // far more than the socket buffers: blocks
 		done <- "write: error"
 		return
 	}
@@ -23,46 +19,46 @@ task writer() pool 1 {
 }
 
 task grace() pool 1 {
-	if c.WaitReadable(20 * time.Millisecond) {
+	if c.wait_readable(20 * time.millisecond) {
 		done <- "grace: readable"
 		return
 	}
 	done <- "grace: timed out"
 }
 
-arena str 64
+arena str_ 64
 
-func wait() string {
+fn wait() -> str {
 	select {
 	case s := <-done:
 		return s
-	case <-time.After(2 * time.Second):
+	case <-time.after(2 * time.second):
 		return "stuck"
 	}
 }
 
-func main() {
-	l, err := net.Listen("127.0.0.1:0")
+fn main() {
+	l, err := net.listen("127.0.0.1:0")
 	if err != nil {
 		panic(err)
 	}
-	var b [32]byte
-	c, err = net.Dial(string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), l.Port())) in str)
+	var b u8[32]
+	c, err = net.dial(str(strconv.append_int(append(b[:0], "127.0.0.1:"...), l.port())) in str_)
 	if err != nil {
 		panic(err)
 	}
-	peer, err := l.Accept()
+	peer, err := l.accept()
 	if err != nil {
 		panic(err)
 	}
-	go writer()
-	time.Sleep(10 * time.Millisecond) // the writer is blocked now
-	go grace()
+	start writer()
+	time.sleep(10 * time.millisecond) // the writer is blocked now
+	start grace()
 	println(wait())
-	var buf [64 << 10]byte
+	var buf u8[64 << 10]
 	total := 0
-	for total < len(big) && peer.WaitReadable(time.Second) {
-		n, err := peer.Read(buf[:])
+	while total < len(big) and peer.wait_readable(time.second) {
+		n, err := peer.read(buf[:])
 		if err != nil {
 			break
 		}

@@ -1,0 +1,45 @@
+program
+
+// Enums: a named integer type whose members are constants of that type, counting from 0 or
+// from the last value written.
+
+enum Dir { north, east, south, west }
+
+enum Status u16 {
+	ok = 200
+	created // 201
+	not_found = 404
+	gone // 405 (not HTTP's 410: the next value after not_found)
+}
+
+// members may be spelled like keywords: they are always reached through the type
+enum Token { fn, in, str }
+
+const turns = str[4]{"north", "east", "south", "west"}
+
+impl Dir {
+	fn right(self) -> Dir { return Dir((int(self) + 1) % 4) }
+}
+
+fn describe(s Status) -> str {
+	switch s {
+	case Status.ok, Status.created:
+		return "fine"
+	case Status.not_found:
+		return "missing"
+	}
+	return "other"
+}
+
+fn main() {
+	d := Dir.west
+	println(d, d.right(), turns[d.right()], Dir.north == d.right())
+	println(Status.ok, Status.created, Status.not_found, Status.gone, u16(Status.gone) - 400)
+	println(describe(Status.created), describe(Status.not_found), describe(Status(500)))
+	var t Token
+	println(t == Token.fn, Token.str)
+	var counts int[Dir; 4]
+	counts[Dir.east]++
+	counts[Dir.east]++
+	println(counts[Dir.east], len(counts))
+}

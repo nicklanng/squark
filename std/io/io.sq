@@ -1,17 +1,17 @@
 // Package io holds the shared error values for readers and writers.
-package io
+module io
 
 // EOF is returned by Read when no more input is available.
-const EOF = error(-1, "EOF")
+pub fault EOF -1 "EOF"
 
-// ErrShortWrite means a write accepted fewer bytes than requested.
-const ErrShortWrite = error(-2, "short write")
+// ShortWrite means a write accepted fewer bytes than requested.
+pub fault ShortWrite -2 "short write"
 
-// ErrShortBuffer means a caller-provided buffer was too small for the result.
-const ErrShortBuffer = error(-3, "short buffer")
+// ShortBuffer means a caller-provided buffer was too small for the result.
+pub fault ShortBuffer -3 "short buffer"
 
-// ErrUnexpectedEOF means the input ended before a read of a fixed size was complete.
-const ErrUnexpectedEOF = error(-4, "unexpected EOF")
+// UnexpectedEOF means the input ended before a read of a fixed size was complete.
+pub fault UnexpectedEOF -4 "unexpected EOF"
 
-// ErrTooLarge means the input doesn't fit in the caller's buffer.
-const ErrTooLarge = error(-5, "input larger than the buffer")
+// TooLarge means the input doesn't fit in the caller's buffer.
+pub fault TooLarge -5 "input larger than the buffer"

@@ -1,32 +1,32 @@
 // Package sqlite binds libsqlite3. SQLite manages its own memory; squark code never touches
 // the heap: column text is copied into caller-provided buffers.
-package sqlite
+module sqlite {
+	link "sqlite3"
+	cflags "-I/opt/homebrew/opt/sqlite/include"
+	ldflags "-L/opt/homebrew/opt/sqlite/lib"
+}
 
-import "os"
-
-link "sqlite3"
-cflags "-I/opt/homebrew/opt/sqlite/include"
-ldflags "-L/opt/homebrew/opt/sqlite/lib"
+use os
 
 const (
-	OK   = 0
-	ROW  = 100
-	DONE = 101
+	pub ok   = 0
+	pub row  = 100
+	pub done = 101
 )
 
 const (
-	TypeInteger = 1
-	TypeFloat   = 2
-	TypeText    = 3
-	TypeBlob    = 4
-	TypeNull    = 5
+	pub type_integer = 1
+	pub type_float   = 2
+	pub type_text    = 3
+	pub type_blob    = 4
+	pub type_null    = 5
 )
 
-type DB struct {
+pub struct DB {
 	h rawptr
 }
 
-type Stmt struct {
+pub struct Stmt {
 	h  rawptr
 	db rawptr
 }
@@ -36,190 +36,196 @@ type Stmt struct {
 // thread mid-call, so the thread's other goroutines keep running. Each connection has a lock that
 // keeps one goroutine in it at a time (see shim.c).
 
-extern "sq_sqlite_open" func open(path string, db *rawptr) int stack 128K blocking
+extern fn sys_open(path str, db *rawptr) -> int stack 128K blocking c"sq_sqlite_open"
 
-extern "sq_sqlite_close" func closeDB(db rawptr) int stack 64K blocking
+extern fn close_db(db rawptr) -> int stack 64K blocking c"sq_sqlite_close"
 
-extern "sq_sqlite_exec" func exec(db rawptr, sql string) int stack 128K
+extern fn exec(db rawptr, sql str) -> int stack 128K c"sq_sqlite_exec"
 
-extern "sq_sqlite_prepare" func prepare(db rawptr, sql string, st *rawptr) int stack 128K blocking
+extern fn prepare(db rawptr, sql str, st *rawptr) -> int stack 128K blocking c"sq_sqlite_prepare"
 
-extern "sq_sqlite_db_use" func dbUse(db rawptr) stack 16K
+extern fn db_use(db rawptr) stack 16K c"sq_sqlite_db_use"
 
-extern "sq_sqlite_db_done" func dbDone(db rawptr) stack 16K
+extern fn db_done(db rawptr) stack 16K c"sq_sqlite_db_done"
 
-extern "sq_sqlite_stmt_use" func stmtUse(st rawptr) stack 16K
+extern fn stmt_use(st rawptr) stack 16K c"sq_sqlite_stmt_use"
 
-extern "sq_sqlite_bind_int" func bindInt(st rawptr, i int, v int) int stack 16K
+extern fn bind_int(st rawptr, i int, v int) -> int stack 16K c"sq_sqlite_bind_int"
 
-extern "sq_sqlite_bind_text" func bindText(st rawptr, i int, s string) int stack 16K
+extern fn bind_text(st rawptr, i int, s str) -> int stack 16K c"sq_sqlite_bind_text"
 
-extern "sq_sqlite_bind_null" func bindNull(st rawptr, i int) int stack 16K
+extern fn bind_null(st rawptr, i int) -> int stack 16K c"sq_sqlite_bind_null"
 
-extern "sq_sqlite_step" func step(st rawptr) int stack 128K
+extern fn step(st rawptr) -> int stack 128K c"sq_sqlite_step"
 
-extern "sq_sqlite_reset" func reset(st rawptr) int stack 64K
+extern fn reset(st rawptr) -> int stack 64K c"sq_sqlite_reset"
 
-extern "sq_sqlite_finalize" func finalize(st rawptr) int stack 64K blocking
+extern fn finalize(st rawptr) -> int stack 64K blocking c"sq_sqlite_finalize"
 
-extern "sq_sqlite_column_int" func columnInt(st rawptr, i int) int stack 16K
+extern fn column_int(st rawptr, i int) -> int stack 16K c"sq_sqlite_column_int"
 
-extern "sq_sqlite_column_type" func columnType(st rawptr, i int) int stack 16K
+extern fn column_type(st rawptr, i int) -> int stack 16K c"sq_sqlite_column_type"
 
-extern "sq_sqlite_column_count" func columnCount(st rawptr) int stack 16K
+extern fn column_count(st rawptr) -> int stack 16K c"sq_sqlite_column_count"
 
-extern "sq_sqlite_column_text" func columnText(st rawptr, i int, buf []byte) int stack 16K
+extern fn column_text(st rawptr, i int, buf u8[]) -> int stack 16K c"sq_sqlite_column_text"
 
-extern "sq_sqlite_changes" func changes(db rawptr) int stack 16K
+extern fn changes(db rawptr) -> int stack 16K c"sq_sqlite_changes"
 
-extern "sq_sqlite_last_insert_rowid" func lastInsertRowID(db rawptr) int stack 16K
+extern fn last_insert_row_id(db rawptr) -> int stack 16K c"sq_sqlite_last_insert_rowid"
 
-extern "sq_sqlite_errstr" func errstr(rc int) string stack 16K
+extern fn errstr(rc int) -> str stack 16K c"sq_sqlite_errstr"
 
-const ErrTruncated = error(-1, "sqlite: column text larger than buffer")
+pub fault Truncated -1 "sqlite: column text larger than buffer"
 
-func check(rc int) error {
-	if rc == OK || rc == ROW || rc == DONE {
+fn check(rc int) -> ! {
+	if rc == ok or rc == row or rc == done {
 		return nil
 	}
 	return error(rc, errstr(rc))
 }
 
-// Open opens (creating if needed) a database file. When the file is locked by another connection
+// open opens (creating if needed) a database file. When the file is locked by another connection
 // (another thread or process, e.g. with threads N or workers N), statements wait up to 5 seconds
 // before failing with "database is locked"; only the calling goroutine waits.
 //
-// A connection serves one goroutine at a time: a statement holds it from its first Bind or Step
-// until Reset (so start with `defer st.Reset()`), and other goroutines that use the connection
-// meanwhile wait for it. Stmt.Exec runs a statement from start to end in one call and gives the
-// connection back before it returns. DB.Exec, Prepare, Changes and LastInsertRowID hold it for
-// the call (or join the statement the goroutine is running: call Changes and LastInsertRowID
-// before Reset).
-func Open(path string) (DB, error) {
+// A connection serves one goroutine at a time: a statement holds it from its first Bind or step
+// until reset (so start with `defer st.reset()`), and other goroutines that use the connection
+// meanwhile wait for it. Stmt.exec runs a statement from start to end in one call and gives the
+// connection back before it returns. DB.exec, prepare, changes and last_insert_row_id hold it for
+// the call (or join the statement the goroutine is running: call changes and last_insert_row_id
+// before reset).
+pub fn open(path str) -> DB ! {
 	for i := 0; i < len(path); i++ {
 		if path[i] == 0 { // C would stop at the NUL and open another file
-			return DB{}, os.Errno(22) // EINVAL, as os.Open reports it
+			return DB{}, os.errno(22) // EINVAL, as os.open reports it
 		}
 	}
 	var h rawptr
-	rc := open(path, &h)
+	rc := sys_open(path, &h)
 	return DB{h: h}, check(rc)
 }
 
-// Close closes the connection; nothing may use it afterwards (or be waiting for it).
-func (db DB) Close() error {
-	dbUse(db.h)
-	return check(closeDB(db.h))
-}
-
-// Exec runs one or more SQL statements that return no rows. Outside a transaction, a statement
-// that finds the database locked (another worker setting it up) is retried for up to 5 seconds.
-func (db DB) Exec(sql string) error {
-	dbUse(db.h)
-	rc := exec(db.h, sql)
-	dbDone(db.h)
-	return check(rc)
-}
-
-// Prepare compiles a statement for repeated use.
-func (db DB) Prepare(sql string) (Stmt, error) {
-	var h rawptr
-	dbUse(db.h)
-	rc := prepare(db.h, sql, &h)
-	dbDone(db.h)
-	return Stmt{h: h, db: db.h}, check(rc)
-}
-
-func (db DB) Changes() int         { return changes(db.h) }
-func (db DB) LastInsertRowID() int { return lastInsertRowID(db.h) }
-
-// Bind* use 1-based parameter indexes, like SQLite. Text is copied by SQLite.
-func (s Stmt) BindInt(i int, v int) error     { return check(bindInt(s.h, i, v)) }
-func (s Stmt) BindText(i int, v string) error { return check(bindText(s.h, i, v)) }
-func (s Stmt) BindNull(i int) error           { return check(bindNull(s.h, i)) }
-
-// Step advances to the next row; it returns true while a row is available.
-func (s Stmt) Step() (bool, error) {
-	stmtUse(s.h)
-	rc := step(s.h)
-	if rc == ROW {
-		return true, nil
+impl DB {
+	// close closes the connection; nothing may use it afterwards (or be waiting for it).
+	pub fn close(self) -> ! {
+		db_use(self.h)
+		return check(close_db(self.h))
 	}
-	return false, check(rc)
+
+	// exec runs one or more SQL statements that return no rows. Outside a transaction, a statement
+	// that finds the database locked (another worker setting it up) is retried for up to 5 seconds.
+	pub fn exec(self, sql str) -> ! {
+		db_use(self.h)
+		rc := exec(self.h, sql)
+		db_done(self.h)
+		return check(rc)
+	}
+
+	// prepare compiles a statement for repeated use.
+	pub fn prepare(self, sql str) -> Stmt ! {
+		var h rawptr
+		db_use(self.h)
+		rc := prepare(self.h, sql, &h)
+		db_done(self.h)
+		return Stmt{h: h, db: self.h}, check(rc)
+	}
+
+	pub fn changes(self) -> int            { return changes(self.h) }
+	pub fn last_insert_row_id(self) -> int { return last_insert_row_id(self.h) }
 }
 
-// Reset makes the statement ready to run again, clears its bindings and gives back the
-// connection.
-func (s Stmt) Reset() error { return check(reset(s.h)) }
+impl Stmt {
+	// Bind* use 1-based parameter indexes, like SQLite. Text is copied by SQLite.
+	pub fn bind_int(self, i int, v int) -> !     { return check(bind_int(self.h, i, v)) }
 
-// Value is an argument to Exec: Int(v), Text(s) or Null() (the zero Value).
-type Value struct {
+	pub fn bind_text(self, i int, v str) -> ! { return check(bind_text(self.h, i, v)) }
+	pub fn bind_null(self, i int) -> !        { return check(bind_null(self.h, i)) }
+
+	// step advances to the next row; it returns true while a row is available.
+	pub fn step(self) -> bool ! {
+		stmt_use(self.h)
+		rc := step(self.h)
+		if rc == row {
+			return true, nil
+		}
+		return false, check(rc)
+	}
+
+	// reset makes the statement ready to run again, clears its bindings and gives back the
+	// connection.
+	pub fn reset(self) -> ! { return check(reset(self.h)) }
+
+	// exec runs the statement once with args bound to its parameters in order (?1, ?2, ...): it
+	// resets it, binds args, steps it to the end (skipping any rows it returns), reads the Result and
+	// resets it again. The statement holds the connection only during the call, so there is no reset
+	// to defer.
+	pub fn exec(self, args ...Value) -> Result ! {
+		self.reset()
+		err := self.run(args)
+		var res Result
+		if err == nil {
+			res = Result{last_insert_id: last_insert_row_id(self.db), rows_affected: changes(self.db)}
+		}
+		self.reset()
+		return res, err
+	}
+
+	// run binds args and steps the statement to its end.
+	fn run(self, args Value[]) -> ! {
+		for i, v in args {
+			switch v.kind {
+			case 1:
+				self.bind_int(i+1, v.i)!
+			case 2:
+				self.bind_text(i+1, v.s)!
+			default:
+				self.bind_null(i + 1)!
+			}
+		}
+		while self.step()! {
+		}
+		return nil
+	}
+
+	pub fn finalize(self) -> ! {
+		db_use(self.db)
+		rc := finalize(self.h)
+		db_done(self.db)
+		return check(rc)
+	}
+
+	pub fn column_count(self) -> int       { return column_count(self.h) }
+	pub fn column_type(self, i int) -> int { return column_type(self.h, i) }
+	pub fn column_int(self, i int) -> int  { return column_int(self.h, i) }
+
+	// column_text copies column i (0-based) into buf and returns it as a view of buf.
+	pub fn column_text(self, i int, buf u8[]) -> str ! {
+		n := column_text(self.h, i, buf)
+		if n > cap(buf) {
+			return str(buf[:cap(buf)]), Truncated
+		}
+		return str(buf[:n]), nil
+	}
+}
+
+// Value is an argument to exec: Int(v), text(s) or null() (the zero Value).
+pub struct Value {
 	kind int // 0 null, 1 int, 2 text
 	i    int
-	s    string
+	s    str
 }
 
-// Int, Text and Null make Exec's arguments (SQLite copies Text's string when it is bound).
-func Int(v int) Value            { return Value{kind: 1, i: v} }
-func Text(s string) Value from s { return Value{kind: 2, s: s} }
-func Null() Value                { return Value{} }
+// Int, text and null make exec's arguments (SQLite copies text's string when it is bound).
+pub fn integer(v int) -> Value            { return Value{kind: 1, i: v} }
+pub fn text(s str) -> Value in s { return Value{kind: 2, s: s} }
+pub fn null() -> Value                { return Value{} }
 
-// Result is what Exec reports, as SQLite does after the statement: LastInsertRowID and Changes,
+// Result is what exec reports, as SQLite does after the statement: last_insert_row_id and changes,
 // which an INSERT, UPDATE or DELETE sets (after another statement they still hold the
 // connection's last such values).
-type Result struct {
-	LastInsertID int // the rowid of the last row inserted
-	RowsAffected int // how many rows were inserted, updated or deleted
+pub struct Result {
+	pub last_insert_id int // the rowid of the last row inserted
+	pub rows_affected  int // how many rows were inserted, updated or deleted
 }
 
-// Exec runs the statement once with args bound to its parameters in order (?1, ?2, ...): it
-// resets it, binds args, steps it to the end (skipping any rows it returns), reads the Result and
-// resets it again. The statement holds the connection only during the call, so there is no Reset
-// to defer.
-func (s Stmt) Exec(args ...Value) (Result, error) {
-	s.Reset()
-	err := s.run(args)
-	var res Result
-	if err == nil {
-		res = Result{LastInsertID: lastInsertRowID(s.db), RowsAffected: changes(s.db)}
-	}
-	s.Reset()
-	return res, err
-}
-
-// run binds args and steps the statement to its end.
-func (s Stmt) run(args []Value) error {
-	for i, v := range args {
-		switch v.kind {
-		case 1:
-			try s.BindInt(i+1, v.i)
-		case 2:
-			try s.BindText(i+1, v.s)
-		default:
-			try s.BindNull(i + 1)
-		}
-	}
-	for try s.Step() {
-	}
-	return nil
-}
-
-func (s Stmt) Finalize() error {
-	dbUse(s.db)
-	rc := finalize(s.h)
-	dbDone(s.db)
-	return check(rc)
-}
-
-func (s Stmt) ColumnCount() int     { return columnCount(s.h) }
-func (s Stmt) ColumnType(i int) int { return columnType(s.h, i) }
-func (s Stmt) ColumnInt(i int) int  { return columnInt(s.h, i) }
-
-// ColumnText copies column i (0-based) into buf and returns it as a view of buf.
-func (s Stmt) ColumnText(i int, buf []byte) (string, error) {
-	n := columnText(s.h, i, buf)
-	if n > cap(buf) {
-		return string(buf[:cap(buf)]), ErrTruncated
-	}
-	return string(buf[:n]), nil
-}

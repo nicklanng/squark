@@ -1,12 +1,12 @@
-package main
+program
 
-type Reg struct {
+struct Reg {
 	n int
-	m map[int]int cap 4
+	m int[int; 4]
 }
 
-var global Reg
-var gcopy = global // ERROR "cannot copy global into gcopy: Reg contains map[int]int cap 4 storage"
-var gfresh = Reg{n: 1}
+thread global Reg
+thread gcopy = global // ERROR "cannot copy global into gcopy: Reg contains int[int; 4] storage"
+thread gfresh = Reg{n: 1}
 
-func main() { println(gcopy.n, gfresh.n) }
+fn main() { println(gcopy.n, gfresh.n) }

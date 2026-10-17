@@ -1,8 +1,8 @@
-package main
+program
 
 const two = 2
 
-func main() {
+fn main() {
 	x := 2
 	switch x {
 	case 1, two:
@@ -13,13 +13,13 @@ func main() {
 	case "a":
 	case "b", "a": // ERROR "duplicate case \"a\" in expression switch"
 	}
-L:
-	for i := range 3 {
+l:
+	for i in 0..3 {
 		_ = i
-		break L
+		break l
 	}
-L: // ERROR "label L already defined"
-	for {
-		break L
+l: // ERROR "label l already defined"
+	loop {
+		break l
 	}
 }

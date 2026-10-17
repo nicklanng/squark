@@ -1,0 +1,139 @@
+program
+
+// The forms of the syntax that have no Go counterpart: ranges with a start, for ... in with one
+// variable, V[K] maps next to T[n] arrays, members spelled like keywords, faults and !.
+
+use strconv, strings as s
+
+const n = 3
+
+fault Empty "empty"
+fault Odd 7 "odd"
+
+struct Pair {
+	in  int // a field spelled like a keyword
+	out int
+}
+
+struct Counter {
+	hits int
+}
+
+impl Counter {
+	fn bump(&self, by int) -> int {
+		self.hits += by
+		return self.hits
+	}
+
+	fn peek(self) -> str { return "counter" }
+}
+
+fn first(xs str[]) -> str ! {
+	if len(xs) == 0 {
+		return "", Empty
+	}
+	return xs[0], nil
+}
+
+fn both(xs str[]) -> (str, int) ! {
+	f := first(xs)!
+	if len(f)%2 == 1 {
+		return f, 0, Odd
+	}
+	return f, len(f), nil
+}
+
+fn check(xs str[]) -> ! {
+	_, k := both(xs)!
+	println("check", k)
+	return nil
+}
+
+fn word(t str) -> str in t { return s.trim_space(t) }
+
+fn main() {
+	// ranges
+	sum := 0
+	for i in 2..5 {
+		sum += i
+	}
+	var small i8
+	for i in i8(1)..4 {
+		small += i
+	}
+	xs := int[]{10, 20, 30, 40}
+	tail := 0
+	for i in 1..len(xs) {
+		tail += xs[i]
+	}
+	println("ranges", sum, small, tail)
+
+	// one variable is the element; two are index and element
+	var v int[..4]
+	v.push(5)
+	v.push(6)
+	for x in v {
+		print(x, " ")
+	}
+	for i, x in v {
+		print(i, ":", x, " ")
+	}
+	for r in "hé" {
+		print(r, " ")
+	}
+	println()
+	var ages int[str; 4]
+	ages["ann"] = 30
+	total := 0
+	for a in ages {
+		total += a
+	}
+	for k, _ in ages {
+		print(k, " ")
+	}
+	println(total)
+	var ch int chan[3]
+	ch <- 1
+	ch <- 2
+	close(ch)
+	for c in ch {
+		print(c, " ")
+	}
+	println()
+
+	// T[n] is an array, V[K] a map
+	var arr int[n]
+	arr[2] = 9
+	with arena a 4K {
+		m := make(int[str], 4) in a
+		m["x"] = arr[2]
+		ps := (*Pair)[]{&Pair{in: 1, out: 2}}
+		println("types", len(arr), m["x"], ps[0].in, ps[0].out)
+		var buf u8[8]
+		msg := "n=" + str(strconv.append_int(buf[:0], arr[2])) in a
+		println(msg)
+	}
+
+	// while, loop, labels
+	k := 0
+	while k < 3 {
+		k++
+	}
+	outer: loop {
+		inner: while true {
+			k++
+			if k > 5 {
+				break outer
+			}
+			continue inner
+		}
+	}
+	println("loops", k, not (k == 5) and k > 0 or false)
+
+	// methods, faults, !
+	var c Counter
+	c.bump(2)
+	println(c.bump(3), c.peek())
+	println(check(str[]{"ab"}) == nil, check(str[]{"abc"}) == Odd, check(nil) == Empty, Odd.code(), Empty.message())
+	println("[", word("  hi "), "]")
+}

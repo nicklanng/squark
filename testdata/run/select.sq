@@ -1,20 +1,20 @@
-package main
+program
 
-import "time"
+use time
 
-var a chan int cap 1
-var b chan string cap 0
-var quit chan bool cap 0
-var both1 chan int cap 100
-var both2 chan int cap 100
+thread a int chan[1]
+thread b str chan[0]
+thread quit bool chan[0]
+thread both1 int chan[100]
+thread both2 int chan[100]
 
 task sender() pool 1 {
 	b <- "hello"
 }
 
-var x chan int cap 0
-var y chan int cap 0
-var got chan int cap 4
+thread x int chan[0]
+thread y int chan[0]
+thread got int chan[4]
 
 // selector waits on x and y; both senders run before it resumes, so only the first may complete
 // its select: the second must wait for the next select instead of handing its value to this one.
@@ -29,21 +29,21 @@ task selector() pool 1 {
 	}
 }
 
-task sendTo(c chan int, v int) pool 2 {
+task send_to(c int chan, v int) pool 2 {
 	c <- v
 }
 
 // wait ends in a select, which needs no return after it
-func wait(c chan int) int {
+fn wait(c int chan) -> int {
 	select {
 	case v := <-c:
 		return v
-	case <-time.After(time.Millisecond):
+	case <-time.after(time.millisecond):
 		return -1
 	}
 }
 
-func main() {
+fn main() {
 	a <- 7
 	select {
 	case v := <-a:
@@ -52,7 +52,7 @@ func main() {
 		println("b", s)
 	}
 
-	go sender()
+	start sender()
 	select {
 	case v, ok := <-a:
 		println("a again", v, ok)
@@ -67,12 +67,12 @@ func main() {
 		println("nothing ready")
 	}
 
-	start := time.Now()
+	start := time.now()
 	select {
 	case <-quit:
 		println("quit")
-	case <-time.After(20 * time.Millisecond):
-		println("timeout waited", time.Since(start).Milliseconds() >= 20)
+	case <-time.after(20 * time.millisecond):
+		println("timeout waited", time.since(start).milliseconds() >= 20)
 	}
 
 	for i := 0; i < 3; i++ {
@@ -105,11 +105,11 @@ loop:
 	println("n", n)
 
 	// a nil channel is never ready
-	var none chan int
+	var none int chan
 	select {
 	case <-none:
 		println("nil ready?")
-	case <-time.After(time.Millisecond):
+	case <-time.after(time.millisecond):
 		println("nil never ready")
 	}
 
@@ -129,10 +129,10 @@ loop:
 	}
 	println("fair", c1 > 10, c2 > 10, c1+c2)
 
-	go selector()
-	time.Sleep(time.Millisecond) // the selector is waiting on x and y
-	go sendTo(x, 1)
-	go sendTo(y, 2)
+	start selector()
+	time.sleep(time.millisecond) // the selector is waiting on x and y
+	start send_to(x, 1)
+	start send_to(y, 2)
 	g1 := <-got
 	g2 := <-got
 	println("one case per select:", g1, g2)

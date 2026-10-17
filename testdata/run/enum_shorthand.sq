@@ -1,0 +1,35 @@
+program
+
+// .member: the enum comes from what the context expects (a typed declaration, a parameter, a field,
+// a slice element, a map key, a case of a switch on an enum, the other side of a comparison).
+enum Dir { north, east, south, west }
+
+struct Ship {
+	heading Dir
+	name    str
+}
+
+const home Dir = .south
+
+fn turn(d Dir, to ...Dir) -> Dir {
+	if d == .west or .north == d {
+		return .east
+	}
+	return to[0]
+}
+
+fn main() {
+	var d Dir = .north
+	d = .west
+	s := Ship{heading: .east, name: "x"}
+	path := Dir[]{.north, .north, .south}
+	var seen int[Dir; 4]
+	seen[.east]++
+	switch s.heading {
+	case .east, .west:
+		println("sideways", turn(d, .south), turn(.south, .north, .east), home, seen[.east], len(path))
+	}
+	var c Dir chan[1]
+	c <- .south
+	println(<-c, s.heading != .north)
+}

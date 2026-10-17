@@ -1,0 +1,8 @@
+program
+
+fn main() {
+	n := 0
+	for n < 3 { // ERROR "for in a condition is while: while n < 3"
+		n++
+	}
+}

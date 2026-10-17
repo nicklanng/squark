@@ -1,40 +1,35 @@
-package main
+program {
+	threads 4
+}
 
 // Test server for TestThreads (internal/driver): 4 scheduler threads in one process serve one
 // address. / answers "shard:count", where count is that shard's own request counter (package
 // variables are per shard); /crash panics on whichever shard serves it.
 
-import (
-	"http"
-	"os"
-	"runtime"
-	"strconv"
-)
+use http, os, runtime, strconv
 
-threads 4
-
-thread var served int
+thread served int
 
 // read by every shard: TestThreadsRace checks the reads don't race with its initialization
-shared var greeting = "shard"
+shared greeting = "shard"
 
-func handle(w *http.ResponseWriter, r *http.Request) {
-	if r.Path == "/crash" {
+fn handle(w *http.ResponseWriter, r *http.Request) {
+	if r.path == "/crash" {
 		panic("crash requested")
 	}
 	served++
 	if len(greeting) != 5 {
 		panic("shared var not initialized")
 	}
-	var b [48]byte
-	out := strconv.AppendInt(b[:0], runtime.Shard())
+	var b u8[48]
+	out := strconv.append_int(b[:0], runtime.shard())
 	out = append(out, ':')
-	out = strconv.AppendInt(out, served)
-	w.Write(out)
+	out = strconv.append_int(out, served)
+	w.write(out)
 }
 
-func main() {
-	if err := http.ListenAndServe(os.Arg(1), handle); err != nil {
+fn main() {
+	if err := http.listen_and_serve(os.arg(1), handle); err != nil {
 		panic(err)
 	}
 }

@@ -1,39 +1,35 @@
-package main
+program
 
 // json.Decoder.Skip follows the JSON grammar (brackets match, separators where they belong,
 // valid escapes, no raw control characters), never moves Offset past the end of the data, and
 // nests up to 1024 deep. String replaces invalid UTF-8 with U+FFFD, as Go does.
 
-import (
-	"json"
-	"os"
-	"strconv"
-)
+use json, os, strconv
 
-var src [4096]byte
+thread src u8[4096]
 
-func skip(doc string) {
+fn skip(doc str) {
 	n := copy(src[:], doc)
-	d := json.NewDecoder(src[:n])
-	ok := d.Skip()
-	end := d.End()
-	print(doc, " -> ", ok && end, " offset=", d.Offset(), "/", n, "\n")
+	d := json.new_decoder(src[:n])
+	ok := d.skip()
+	end := d.end()
+	print(doc, " -> ", ok and end, " offset=", d.offset(), "/", n, "\n")
 }
 
-func deep(n int) {
+fn deep(n int) {
 	b := src[:0]
-	for range n {
+	for _ in 0..n {
 		b = append(b, '[')
 	}
-	for range n {
+	for _ in 0..n {
 		b = append(b, ']')
 	}
-	d := json.NewDecoder(b)
-	ok := d.Skip()
-	println("depth", n, ok && d.End())
+	d := json.new_decoder(b)
+	ok := d.skip()
+	println("depth", n, ok and d.end())
 }
 
-func main() {
+fn main() {
 	// valid
 	skip(`[]`)
 	skip(`{}`)
@@ -70,32 +66,32 @@ func main() {
 	skip(`[tru]`)
 	// a lone closer inside an object doesn't count as a value
 	n := copy(src[:], `{"a": ], "b": 2}`)
-	d := json.NewDecoder(src[:n])
-	var key [8]byte
-	d.BeginObject()
-	k, _ := d.Field(key[:])
-	println(k, d.Skip(), d.Err != nil)
+	d := json.new_decoder(src[:n])
+	var key u8[8]
+	d.begin_object()
+	k, _ := d.field(key[:])
+	println(k, d.skip(), d.err != nil)
 	deep(1024)
 	deep(1025)
 
 	// String: invalid UTF-8 becomes U+FFFD, valid multi-byte runes pass through
 	n = copy(src[:], "\"a\xffb\xc3\xa9\xed\xa0\x80\xc3\"")
-	d = json.NewDecoder(src[:n])
-	var sb [32]byte
-	s, ok := d.String(sb[:])
-	var out [128]byte
+	d = json.new_decoder(src[:n])
+	var sb u8[32]
+	s, ok := d.string(sb[:])
+	var out u8[128]
 	o := out[:0]
 	for i := 0; i < len(s); i++ {
-		o = strconv.AppendInt(o, int(s[i]))
+		o = strconv.append_int(o, int(s[i]))
 		o = append(o, ' ')
 	}
 	o = append(o, '\n')
-	os.Stdout.Write(o)
+	os.stdout.write(o)
 	println(ok)
 	// the replacement needs room for 3 bytes
 	n = copy(src[:], "\"ab\xff\"")
-	d = json.NewDecoder(src[:n])
-	var small [4]byte
-	s, ok = d.String(small[:])
-	println(ok, d.Err == json.ErrBuffer)
+	d = json.new_decoder(src[:n])
+	var small u8[4]
+	s, ok = d.string(small[:])
+	println(ok, d.err == json.Buffer)
 }

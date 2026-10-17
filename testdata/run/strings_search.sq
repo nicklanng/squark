@@ -1,11 +1,11 @@
-package main
+program
 
-import "strings"
+use strings
 
-// strings.IndexByte, LastIndexByte and Index (SIMD inside) agree with simple loops at every length
+// strings.index_byte, LastIndexByte and Index (SIMD inside) agree with simple loops at every length
 // and position.
 
-func naiveIndex(s, sep string) int {
+fn naive_index(s, sep str) -> int {
 	for i := 0; i+len(sep) <= len(s); i++ {
 		if s[i:i+len(sep)] == sep {
 			return i
@@ -14,7 +14,7 @@ func naiveIndex(s, sep string) int {
 	return -1
 }
 
-func naiveFirst(s string, c byte) int {
+fn naive_first(s str, c u8) -> int {
 	for i := 0; i < len(s); i++ {
 		if s[i] == c {
 			return i
@@ -23,7 +23,7 @@ func naiveFirst(s string, c byte) int {
 	return -1
 }
 
-func naiveLast(s string, c byte) int {
+fn naive_last(s str, c u8) -> int {
 	for i := len(s) - 1; i >= 0; i-- {
 		if s[i] == c {
 			return i
@@ -32,35 +32,35 @@ func naiveLast(s string, c byte) int {
 	return -1
 }
 
-func main() {
-	var buf [80]byte
-	for i := range buf {
-		buf[i] = 'a' + byte(i%7)
+fn main() {
+	var buf u8[80]
+	for i, _ in buf {
+		buf[i] = 'a' + u8(i%7)
 	}
 	bad := 0
 	for n := 0; n <= len(buf); n++ {
-		s := string(buf[:n])
-		for _, c := range "abcgz" {
-			if strings.IndexByte(s, byte(c)) != naiveFirst(s, byte(c)) {
+		s := str(buf[:n])
+		for c in "abcgz" {
+			if strings.index_byte(s, u8(c)) != naive_first(s, u8(c)) {
 				bad++
 			}
-			if strings.LastIndexByte(s, byte(c)) != naiveLast(s, byte(c)) {
+			if strings.last_index_byte(s, u8(c)) != naive_last(s, u8(c)) {
 				bad++
 			}
 		}
-		for _, sep := range []string{"a", "gab", "cdefg", "zz", "abcdefgabcdefgabcd", "fgabcdefgabcdefga"} {
-			if strings.Index(s, sep) != naiveIndex(s, sep) {
+		for sep in str[]{"a", "gab", "cdefg", "zz", "abcdefgabcdefgabcd", "fgabcdefgabcdefga"} {
+			if strings.index(s, sep) != naive_index(s, sep) {
 				bad++
-				println("Index", n, sep, strings.Index(s, sep), naiveIndex(s, sep))
+				println("Index", n, sep, strings.index(s, sep), naive_index(s, sep))
 			}
 		}
 		for k := 0; k < n; k++ {
 			old := buf[k]
 			buf[k] = '#'
-			s := string(buf[:n])
-			if strings.IndexByte(s, '#') != k || strings.LastIndexByte(s, '#') != k {
+			s := str(buf[:n])
+			if strings.index_byte(s, '#') != k or strings.last_index_byte(s, '#') != k {
 				bad++
-				println("byte", n, k, strings.IndexByte(s, '#'), strings.LastIndexByte(s, '#'))
+				println("byte", n, k, strings.index_byte(s, '#'), strings.last_index_byte(s, '#'))
 			}
 			buf[k] = old
 		}

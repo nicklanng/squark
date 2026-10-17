@@ -5,40 +5,29 @@
 //
 // It shows:
 //   - 2-D arrays as package storage and as values: boards copied into frames, compared with ==
-//   - a lookup table computed at start-up into a shared var, and rules as func values
+//   - a lookup table computed at start-up into a shared variable, and rules as fn values
 //   - constant pattern tables, and anytype helpers taking tables and vectors of any length
 //   - a preemptible task: a long computation that shares its thread with a ticker
 //   - a bytes.Buffer over package storage that never grows, checked before printing
-package main
+program
 
-import (
-	"bytes"
-	"math"
-	"math/rand"
-	"os"
-	"strconv"
-	"strings"
-	"time"
-)
+use bytes, math, math/rand, os, strconv, strings, time
 
 const (
 	rows = 14
 	cols = 20
 )
 
-const (
-	ruleConway = iota
-	ruleHighLife
-)
+enum RuleId { conway, high_life }
 
-const ruleNames = [2]string{"conway", "highlife"}
+const rule_names = str[2]{"conway", "highlife"}
 
 // seed patterns, as (row, col) offsets
 const (
-	glider     = [5][2]int{{0, 1}, {1, 2}, {2, 0}, {2, 1}, {2, 2}}
-	blinker    = [3][2]int{{0, 0}, {0, 1}, {0, 2}}
-	rPentomino = [5][2]int{{0, 1}, {0, 2}, {1, 0}, {1, 1}, {2, 1}}
-	replicator = [12][2]int{
+	glider      = int[2][5]{{0, 1}, {1, 2}, {2, 0}, {2, 1}, {2, 2}}
+	blinker     = int[2][3]{{0, 0}, {0, 1}, {0, 2}}
+	r_pentomino = int[2][5]{{0, 1}, {0, 2}, {1, 0}, {1, 1}, {2, 1}}
+	replicator = int[2][12]{
 		{0, 2}, {0, 3}, {0, 4}, {1, 1}, {1, 4}, {2, 0},
 		{2, 4}, {3, 0}, {3, 3}, {4, 0}, {4, 1}, {4, 2},
 	}
@@ -46,81 +35,139 @@ const (
 
 // the soup census
 const (
-	soups     = 400  // random starting boards
-	soupGens  = 1500 // generations before a soup counts as still changing
-	maxPeriod = 16   // the longest cycle the census recognises
+	soups      = 400  // random starting boards
+	soup_gens  = 1500 // generations before a soup counts as still changing
+	max_period = 16   // the longest cycle the census recognises
 )
 
 // the Mandelbrot image, mw x mh characters
 const (
-	mw      = 60
-	mh      = 23 // odd, so the real axis is a row
-	maxIter = 60
-	palette = " .:-=+*#%" // by escape speed; '@' is inside the set
+	mw       = 60
+	mh       = 23 // odd, so the real axis is a row
+	max_iter = 60
+	palette  = " .:-=+*#%" // by escape speed; '@' is inside the set
 )
 
 // Board is a torus of cells. It holds no references, so copying it copies the whole grid.
-type Board struct {
-	cells [rows][cols]uint8
+struct Board {
+	cells u8[cols][rows]
 	gen   int
-	rule  int // index into rules
+	rule  RuleId // index into rules
+}
+
+impl Board {
+	fn reset(&self, rule RuleId) { *self = Board{rule: rule} }
+
+	fn set(&self, r, c int) { self.cells[wrap(r, rows)][wrap(c, cols)] = 1 }
+
+	// step writes the next generation into next.
+	fn step(&self, next *Board) {
+		for r := 0; r < rows; r++ {
+			for c := 0; c < cols; c++ {
+				m := 0
+				for dr := -1; dr <= 1; dr++ {
+					row := &self.cells[wrap(r+dr, rows)]
+					for dc := -1; dc <= 1; dc++ {
+						m = m<<1 | int(row[wrap(c+dc, cols)])
+					}
+				}
+				next.cells[r][c] = tables[self.rule][m]
+			}
+		}
+		next.gen = self.gen + 1
+		next.rule = self.rule
+	}
+
+	// population takes the board by value: a copy of the grid, which is fine for a read-only query.
+	fn population(self) -> int {
+		n := 0
+		for row in self.cells {
+			for v in row {
+				n += int(v)
+			}
+		}
+		return n
+	}
 }
 
 // A Rule says whether a cell lives in the next generation, given whether it is alive now and how
 // many of its eight neighbours are.
-type Rule func(alive bool, n int) bool
+Rule: fn(alive bool, n int) -> bool
 
-// Census tallies how the soups end up: periods[0] counts those still changing at soupGens.
-type Census struct {
-	died                 int
-	periods              [maxPeriod + 1]int
-	longest, longestSeed int
+// Census tallies how the soups end up: periods[0] counts those still changing at soup_gens.
+struct Census {
+	died                  int
+	periods               int[max_period + 1]
+	longest, longest_seed int
 }
 
-type Complex struct{ Re, Im float64 }
+impl Census {
+	fn add(&self, seed, gen, period, pop int) {
+		self.periods[period]++
+		if pop == 0 {
+			self.died++
+		}
+		if period > 0 and gen > self.longest {
+			self.longest = gen
+			self.longest_seed = seed
+		}
+	}
+}
 
-var rules = [2]Rule{conway, highLife}
+struct Complex { re, im f64 }
+
+impl Complex {
+	fn add(self, w Complex) -> Complex { return Complex{self.re + w.re, self.im + w.im} }
+
+	fn mul(self, w Complex) -> Complex {
+		return Complex{self.re*w.re - self.im*w.im, self.re*w.im + self.im*w.re}
+	}
+
+	fn abs(self) -> f64 { return math.sqrt(self.re*self.re + self.im*self.im) }
+}
+
+thread rules = Rule[2]{conway, high_life}
 
 // tables maps each rule's 3x3 neighbourhood, as 9 bits with the cell itself at bit 4, to the
-// cell's next state. A shared var is computed once at start-up and is read-only afterwards.
-shared var tables = makeTables()
+// cell's next state. A shared variable is computed once at start-up and is read-only afterwards.
+shared tables = make_tables()
 
 // The demos' two boards, stepped back and forth, and the output buffer's storage: package
 // variables, so they take no stack.
-var (
-	boards   [2]Board
-	outStore [8192]byte
+thread (
+	boards    Board[2]
+	out_store u8[8192]
 )
 
 // The census's boards and results, shared by the census task, the ticker and main: they run on
 // one thread, so they need no locks.
-var (
-	soup        [2]Board
-	census      Census
-	progress    int // soups done, read by the ticker
-	finished    bool
-	sawProgress bool
-	soupDone    chan int cap 1
-	tickerDone  chan int cap 1
+thread (
+	soup         Board[2]
+	census       Census
+	progress     int // soups done, read by the ticker
+	finished     bool
+	saw_progress bool
+	soup_done    int chan[1]
+	ticker_done  int chan[1]
 )
 
-var image [mh][mw]int // the Mandelbrot escape counts
+thread image int[mw][mh] // the Mandelbrot escape counts
 
 // ---- rules ----
 
 // conway is B3/S23.
-func conway(alive bool, n int) bool { return n == 3 || alive && n == 2 }
+fn conway(alive bool, n int) -> bool { return n == 3 or alive and n == 2 }
 
-// highLife is B36/S23.
-func highLife(alive bool, n int) bool { return n == 3 || n == 6 && !alive || alive && n == 2 }
+// high_life is B36/S23.
+fn high_life(alive bool, n int) -> bool { return n == 3 or n == 6 and not alive or alive and n == 2 }
 
-func makeTables() [2][512]uint8 {
-	var t [2][512]uint8
-	for r, rule := range rules {
-		for m := range 512 {
+fn make_tables() -> u8[512][2] {
+	var t u8[512][2]
+	for r, rule in rules {
+		for m in 0..512 {
 			n := 0
 			for bit := 0; bit < 9; bit++ {
-				if bit != 4 && m>>bit&1 == 1 {
+				if bit != 4 and m>>bit&1 == 1 {
 					n++
 				}
 			}
@@ -134,97 +181,64 @@ func makeTables() [2][512]uint8 {
 
 // ---- boards ----
 
-func wrap(i, n int) int { return (i%n + n) % n }
-
-func (b *Board) Reset(rule int) { *b = Board{rule: rule} }
-
-func (b *Board) Set(r, c int) { b.cells[wrap(r, rows)][wrap(c, cols)] = 1 }
+fn wrap(i, n int) -> int { return (i%n + n) % n }
 
 // place sets the cells of a pattern table of any length at (r, c).
-func place(b *Board, pat anytype, r, c int) {
-	for _, p := range pat {
-		b.Set(r+p[0], c+p[1])
+fn place(b *Board, pat anytype, r, c int) {
+	for p in pat {
+		b.set(r+p[0], c+p[1])
 	}
-}
-
-// Step writes the next generation into next.
-func (b *Board) Step(next *Board) {
-	for r := 0; r < rows; r++ {
-		for c := 0; c < cols; c++ {
-			m := 0
-			for dr := -1; dr <= 1; dr++ {
-				row := &b.cells[wrap(r+dr, rows)]
-				for dc := -1; dc <= 1; dc++ {
-					m = m<<1 | int(row[wrap(c+dc, cols)])
-				}
-			}
-			next.cells[r][c] = tables[b.rule][m]
-		}
-	}
-	next.gen = b.gen + 1
-	next.rule = b.rule
-}
-
-// Population takes the board by value: a copy of the grid, which is fine for a read-only query.
-func (b Board) Population() int {
-	n := 0
-	for _, row := range b.cells {
-		for _, v := range row {
-			n += int(v)
-		}
-	}
-	return n
 }
 
 // ---- output ----
 
-// renderFrames draws boards side by side, each captioned with its generation.
-func renderFrames(frames []Board, out *bytes.Buffer) {
-	var num [20]byte
-	var caption [cols + 2]byte
-	for i, f := range frames {
-		label := strconv.AppendInt(append(num[:0], "gen "...), f.gen)
+// render_frames draws boards side by side, each captioned with its generation.
+fn render_frames(frames Board[], out *bytes.Buffer) {
+	var num u8[20]
+	var caption u8[cols + 2]
+	for i, f in frames {
+		label := strconv.append_int(append(num[:0], "gen "...), f.gen)
 		if i < len(frames)-1 {
-			label = strings.AppendPadRight(caption[:0], string(label), cols+2, ' ')
+			label = strings.append_pad_right(caption[:0], str(label), cols+2, ' ')
 		}
-		out.Write(label)
+		out.write(label)
 	}
-	out.WriteByte('\n')
+	out.write_byte('\n')
 	for r := 0; r < rows; r++ {
-		for i := range frames {
+		for i, _ in frames {
 			if i > 0 {
-				out.WriteString("  ")
+				out.write_string("  ")
 			}
-			for _, v := range frames[i].cells[r] {
+			for v in frames[i].cells[r] {
 				switch v {
 				case 1:
-					out.WriteByte('#')
+					out.write_byte('#')
 				default:
-					out.WriteByte('.')
+					out.write_byte('.')
 				}
 			}
 		}
-		out.WriteByte('\n')
+		out.write_byte('\n')
 	}
 }
 
-// writeList writes label and the numbers in xs (an array, slice or vector of ints).
-func writeList(out *bytes.Buffer, label string, xs anytype) {
-	out.WriteString(label)
-	for _, x := range xs {
-		out.WriteByte(' ')
-		out.WriteInt(x)
+// write_list writes label and the numbers in xs (an array, slice or vector of ints).
+fn write_list(out *bytes.Buffer, label str, xs anytype) {
+	out.write_string(label)
+	for x in xs {
+		out.write_byte(' ')
+		out.write_int(x)
 	}
-	out.WriteByte('\n')
+	out.write_byte('\n')
 }
 
 // put writes label and then v.
-func put(out *bytes.Buffer, label string, v int) {
-	out.WriteString(label)
-	out.WriteInt(v)
+fn put(out *bytes.Buffer, label str, v int) {
+	out.write_string(label)
+	out.write_int(v)
 }
 
-func yesNo(b bool) string {
+fn yes_no(b bool) -> str {
 	if b {
 		return "yes"
 	}
@@ -233,151 +247,132 @@ func yesNo(b bool) string {
 
 // flush writes out what has been built. A bytes.Buffer never grows: a write that doesn't fit is
 // truncated and flagged, so check before printing a partial frame.
-func flush(out *bytes.Buffer) {
-	if out.Overflowed() {
+fn flush(out *bytes.Buffer) {
+	if out.overflowed() {
 		panic("output buffer too small")
 	}
-	os.Stdout.Write(out.Bytes())
-	out.Reset()
+	os.stdout.write(out.bytes())
+	out.reset()
 }
 
 // ---- demos ----
 
 // demo runs gens generations from boards[0], drawing every every'th one (and the last).
-func demo(name string, gens, every int, out *bytes.Buffer) {
-	out.WriteString("\n== ")
-	out.WriteString(name)
-	out.WriteString(" (")
-	out.WriteString(ruleNames[boards[0].rule])
-	out.WriteString(") ==\n")
-	var pops [..64]int
-	var frames [..4]Board // copies of the boards, not views of them
+fn demo(name str, gens, every int, out *bytes.Buffer) {
+	out.write_string("\n== ")
+	out.write_string(name)
+	out.write_string(" (")
+	out.write_string(rule_names[boards[0].rule])
+	out.write_string(") ==\n")
+	var pops int[..64]
+	var frames Board[..4] // copies of the boards, not views of them
 	cur := 0
 	for g := 0; g <= gens; g++ {
 		b := &boards[cur]
-		pops.Push(b.Population())
-		if g%every == 0 || g == gens {
+		pops.push(b.population())
+		if g%every == 0 or g == gens {
 			if len(frames) == cap(frames) {
-				renderFrames(frames[:], out)
-				frames.Clear()
+				render_frames(frames[:], out)
+				frames.clear()
 			}
-			frames.Push(*b)
+			frames.push(*b)
 		}
 		if g < gens {
-			b.Step(&boards[1-cur])
+			b.step(&boards[1-cur])
 			cur = 1 - cur
 		}
 	}
-	renderFrames(frames[:], out)
-	writeList(out, "population:", pops)
+	render_frames(frames[:], out)
+	write_list(out, "population:", pops)
 	flush(out)
 }
 
 // ---- the soup census ----
 
-// runSoup fills soup[0] at random from seed and steps it until a board repeats. It returns the
-// generation the cycle was found at (soupGens if none), its period and the final population. A
-// generator made with rand.New(seed) is deterministic, so every run sees the same soups.
-func runSoup(seed uint64) (int, int, int) {
-	r := rand.New(seed)
-	soup[0].Reset(ruleConway)
+// run_soup fills soup[0] at random from seed and steps it until a board repeats. It returns the
+// generation the cycle was found at (soup_gens if none), its period and the final population. A
+// generator made with rand.new(seed) is deterministic, so every run sees the same soups.
+fn run_soup(seed u64) -> (int, int, int) {
+	r := rand.new(seed)
+	soup[0].reset(.conway)
 	for i := 0; i < rows*cols*3/10; i++ {
-		soup[0].Set(r.Intn(rows), r.Intn(cols))
+		soup[0].set(r.intn(rows), r.intn(cols))
 	}
-	var recent [..maxPeriod][rows][cols]uint8 // the latest grids, oldest first
+	var recent u8[cols][rows][..max_period] // the latest grids, oldest first
 	cur := 0
-	for g := 0; g < soupGens; g++ {
-		for i, old := range recent {
+	for g := 0; g < soup_gens; g++ {
+		for i, old in recent {
 			if old == soup[cur].cells {
-				return g, len(recent) - i, soup[cur].Population()
+				return g, len(recent) - i, soup[cur].population()
 			}
 		}
-		if len(recent) == maxPeriod {
+		if len(recent) == max_period {
 			copy(recent[:], recent[1:])
-			recent.Pop()
+			recent.pop()
 		}
-		recent.Push(soup[cur].cells)
-		soup[cur].Step(&soup[1-cur])
+		recent.push(soup[cur].cells)
+		soup[cur].step(&soup[1-cur])
 		cur = 1 - cur
 	}
-	return soupGens, 0, soup[cur].Population()
+	return soup_gens, 0, soup[cur].population()
 }
 
-func (c *Census) add(seed, gen, period, pop int) {
-	c.periods[period]++
-	if pop == 0 {
-		c.died++
-	}
-	if period > 0 && gen > c.longest {
-		c.longest = gen
-		c.longestSeed = seed
-	}
-}
-
-// runCensus is the long run. A thread's goroutines switch only when one blocks, so a plain task
+// run_census is the long run. A thread's goroutines switch only when one blocks, so a plain task
 // would hold the thread to the end; a preemptible one yields at a loop iteration once it has run
 // for a time slice, in its own loops and in those of everything it calls.
-task runCensus() pool 1 preemptible {
+task run_census() pool 1 preemptible {
 	for s := 1; s <= soups; s++ {
-		gen, period, pop := runSoup(uint64(s))
+		gen, period, pop := run_soup(u64(s))
 		census.add(s, gen, period, pop)
 		progress = s
 	}
 	finished = true
-	soupDone <- 1
+	soup_done <- 1
 }
 
 // ticker samples the census's progress while it runs, on the same thread. It notes what it saw
 // but prints nothing, so the output doesn't depend on timing.
 task ticker() pool 1 {
-	for !finished {
-		time.Sleep(time.Millisecond)
-		if progress > 0 && progress < soups {
-			sawProgress = true
+	while not finished {
+		time.sleep(time.millisecond)
+		if progress > 0 and progress < soups {
+			saw_progress = true
 		}
 	}
-	tickerDone <- 1
+	ticker_done <- 1
 }
 
 // ---- Mandelbrot ----
 
-func (z Complex) Add(w Complex) Complex { return Complex{z.Re + w.Re, z.Im + w.Im} }
-
-func (z Complex) Mul(w Complex) Complex {
-	return Complex{z.Re*w.Re - z.Im*w.Im, z.Re*w.Im + z.Im*w.Re}
-}
-
-func (z Complex) Abs() float64 { return math.Sqrt(z.Re*z.Re + z.Im*z.Im) }
-
-// escape counts iterations until |z| > 2, or maxIter if it never escapes.
-func escape(c Complex) int {
+// escape counts iterations until |z| > 2, or max_iter if it never escapes.
+fn escape(c Complex) -> int {
 	z := Complex{}
-	for i := 0; i < maxIter; i++ {
-		z = z.Mul(z).Add(c)
-		if z.Abs() > 2 {
+	for i := 0; i < max_iter; i++ {
+		z = z.mul(z).add(c)
+		if z.abs() > 2 {
 			return i
 		}
 	}
-	return maxIter
+	return max_iter
 }
 
-func mandelbrot(out *bytes.Buffer) {
-	out.WriteString("\n== mandelbrot ==\n")
+fn mandelbrot(out *bytes.Buffer) {
+	out.write_string("\n== mandelbrot ==\n")
 	inside := 0
 	for y := 0; y < mh; y++ {
 		// rows y and mh-1-y get exactly opposite imaginary parts
-		im := 1.2 * float64(2*y-(mh-1)) / (mh - 1)
+		im := 1.2 * f64(2*y-(mh-1)) / (mh - 1)
 		for x := 0; x < mw; x++ {
-			n := escape(Complex{-2.2 + 3.0*float64(x)/mw, im})
+			n := escape(Complex{-2.2 + 3.0*f64(x)/mw, im})
 			image[y][x] = n
-			if n == maxIter {
+			if n == max_iter {
 				inside++
-				out.WriteByte('@')
+				out.write_byte('@')
 			} else {
-				out.WriteByte(palette[n*len(palette)/maxIter])
+				out.write_byte(palette[n*len(palette)/max_iter])
 			}
 		}
-		out.WriteByte('\n')
+		out.write_byte('\n')
 	}
 
 	// the set is its own mirror image in the real axis
@@ -393,67 +388,67 @@ check:
 	}
 
 	// the share of the 3.0 x 2.4 box inside the set, rounded to two decimals
-	area := 3.0 * 2.4 * float64(inside) / (mw * mh)
-	var num [32]byte
+	area := 3.0 * 2.4 * f64(inside) / (mw * mh)
+	var num u8[32]
 	put(out, "points inside: ", inside)
-	out.WriteString(", area estimate: ")
-	out.Write(strconv.AppendFloat(num[:0], math.Round(area*100)/100, 2))
-	out.WriteString(", symmetric: ")
-	out.WriteString(yesNo(symmetric))
-	out.WriteByte('\n')
+	out.write_string(", area estimate: ")
+	out.write(strconv.append_float(num[:0], math.round(area*100)/100, 2))
+	out.write_string(", symmetric: ")
+	out.write_string(yes_no(symmetric))
+	out.write_byte('\n')
 	flush(out)
 }
 
-func main() {
+fn main() {
 	gens := 12
-	if os.NArgs() > 1 {
-		n, err := strconv.Atoi(os.Arg(1))
-		if err != nil || n < 1 || n > 63 {
+	if os.n_args() > 1 {
+		n, err := strconv.atoi(os.arg(1))
+		if err != nil or n < 1 or n > 63 {
 			println("generations must be 1..63")
-			os.Exit(2)
+			os.exit(2)
 		}
 		gens = n
 	}
-	out := bytes.NewBuffer(outStore[:0])
+	out := bytes.new_buffer(out_store[:0])
 
-	go ticker()
-	go runCensus()
+	start ticker()
+	start run_census()
 
 	// a blinker has period 2: two generations on, the board equals a saved copy
-	boards[0].Reset(ruleConway)
+	boards[0].reset(.conway)
 	place(&boards[0], blinker, 5, 10)
 	saved := boards[0]
-	boards[0].Step(&boards[1])
-	boards[1].Step(&boards[0])
-	out.WriteString("blinker back after 2 generations: ")
-	out.WriteString(yesNo(boards[0].cells == saved.cells))
+	boards[0].step(&boards[1])
+	boards[1].step(&boards[0])
+	out.write_string("blinker back after 2 generations: ")
+	out.write_string(yes_no(boards[0].cells == saved.cells))
 
-	boards[0].Reset(ruleConway)
+	boards[0].reset(.conway)
 	place(&boards[0], glider, 1, 1)
 	demo("glider", gens, 4, &out)
 
-	boards[0].Reset(ruleConway)
-	place(&boards[0], rPentomino, 3, 8)
+	boards[0].reset(.conway)
+	place(&boards[0], r_pentomino, 3, 8)
 	demo("R-pentomino", 30, 10, &out)
 
 	// the same seed under both rules: in HighLife it copies itself
-	for rule := range rules {
-		boards[0].Reset(rule)
+	for rule, _ in rules {
+		boards[0].reset(RuleId(rule))
 		place(&boards[0], replicator, 5, 8)
 		demo("replicator", 12, 4, &out)
 	}
 
 	mandelbrot(&out)
 
-	<-soupDone
-	<-tickerDone
+	<-soup_done
+	<-ticker_done
 	put(&out, "\n== soup census ==\nsoups: ", soups)
 	put(&out, ", died out: ", census.died)
-	writeList(&out, "\nby period (0 = still changing):", census.periods)
-	put(&out, "longest-lived: soup ", census.longestSeed)
+	write_list(&out, "\nby period (0 = still changing):", census.periods)
+	put(&out, "longest-lived: soup ", census.longest_seed)
 	put(&out, ", settled at generation ", census.longest)
-	out.WriteString("\nticker saw the census mid-run: ")
-	out.WriteString(yesNo(sawProgress))
-	out.WriteByte('\n')
+	out.write_string("\nticker saw the census mid-run: ")
+	out.write_string(yes_no(saw_progress))
+	out.write_byte('\n')
 	flush(&out)
 }

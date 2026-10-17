@@ -1,0 +1,11 @@
+program
+
+// Two loop variables over an integer are reported, not a compiler crash (BUGS.md Q8).
+
+fn main() {
+	n := 0
+	for k, v in 5 { // ERROR "permits only one loop variable"
+		n += k
+	}
+	println(n)
+}

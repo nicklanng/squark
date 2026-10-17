@@ -175,7 +175,7 @@ func Build(opt Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	notes := perThreadNote(prog)
+	notes := ""
 	out, err := compiler.Generate(prog, order)
 	if err != nil {
 		return nil, err
@@ -639,26 +639,7 @@ func CheckNotes(dir string) (string, error) {
 	if _, err = compiler.Compile(prog); err != nil {
 		return "", err
 	}
-	return perThreadNote(prog), nil
-}
-
-// perThreadNote lists, for a program written for threads, the package variables it changes after
-// start-up: each scheduler thread has its own copy, so their values can differ between threads.
-func perThreadNote(prog *compiler.Program) string {
-	if !prog.ThreadsSet {
-		return ""
-	}
-	vars := compiler.PerThreadVars(prog)
-	if len(vars) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("note: with threads, each scheduler thread has its own copy of these package variables:\n")
-	for _, v := range vars {
-		fmt.Fprintf(&b, "  %s:%d: %s: %s\n", v.Var.Pos.File, v.Var.Pos.Line, v.Var.Name, v.Reason)
-	}
-	b.WriteString("  (declare them `thread var` if that's intended; share between threads with a shared var channel)\n")
-	return b.String()
+	return "", nil
 }
 
 // Doc lists the exported functions of the program's packages (or of the named package) with
@@ -688,11 +669,11 @@ func Doc(dir, pkg string) (string, error) {
 			return "", err
 		}
 		var src strings.Builder
-		src.WriteString("package main\n\nimport (\n")
+		src.WriteString("program\n\nuse (\n")
 		for _, p := range paths {
-			fmt.Fprintf(&src, "\t_%s %q\n", strings.ReplaceAll(p, "/", "_"), p)
+			fmt.Fprintf(&src, "\t%q as _%s\n", p, strings.ReplaceAll(p, "/", "_"))
 		}
-		src.WriteString(")\n\nfunc main() {}\n")
+		src.WriteString(")\n\nfn main() {}\n")
 		if err := os.WriteFile(filepath.Join(tmp, "main.sq"), []byte(src.String()), 0o644); err != nil {
 			return "", err
 		}

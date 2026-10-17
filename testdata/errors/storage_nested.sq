@@ -1,25 +1,25 @@
-package main
+program
 
 // map and channel storage inside a struct or array points into itself once used, so copying the
 // struct or array out of a variable would alias it
-type Reg struct {
+struct Reg {
 	n int
-	m map[int]int cap 4
+	m int[int; 4]
 }
 
-type Pipe struct{ c chan int cap 2 }
+struct Pipe { c int chan[2] }
 
-func take(r Reg) {}
+fn take(r Reg) {}
 
-func mk() Reg {
+fn mk() -> Reg {
 	var a Reg
 	a.m[1] = 111
-	return a // ERROR "cannot copy a: Reg contains map[int]int cap 4 storage"
+	return a // ERROR "cannot copy a: Reg contains int[int; 4] storage"
 }
 
-func fresh() Reg { return Reg{n: 1} }
+fn fresh() -> Reg { return Reg{n: 1} }
 
-func main() {
+fn main() {
 	var a Reg
 	b := a        // ERROR "cannot copy a into b: Reg contains"
 	var c = a     // ERROR "cannot copy a into c: Reg contains"
@@ -29,10 +29,10 @@ func main() {
 	p := &a
 	e := *p       // ERROR "cannot copy *p into e: Reg contains"
 
-	var arr [2]map[int]int cap 4
-	arr2 := arr   // ERROR "cannot copy arr into arr2: [2]map[int]int cap 4 contains map[int]int cap 4 storage"
-	var pipes [2]Pipe
-	for _, q := range pipes { // ERROR "cannot copy elements of pipes into q: Pipe contains chan int cap 2 storage"
+	var arr int[int; 4][2]
+	arr2 := arr   // ERROR "cannot copy arr into arr2: int[int; 4][2] contains int[int; 4] storage"
+	var pipes Pipe[2]
+	for q in pipes { // ERROR "cannot copy elements of pipes into q: Pipe contains int chan[2] storage"
 		_ = q
 	}
 
@@ -41,7 +41,7 @@ func main() {
 	g := fresh()
 	take(Reg{})
 	q := &a
-	for i := range pipes {
+	for i, _ in pipes {
 		pipes[i].c <- i
 	}
 	println(b.n, c.n, d.n, e.n, len(arr2), f.n, g.n, q.n)

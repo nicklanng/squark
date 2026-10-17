@@ -1,19 +1,19 @@
-package main
+program
 
 // Out-of-range float to integer conversions saturate (spec §5) instead of being C undefined
 // behaviour, so the result always fits its type and bounds checks stay sound.
-var tbl [256]int
-var big = 1e20
-var neg = -1.0
-var g3 = 300.5
+thread tbl int[256]
+thread big = 1e20
+thread neg = -1.0
+thread g3 = 300.5
 
-func main() {
-	i := uint8(g3)
+fn main() {
+	i := u8(g3)
 	tbl[i] = 7
 	println(i, tbl[255])
-	println(int64(big), int64(-big), int32(big), uint32(big))
-	println(uint8(neg), uint64(neg), int8(g3), int8(-g3))
+	println(i64(big), i64(-big), i32(big), u32(big))
+	println(u8(neg), u64(neg), i8(g3), i8(-g3))
 	nan := big - big
 	nan = nan / nan
-	println(int64(nan), uint8(nan))
+	println(i64(nan), u8(nan))
 }

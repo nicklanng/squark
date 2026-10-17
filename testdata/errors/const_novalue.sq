@@ -1,0 +1,8 @@
+program
+
+const (
+	first = 1
+	second // ERROR "constant second needs a value (for a set of numbered names, declare an enum)"
+)
+
+fn main() {}

@@ -1,26 +1,22 @@
-package main
+program {
+	workers 4
+}
 
 // Test server for TestWorkers (internal/driver): 4 worker processes on one address. / answers with
 // the worker's process id; /crash makes that worker fail.
 
-import (
-	"http"
-	"os"
-	"strconv"
-)
+use http, os, strconv
 
-workers 4
-
-func handle(w *http.ResponseWriter, r *http.Request) {
-	if r.Path == "/crash" {
-		os.Exit(3)
+fn handle(w *http.ResponseWriter, r *http.Request) {
+	if r.path == "/crash" {
+		os.exit(3)
 	}
-	var b [24]byte
-	w.Write(strconv.AppendInt(b[:0], os.Getpid()))
+	var b u8[24]
+	w.write(strconv.append_int(b[:0], os.getpid()))
 }
 
-func main() {
-	if err := http.ListenAndServe(os.Arg(1), handle); err != nil {
+fn main() {
+	if err := http.listen_and_serve(os.arg(1), handle); err != nil {
 		panic(err)
 	}
 }

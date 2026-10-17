@@ -1,41 +1,43 @@
 // Loops that clang must vectorize. TestVectorize builds this program with clang's
 // loop-vectorization remarks and checks that each function marked "want: vectorized" has a
 // vectorized loop. The functions are noinline so each loop stays in its own function.
-package main
+program
 
-import "os"
+use os
 
-var g [64]int32
-var pkg []int32
-var pkgArr [64]int32
+thread g i32[64]
+thread pkg i32[]
+thread pkg_arr i32[64]
 
-type Buf struct {
+struct Buf {
 	n    int
-	data []float32
+	data f32[]
 }
 
-// want: vectorized
-//
-//squark:noinline
-func (b *Buf) add(o *Buf) {
-	for i := range b.data {
-		b.data[i] += o.data[i]
+impl Buf {
+	// want: vectorized
+	//
+	//squark:noinline
+	fn add(&self, o *Buf) {
+		for i, _ in self.data {
+			self.data[i] += o.data[i]
+		}
+	}
+
+	// want: vectorized
+	//
+	//squark:noinline
+	fn scale(&self, k f32) {
+		for i := 0; i < len(self.data); i++ {
+			self.data[i] *= k
+		}
 	}
 }
 
 // want: vectorized
 //
 //squark:noinline
-func (b *Buf) scale(k float32) {
-	for i := 0; i < len(b.data); i++ {
-		b.data[i] *= k
-	}
-}
-
-// want: vectorized
-//
-//squark:noinline
-func reverse(dst, src []int32) {
+fn reverse(dst, src i32[]) {
 	for i := len(src) - 1; i >= 0; i-- {
 		dst[len(src)-1-i] = src[i]
 	}
@@ -44,8 +46,8 @@ func reverse(dst, src []int32) {
 // want: vectorized
 //
 //squark:noinline
-func sumPkg(n int) int32 {
-	var s int32
+fn sum_pkg(n int) -> i32 {
+	var s i32
 	for i := 0; i < n; i++ {
 		s += pkg[i]
 	}
@@ -55,8 +57,8 @@ func sumPkg(n int) int32 {
 // want: vectorized
 //
 //squark:noinline
-func saxpy(a float32, x []float32, y []float32) {
-	for i := range x {
+fn saxpy(a f32, x f32[], y f32[]) {
+	for i, _ in x {
 		y[i] += a * x[i]
 	}
 }
@@ -64,8 +66,8 @@ func saxpy(a float32, x []float32, y []float32) {
 // want: vectorized
 //
 //squark:noinline
-func xorBytes(dst []byte, a []byte, b []byte) {
-	for i := range dst {
+fn xor_bytes(dst u8[], a u8[], b u8[]) {
+	for i, _ in dst {
 		dst[i] = a[i] ^ b[i]
 	}
 }
@@ -73,8 +75,8 @@ func xorBytes(dst []byte, a []byte, b []byte) {
 // want: vectorized
 //
 //squark:noinline
-func dot(a []int32, b []int32) int32 {
-	var s int32
+fn dot(a i32[], b i32[]) -> i32 {
+	var s i32
 	for i := 0; i < len(a); i++ {
 		s += a[i] * b[i]
 	}
@@ -84,9 +86,9 @@ func dot(a []int32, b []int32) int32 {
 // want: vectorized
 //
 //squark:noinline
-func countByte(b []byte, c byte) int {
+fn count_byte(b u8[], c u8) -> int {
 	k := 0
-	for i := range b {
+	for i, _ in b {
 		if b[i] == c {
 			k++
 		}
@@ -97,7 +99,7 @@ func countByte(b []byte, c byte) int {
 // want: vectorized
 //
 //squark:noinline
-func maxInt32(x []int32) int32 {
+fn max_int32(x i32[]) -> i32 {
 	m := x[0]
 	for i := 1; i < len(x); i++ {
 		if x[i] > m {
@@ -110,7 +112,7 @@ func maxInt32(x []int32) int32 {
 // want: vectorized
 //
 //squark:noinline
-func addRows(dst []int32, a []int32, b []int32, w int) {
+fn add_rows(dst i32[], a i32[], b i32[], w int) {
 	for r := 0; r < len(dst)/w; r++ {
 		base := r * w
 		for j := 0; j < w; j++ {
@@ -122,20 +124,20 @@ func addRows(dst []int32, a []int32, b []int32, w int) {
 // want: vectorized
 //
 //squark:noinline
-func brighten(dst []byte, src []byte) {
-	for i := range src {
+fn brighten(dst u8[], src u8[]) {
+	for i, _ in src {
 		v := int(src[i]) * 3 / 2
 		if v > 255 {
 			v = 255
 		}
-		dst[i] = byte(v)
+		dst[i] = u8(v)
 	}
 }
 
 // want: vectorized
 //
 //squark:noinline
-func neighbours(a []int32, b []int32) {
+fn neighbours(a i32[], b i32[]) {
 	for i := 1; i < len(a); i++ {
 		b[i-1] = a[i] + a[i-1]
 	}
@@ -144,7 +146,7 @@ func neighbours(a []int32, b []int32) {
 // want: vectorized
 //
 //squark:noinline
-func inclusive(a []int32, b []int32, n int) {
+fn inclusive(a i32[], b i32[], n int) {
 	for i := 0; i <= n; i++ {
 		b[i] = a[i] * 2
 	}
@@ -153,8 +155,8 @@ func inclusive(a []int32, b []int32, n int) {
 // want: vectorized
 //
 //squark:noinline
-func viaPointer(dst *[64]int32, a []int32) {
-	for i := range 64 {
+fn via_pointer(dst *(i32[64]), a i32[]) {
+	for i in 0..64 {
 		dst[i] = a[i] + g[i]
 	}
 }
@@ -162,7 +164,7 @@ func viaPointer(dst *[64]int32, a []int32) {
 // want: vectorized
 //
 //squark:noinline
-func countIn(s string, c byte, n int) int {
+fn count_in(s str, c u8, n int) -> int {
 	k := 0
 	for i := 0; i < n; i++ {
 		if s[i] == c {
@@ -175,8 +177,8 @@ func countIn(s string, c byte, n int) int {
 // want: vectorized
 //
 //squark:noinline
-func interleave(dst []int32, a []int32, b []int32) {
-	for i := range a {
+fn interleave(dst i32[], a i32[], b i32[]) {
+	for i, _ in a {
 		dst[2*i] = a[i]
 		dst[2*i+1] = b[i]
 	}
@@ -184,28 +186,28 @@ func interleave(dst []int32, a []int32, b []int32) {
 
 // The sizes come from the command line (64 with no arguments) so clang can't specialize the
 // functions for constant lengths, which unrolls the loops instead.
-func main() {
-	n := 64 / os.NArgs()
-	var f [64]float32
-	var h [64]float32
-	var p [64]byte
-	var q [64]byte
-	var x [64]int32
-	var y [64]int32
+fn main() {
+	n := 64 / os.n_args()
+	var f f32[64]
+	var h f32[64]
+	var p u8[64]
+	var q u8[64]
+	var x i32[64]
+	var y i32[64]
 	saxpy(2, f[:n], h[:n])
-	xorBytes(p[:n], p[:n], q[:n])
-	addRows(y[:n], x[:n], y[:n], n/8)
+	xor_bytes(p[:n], p[:n], q[:n])
+	add_rows(y[:n], x[:n], y[:n], n/8)
 	brighten(p[:n], q[:n])
 	neighbours(x[:n], y[:n])
 	inclusive(x[:n], y[:n], n-1)
-	viaPointer(&y, x[:n])
+	via_pointer(&y, x[:n])
 	fb := Buf{0, f[:n]}
 	hb := Buf{0, h[:n]}
 	fb.add(&hb)
 	fb.scale(2)
 	reverse(y[:n], x[:n])
-	var z [128]int32
+	var z i32[128]
 	interleave(z[:2*n], x[:n], y[:n])
-	pkg = pkgArr[:n]
-	println(sumPkg(n), maxInt32(x[:n]), dot(x[:n], y[:n]), countByte(p[:n], 0), countIn(string(q[:n]), 0, n), z[1])
+	pkg = pkg_arr[:n]
+	println(sum_pkg(n), max_int32(x[:n]), dot(x[:n], y[:n]), count_byte(p[:n], 0), count_in(str(q[:n]), 0, n), z[1])
 }

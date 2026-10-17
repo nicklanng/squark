@@ -6,40 +6,40 @@
 //
 // It shows:
 //   - tasks with fixed-size pools, started with go
-//   - channels declared as storage (chan T cap N), ranged over and closed
-//   - time.Sleep parking one goroutine while the others run
-package main
+//   - channels declared as storage (T chan[N]), ranged over and closed
+//   - time.sleep parking one goroutine while the others run
+program
 
-import "time"
+use time
 
 const (
-	numWorkers = 4
-	numJobs    = 1000
+	num_workers = 4
+	num_jobs    = 1000
 )
 
-type Job struct {
-	ID    int
-	Input int
+struct Job {
+	id    int
+	input int
 }
 
-type Result struct {
-	ID     int
-	Output int
-	Worker int
+struct Result {
+	id     int
+	output int
+	worker int
 }
 
 // The channels are package-level storage, so they live in static memory and every goroutine can
-// use them (a go argument can't refer to a stack, so main couldn't hand out a channel of its own).
-var jobs chan Job cap 16
-var results chan Result cap 16
-var done chan bool cap 0
+// use them (a start argument can't refer to a stack, so main couldn't hand out a channel of its own).
+thread jobs Job chan[16]
+thread results Result chan[16]
+thread done bool chan[0]
 
 // ---- the work ----
 
 // collatz counts the steps to reach 1.
-func collatz(n int) int {
+fn collatz(n int) -> int {
 	steps := 0
-	for n != 1 {
+	while n != 1 {
 		if n%2 == 0 {
 			n /= 2
 		} else {
@@ -52,32 +52,32 @@ func collatz(n int) int {
 
 // ---- the goroutines ----
 
-task worker(id int) pool numWorkers {
-	for j := range jobs {
-		results <- Result{ID: j.ID, Output: collatz(j.Input), Worker: id}
+task worker(id int) pool num_workers {
+	for j in jobs {
+		results <- Result{id: j.id, output: collatz(j.input), worker: id}
 	}
 }
 
 task producer(n int) pool 1 {
 	defer close(jobs)
 	for i := 1; i <= n; i++ {
-		jobs <- Job{ID: i, Input: i * 7919}
+		jobs <- Job{id: i, input: i * 7919}
 	}
 }
 
 task collector(n int) pool 1 {
 	best := Result{}
-	perWorker := [numWorkers]int{}
+	per_worker := int[num_workers]{}
 	for i := 0; i < n; i++ {
 		r := <-results
-		perWorker[r.Worker]++
-		if r.Output > best.Output {
+		per_worker[r.worker]++
+		if r.output > best.output {
 			best = r
 		}
 	}
-	println("longest chain: job", best.ID, "steps", best.Output)
+	println("longest chain: job", best.id, "steps", best.output)
 	total := 0
-	for _, c := range perWorker {
+	for c in per_worker {
 		total += c
 	}
 	println("results collected:", total)
@@ -86,19 +86,19 @@ task collector(n int) pool 1 {
 
 task ticker() pool 1 {
 	for i := 0; i < 3; i++ {
-		time.Sleep(2 * time.Millisecond)
+		time.sleep(2 * time.millisecond)
 		println("tick", i)
 	}
 }
 
-func main() {
-	start := time.Now()
-	go ticker()
-	for w := 0; w < numWorkers; w++ {
-		go worker(w)
+fn main() {
+	start := time.now()
+	start ticker()
+	for w := 0; w < num_workers; w++ {
+		start worker(w)
 	}
-	go producer(numJobs)
-	go collector(numJobs)
+	start producer(num_jobs)
+	start collector(num_jobs)
 	<-done
 	selftest(start)
 }

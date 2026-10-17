@@ -29,11 +29,11 @@ Every example follows the same layout, so they read alike:
 - **`selftest.sq`** (same package) holds what only the test needs: scripted clients, fixed
   input, test-mode switches. `main` calls into it in one place. An example whose normal run is
   its test (`hello`, `jobs`, `life`) has none.
-- **Order:** header, `package`, imports, directives (`budget`, `pool`, `threads`), constants,
+- **Order:** header comment, `program` with its directives (`budget`, `pool`, `threads`), `use`, constants,
   types and package variables, then the code grouped by topic under `// ---- topic ----`
   markers, with `main` last.
-- **Formatting:** as gofmt would: tabs, aligned fields, constants and trailing comments within a
-  block, one blank line between declarations, lines within 100 columns.
+- **Formatting:** tabs, aligned fields, constants and trailing comments within a block, one blank
+  line between declarations, lines within 100 columns.
 - **Current library:** use the standard library rather than hand-rolled equivalents
-  (`bufio.Reader` for line protocols, `http.HandleFunc` and `w.JSON()` for HTTP, `try` where an
+  (`bufio.Reader` for line protocols, `http.handle_func` and `w.json()` for HTTP, `!` where an
   error only propagates).

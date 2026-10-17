@@ -1,26 +1,28 @@
-package main
+program
 
-type Point struct {
-	X, Y int
+struct Point {
+	x, y int
 }
 
-type Bad struct {
-	P *int
+struct Bad {
+	p *int
 }
 
-func (p *Point) Move() { p.X++ }
+impl Point {
+	fn move(&self) { self.x++ }
+}
 
-const primes = [3]int{2, 3, 5}
+const primes = int[3]{2, 3, 5}
 const origin = Point{0, 0}
-const nested = [1]Point{{1, 2}}
+const nested = Point[1]{{1, 2}}
 
-func main() {
+fn main() {
 	primes[0] = 1 // ERROR "cannot assign to primes[0] (primes is a constant)"
-	origin.X++ // ERROR "cannot assign to origin.X (origin is a constant)"
-	nested[0].Y += 2 // ERROR "cannot assign to nested[0].Y (nested is a constant)"
+	origin.x++ // ERROR "cannot assign to origin.x (origin is a constant)"
+	nested[0].y += 2 // ERROR "cannot assign to nested[0].y (nested is a constant)"
 	p := &primes[1] // ERROR "cannot take address of primes[1] (primes is a constant)"
 	s := primes[:] // ERROR "cannot slice primes (primes is a constant; copy it into a variable first)"
-	origin.Move() // ERROR "cannot call pointer method Move on origin (origin is a constant)"
+	origin.move() // ERROR "cannot call pointer method move on origin (origin is a constant)"
 	q := &origin // ERROR "cannot take address of origin (it is a constant)"
 	c := primes // a copy is an ordinary variable
 	c[0] = 9

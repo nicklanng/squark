@@ -1,20 +1,20 @@
-package main
+program
 
 // Test program for TestDetach (internal/driver): C code that runs long moves its goroutine to a
 // helper thread mid-call (sq_detach) and back (sq_reattach); meanwhile a ticker on the same thread
 // keeps running, and two such calls overlap. No blocking externs: the driver starts helper threads
 // because the C code uses sq_detach.
 
-import "time"
+use time
 
-extern func crunch(ms int) int stack 16K
+extern fn crunch(ms int) -> int stack 16K
 
-var ticks int
-var done chan int cap 4
+thread ticks int
+thread done int chan[4]
 
 task ticker() pool 1 {
-	for len(done) < 2 {
-		time.Sleep(5 * time.Millisecond)
+	while len(done) < 2 {
+		time.sleep(5 * time.millisecond)
 		ticks++
 	}
 }
@@ -23,13 +23,13 @@ task worker() pool 2 {
 	done <- crunch(200)
 }
 
-func main() {
-	start := time.Now()
-	go ticker()
-	go worker()
-	go worker()
+fn main() {
+	start := time.now()
+	start ticker()
+	start worker()
+	start worker()
 	moved := <-done + <-done
-	ms := time.Since(start).Milliseconds()
+	ms := time.since(start).milliseconds()
 	println("moved and back:", moved)
 	if ms >= 380 {
 		println("calls did not overlap:", ms, "ms")

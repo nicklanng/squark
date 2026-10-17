@@ -1,28 +1,29 @@
 # squark
 
-> **Experimental.** squark is an experimental language based on Go, exploring programming without a
-> heap. Expect breaking changes; it isn't meant for production use.
+> **Experimental.** squark is an experimental language exploring programming without a heap. It
+> grew out of Go and keeps much of its semantics, with a syntax of its own. Expect breaking
+> changes; it isn't meant for production use.
 
-A Go-shaped language where memory is something you can see: there is no heap, every byte a program
-can use is accounted for at compile time, and the compiler proves that no reference outlives the
-memory it points to.
+A language where memory is something you can see: there is no heap, every byte a program can use
+is accounted for at compile time, and the compiler proves that no reference outlives the memory it
+points to.
 
-```go
-package main
-
-import "http"
-
-budget 128M             // the build fails if the worst case can exceed this
-pool http.serveConn 512 // at most 512 connections served at once
-
-// GET /hello?name=world
-func hello(w *http.ResponseWriter, r *http.Request) {
-    w.Text(200, "hello, " + r.QueryParam("name") + "\n" in r.Arena) // per-request arena
+```squark
+program {
+    budget 128M              // the build fails if the worst case can exceed this
+    pool http.serve_conn 512 // at most 512 connections served at once
 }
 
-func main() {
-    http.HandleFunc("GET /hello", hello)
-    if err := http.ListenAndServe(":8080", nil); err != nil {
+use http
+
+// GET /hello?name=world
+fn hello(w *http.ResponseWriter, r *http.Request) {
+    w.text(200, "hello, " + r.query_param("name") + "\n" in r.arena) // per-request arena
+}
+
+fn main() {
+    http.handle_func("GET /hello", hello)
+    if err := http.listen_and_serve(":8080", nil); err != nil {
         panic(err)
     }
 }
@@ -57,9 +58,9 @@ There are four kinds of memory, and every value lives in one of them:
 
 | | lifetime | example |
 |---|---|---|
-| static | the whole program | `var table [1M]byte`, `var jobs chan Job cap 16`, `arena words 8M` |
-| a task's stack | a function call | `var buf [4K]byte`, `var seen map[string]int cap 64` |
-| an arena | an `arena` block | `n := new(Node) in scratch` |
+| static | the whole program | `thread table u8[1M]`, `shared jobs Job chan[16]`, `arena words 8M` |
+| a task's stack | a function call | `var buf u8[4K]`, `var seen int[str; 64]` |
+| an arena | a `with arena` block | `n := new(Node) in scratch` |
 | C libraries | their own business | SQLite's page cache |
 
 Anything that would need a heap in Go, like returning a pointer to a local or storing a reference
@@ -76,20 +77,47 @@ be stored in arena a (declared at main.sq:14)
 
 ## Language tour
 
-Everything Go has and that doesn't need a heap works as in Go: packages, structs, methods, pointers,
-slices of arrays, multiple returns, `defer`, `switch`, labeled `break`/`continue`, `range` over ints,
-strings, slices, maps and channels, constants and `iota`, variadic functions, goroutines and channels.
-The rest of this section is what squark adds or changes.
+The basics are familiar from Go: packages, structs, methods, pointers, slices of arrays, multiple
+results, `defer`, `switch`, labeled `break`/`continue`, constants, variadic functions,
+goroutines and channels, with the same semantics. The syntax is squark's own:
+
+```squark
+fn cut(s, sep str) -> (str, str, bool) in s {   // results after ->; `in s`: they point into s
+    i := strings.index(s, sep)
+    if i < 0 {
+        return s, "", false
+    }
+    return s[:i], s[i+len(sep):], true
+}
+
+struct Stack { items int[..64] }
+
+impl Stack {                                      // methods, in impl blocks
+    fn push(&self, x int) { self.items.push(x) }  // &self: a pointer receiver; self: a copy
+}
+
+for x in xs { }                                   // elements; `for i, x in xs` for indexes too
+for i in 0..n { }                                 // ranges
+while busy() { }
+loop { }
+if not done and (a or b) { }
+```
+
+Types read left to right with their size after them (`u8[64]`, `int[str; 1024]`), errors propagate
+with a `!` after the call, and names are `snake_case` for values and `PascalCase` for types, made
+visible to other packages with `pub`. Numbered names are enums, not `iota`: `enum Dir { north,
+east, south, west }` is a type with members `Dir.north`... The rest of this section is what
+squark adds to Go's model.
 
 ### Arenas: scoped dynamic allocation
 
-```go
-arena scratch 64K {
-    words := make([]string, n) in scratch       // run-time sizes are fine in an arena
+```squark
+with arena scratch 64K {
+    words := make(str[], n) in scratch          // run-time sizes are fine in an arena
     root := new(Node) in scratch                // zeroed *Node
     path := dir + "/" + name in scratch         // string concatenation
     words = append(words, w) in scratch         // grows inside the arena instead of panicking
-    owned := string(buf[:n]) in scratch         // Go's copying conversions copy into the arena
+    owned := str(buf[:n]) in scratch            // copying conversions copy into the arena
 }                                               // all of it is gone here
 ```
 
@@ -99,30 +127,30 @@ arena scratch 64K {
   they're used, and allocation is a pointer bump.
 - Package-level arenas (`arena words 8M`) are static and bump-only: a place for data that lives
   forever, such as interned strings.
-- Arenas can be passed in: `func build(a arena, depth int) *Node` allocates in the caller's arena.
-- A full arena panics with its name and size. `a.Used()`, `a.Left()` and `a.Cap()` report usage.
-- Every HTTP request gets `r.Arena` (16 KiB), which is gone once the response is written.
+- Arenas can be passed in: `fn build(a arena, depth int) -> *Node` allocates in the caller's arena.
+- A full arena panics with its name and size. `a.used()`, `a.left()` and `a.cap()` report usage.
+- Every HTTP request gets `r.arena` (16 KiB), which is gone once the response is written.
 
 ### Capacity in types: storage and views
 
-Go's `[N]T` (storage) and `[]T` (a view of it) pattern, applied to everything:
+A size in the brackets means storage; empty brackets (or none) mean a view of it:
 
 | storage (inline, a value) | view (a reference) |
 |---|---|
-| `[N]T` | `[]T` |
-| `[..N]T`: length varies, capacity N | `[]T` |
-| `map[K]V cap N` | `map[K]V` |
-| `chan T cap N` | `chan T` |
+| `T[N]` | `T[]` |
+| `T[..N]`: length varies, capacity N | `T[]` |
+| `V[K; N]` | `V[K]` |
+| `T chan[N]` | `T chan` |
 
-```go
-var line [..256]byte
-line.Push('x')                 // panics when full; line.TryPush(c) returns false instead
-last := line.Pop()
+```squark
+var line u8[..256]
+line.push('x')                 // panics when full; line.try_push(c) returns false instead
+last := line.pop()
 
-var seen map[string]int cap 4096    // declaring the storage is the allocation
-count(seen, "x")                    // storage converts to a view (map[string]int) implicitly
+var seen int[str; 4096]        // declaring the storage is the allocation
+count(seen, "x")               // storage converts to a view (int[str]) implicitly
 
-var jobs chan Job cap 16            // package-level: shared by all goroutines (per thread with threads N)
+shared jobs Job chan[16]       // package-level: one channel for every scheduler thread
 ```
 
 `make` exists only inside arenas. Map and channel storage can't be copied, because they point into
@@ -133,11 +161,11 @@ themselves; pass views instead.
 The compiler infers, for every function, where its results point and which arguments it stores
 where. You can write that down, and the compiler checks the body against it:
 
-```go
-func Cut(s, sep string) (string, string, bool) from s          // results point into s
-func link(a *Node, b *Node into a)                             // b may be stored inside a
-func New(msg static string) error                              // msg must be static memory
-func Name() string static                                      // the result is static
+```squark
+fn cut(s, sep str) -> (str, str, bool) in s    // results point into s
+fn link(a *Node, b *Node in a)                 // b may be stored inside a
+fn new(msg str in static) -> !                 // msg must be static memory
+fn name() -> str in static                     // the result is static
 ```
 
 Declarations name which parameters are related, and the body determines the exact pointer levels.
@@ -147,42 +175,39 @@ escape.
 
 ### Tasks: goroutines with proven stacks
 
-```go
-task serveConn(c net.Conn, h Handler) pool 10000 stack 256K {
+```squark
+task serve_conn(c net.Conn, h Handler) pool 10000 stack 256K {
     ...
 }
 
-go serveConn(c, h)
+start serve_conn(c, h)
 ```
 
-Only tasks can be started with `go`. The pool is the maximum number running at once: `go` waits for a
+Only tasks can be started. The pool is the maximum number running at once: `start` waits for a
 free slot instead of growing. The compiler proves each task's stack size from clang's frame sizes
 and the call graph; recursion is banned so that this is possible. `stack N` asserts an upper bound,
-and a program can resize a library's pool with `pool http.serveConn 512`.
+and a program can resize a library's pool with `pool http.serve_conn 512`.
 
 ### Using every core
 
-```go
-threads auto   // this program is written for threads: one scheduler per core
+```squark
+program {
+    threads auto   // this program is written for threads: one scheduler per core
+}
 ```
 
 Each scheduler thread runs its own copy of `main`, with its own package variables and goroutines,
-so nothing needs locks. Threads share only constants, `shared var` data (read-only after start-up)
-and shared channels (`shared var jobs chan Job cap 64`). `SQUARK_THREADS=N` overrides the count at
-run time, like `GOMAXPROCS`. Without the directive a program runs on one thread.
-
-Since every package variable is per thread, the compiler lists the ones a threaded program
-changes, so a counter that quietly counts a quarter of the requests doesn't go unnoticed. Declare
-them `thread var` once that's what you mean:
-
-```go
-thread var db sqlite.DB   // each thread has its own connection
-```
+so nothing needs locks. A package variable says which it is: `thread db sqlite.DB` is one per
+thread, `shared table = make_table()` is one copy, read-only after start-up, and `shared jobs Job
+chan[64]` is a channel between threads. `SQUARK_THREADS=N` overrides the count at run time, like
+`GOMAXPROCS`. Without the directive a program runs on one thread.
 
 ### Memory budgets
 
-```go
-budget 128M
+```squark
+program {
+    budget 128M
+}
 ```
 
 ```
@@ -190,44 +215,43 @@ $ squark build examples/notes
 memory: worst case 97.1 MiB of 128.0 MiB budget
   code                          112.0 KiB
   static data                   576.0 KiB   package variables, arenas, channel buffers, goroutine tables
-  task http.serveConn            96.0 MiB   = 512 × 192.0 KiB stack (proven 187952 B)
+  task http.serve_conn           96.0 MiB   = 512 × 192.0 KiB stack (proven 187952 B)
   main goroutine                144.0 KiB   = 1 × 144.0 KiB stack (proven 132432 B)
-  task http.wakeIdle             16.0 KiB   = 1 × 16.0 KiB stack (proven 9328 B)
+  task http.wake_idle            16.0 KiB   = 1 × 16.0 KiB stack (proven 9328 B)
   blocking-call helpers         320.0 KiB   = 2 × 160.0 KiB stack: threads that run blocking and detached C calls
   C libraries                 not counted   sqlite3 manages its own memory
 ```
 
 If the worst case is over budget, the build fails and prints this breakdown.
 
-### Errors, `try`, extern C, size literals
+### Errors, `!`, extern C, size literals
 
-```go
-const ErrNotFound = error(404, "not found")     // errors are values: code + static message
+```squark
+fault NotFound 404 "not found"                   // errors are values: code + static message
 
-func load(path string, buf []byte) (int, error) {
-    f := try os.Open(path)                       // returns early with the error
-    defer f.Close()
-    return f.Read(buf)
+fn load(path str, buf u8[]) -> int ! {
+    f := os.open(path)!                          // returns early with the error
+    defer f.close()
+    return f.read(buf)
 }
 
-extern "sq_read" func read(fd int, b []byte) int stack 8K   // C binding with a stack budget
-link "sqlite3"
+extern fn read(fd int, b u8[]) -> int stack 8K c"sq_read"   // C binding with a stack budget
 
-var table [64K]byte                               // 4K, 16M, 1G size literals
+thread table u8[64K]                             // 4K, 16M, 1G size literals
 ```
 
 ### SIMD
 
-```go
+```squark
 // sum adds xs with two 4-lane accumulators: SIMD instructions on arm64 and x86-64
-func sum(xs []float64) float64 {
-    var a, b float64x4
+fn sum(xs f64[]) -> f64 {
+    var a, b f64x4
     i := 0
     for ; i+8 <= len(xs); i += 8 {
-        a += float64x4(xs[i:])     // load 4 lanes
-        b += float64x4(xs[i+4:])
+        a += f64x4(xs[i:])     // load 4 lanes
+        b += f64x4(xs[i+4:])
     }
-    s := (a + b).Sum()
+    s := (a + b).sum()
     for ; i < len(xs); i++ {
         s += xs[i]
     }
@@ -235,20 +259,20 @@ func sum(xs []float64) float64 {
 }
 ```
 
-`float32x4`, `uint8x16`, `float64x4` and the other SIMD types take operators lane by lane;
-comparisons give masks (`(v == c).Any()`, `m.Select(a, b)`), and `t.Lookup(idx)` reads a 16-byte
-table at 16 indexes at once (hex digits of 16 bytes in two lookups). Plain loops over slices are
-vectorized by clang already (see Loops below); SIMD types are for what it can't do, such as float
-sums, which it keeps in source order, and searches that stop early. Both run 6 to 7 times faster
-than scalar code in `bench/squark/kernels`. On x86-64, `squark build -cpu x86-64-v3` (or
-`native`) uses AVX2, as `GOAMD64=v3` does for Go; the default is SSE2, which every x86-64 has.
+`f32x4`, `u8x16`, `f64x4` and the other SIMD types take operators lane by lane; comparisons give
+masks (`(v == c).any()`, `m.select(a, b)`), and `t.lookup(idx)` reads a 16-byte table at 16
+indexes at once (hex digits of 16 bytes in two lookups). Plain loops over slices are vectorized by
+clang already (see Loops below); SIMD types are for what it can't do, such as float sums, which it
+keeps in source order, and searches that stop early. Both run 6 to 7 times faster than scalar code
+in `bench/squark/kernels`. On x86-64, `squark build -cpu x86-64-v3` (or `native`) uses AVX2, as
+`GOAMD64=v3` does for Go; the default is SSE2, which every x86-64 has.
 
 ### What's deliberately missing
 
 There's no `new` or `make` without an arena, no string `+` without an arena, and no recursion. There
 are no closures or method values, which would need captured state somewhere. There are no
 interfaces or generic types; for code over several types, a parameter can be `anytype` (Zig-style:
-each call makes a copy of the function for its argument types, as `sort.Slice` does).
+each call makes a copy of the function for its argument types, as `sort.slice` does).
 
 ## How the checking works
 

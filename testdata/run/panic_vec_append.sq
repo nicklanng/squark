@@ -1,44 +1,44 @@
-package main
+program {
+	threads 2
+}
 
 // v.Append(xs) / v.TryAppend(xs) add a whole slice to a vector (and a string to a byte vector):
 // fixed-size text that can cross threads on a shared channel, filled without a byte loop.
 
-import "runtime"
+use runtime
 
-threads 2
-
-type Line struct {
-	From int
-	Text [..32]byte
+struct Line {
+	from int
+	text u8[..32]
 }
 
-shared var lines chan Line cap 4
+shared lines Line chan[4]
 
 task send() pool 1 {
 	var l Line
-	l.From = runtime.Shard()
-	l.Text.Append("hello ")
-	var from [4]byte
+	l.from = runtime.shard()
+	l.text.append("hello ")
+	var from u8[4]
 	copy(from[:], "from")
-	l.Text.Append(from[:])
-	ok := l.Text.TryAppend(" a thread with a very long name that won't fit")
-	l.Text.Push(' ')
-	l.Text.Push(byte('0' + l.From))
+	l.text.append(from[:])
+	ok := l.text.try_append(" a thread with a very long name that won't fit")
+	l.text.push(' ')
+	l.text.push(u8('0' + l.from))
 	println("too long appended:", ok)
 	lines <- l
 }
 
-func main() {
-	if runtime.Shard() == 1 {
-		go send()
+fn main() {
+	if runtime.shard() == 1 {
+		start send()
 		return
 	}
 	l := <-lines
-	println(string(l.Text[:]), len(l.Text), cap(l.Text))
+	println(str(l.text[:]), len(l.text), cap(l.text))
 
-	var nums [..5]int
-	nums.Append([]int{1, 2, 3})
-	nums.Append(nums[:2]) // from itself
-	println(len(nums), nums[3], nums[4], nums.TryAppend([]int{9}))
-	nums.Append([]int{7}) // full: panics
+	var nums int[..5]
+	nums.append(int[]{1, 2, 3})
+	nums.append(nums[:2]) // from itself
+	println(len(nums), nums[3], nums[4], nums.try_append(int[]{9}))
+	nums.append(int[]{7}) // full: panics
 }

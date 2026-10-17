@@ -1,35 +1,35 @@
-package main
+program
 
-import "strconv"
+use strconv
 
-type Node struct {
-	Name     string
-	Children []*Node
+struct Node {
+	name     str
+	children *Node[]
 }
 
 // interned strings live forever in a package arena
 arena names 4K
 
-func intern(s string) string {
-	return string([]byte(s) in names) in names
+fn intern(s str) -> str {
+	return str(u8[](s) in names) in names
 }
 
 // build allocates a tree in the caller's arena
-func build(a arena, depth int, prefix string) *Node {
+fn build(a arena, depth int, prefix str) -> *Node {
 	root := new(Node) in a
-	root.Name = prefix
+	root.name = prefix
 	// an explicit stack instead of recursion
 	type_ := 0
 	_ = type_
-	level := []*Node{root}
+	level := (*Node)[]{root}
 	for d := 0; d < depth; d++ {
-		next := make([]*Node, 0, 0) in a
-		for _, n := range level {
+		next := make((*Node)[], 0, 0) in a
+		for n in level {
 			for i := 0; i < 2; i++ {
-				var buf [8]byte
+				var buf u8[8]
 				child := new(Node) in a
-				child.Name = n.Name + "." + string(strconv.AppendInt(buf[:0], i)) in a
-				n.Children = append(n.Children, child) in a
+				child.name = n.name + "." + str(strconv.append_int(buf[:0], i)) in a
+				n.children = append(n.children, child) in a
 				next = append(next, child) in a
 			}
 		}
@@ -38,17 +38,17 @@ func build(a arena, depth int, prefix string) *Node {
 	return root
 }
 
-func count(n *Node) int {
+fn count(n *Node) -> int {
 	total := 0
-	stack := [64]*Node{}
+	stack := (*Node)[64]{}
 	sp := 0
 	stack[sp] = n
 	sp++
-	for sp > 0 {
+	while sp > 0 {
 		sp--
 		cur := stack[sp]
 		total++
-		for _, c := range cur.Children {
+		for c in cur.children {
 			stack[sp] = c
 			sp++
 		}
@@ -56,31 +56,31 @@ func count(n *Node) int {
 	return total
 }
 
-func main() {
-	arena scratch 64K {
+fn main() {
+	with arena scratch 64K {
 		tree := build(scratch, 3, "root")
-		println("nodes:", count(tree), "leaf:", tree.Children[1].Children[0].Children[1].Name)
-		println("used > 0:", scratch.Used() > 0, "cap:", scratch.Cap(), scratch.Left() == scratch.Cap()-scratch.Used())
+		println("nodes:", count(tree), "leaf:", tree.children[1].children[0].children[1].name)
+		println("used > 0:", scratch.used() > 0, "cap:", scratch.cap(), scratch.left() == scratch.cap()-scratch.used())
 
 		n := 10
-		squares := make([]int, n) in scratch
-		for i := range squares {
+		squares := make(int[], n) in scratch
+		for i, _ in squares {
 			squares[i] = i * i
 		}
 		println("squares", len(squares), squares[9])
 
-		m := make(map[string]int, n) in scratch
+		m := make(int[str], n) in scratch
 		m["a"] = 1
 		m["b"] = 2
 		println("map", len(m), m["b"])
 
-		var words []string
+		var words str[]
 		for i := 0; i < 100; i++ {
 			words = append(words, "w") in scratch
 		}
 		println("grown", len(words), cap(words) >= 100)
 
-		greeting := "hello, " + tree.Name + "!" in scratch
+		greeting := "hello, " + tree.name + "!" in scratch
 		println(greeting)
 	}
 	a := intern("alpha")

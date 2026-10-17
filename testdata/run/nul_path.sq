@@ -1,15 +1,15 @@
-package main
+program
 
 // A path with a NUL byte is invalid (EINVAL, as in Go): C would stop reading it at the NUL and open
 // a different file.
 
-import "os"
+use os
 
-func main() {
-	f, err := os.Open("/etc/hosts\x00.evil")
-	println(f.Fd() < 0, err)
-	_, err = os.Create("/nonexistent-squark-dir/a\x00.evil")
+fn main() {
+	f, err := os.open("/etc/hosts\x00.evil")
+	println(f.fd() < 0, err)
+	_, err = os.create("/nonexistent-squark-dir/a\x00.evil")
 	println(err)
-	_, err = os.OpenFile("\x00", os.O_RDONLY, 0)
+	_, err = os.open_file("\x00", os.o_rdonly, 0)
 	println(err)
 }

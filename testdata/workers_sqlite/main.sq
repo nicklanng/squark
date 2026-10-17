@@ -1,31 +1,28 @@
-package main
+program {
+	workers 4
+}
 
 // Test program for TestWorkersSQLite (internal/driver): four workers set up the same new database at
 // once (WAL mode, schema) and each insert a row, then exit.
 
-import (
-	"os"
-	"sqlite"
-)
+use os, sqlite
 
-workers 4
-
-func main() {
-	db, err := sqlite.Open(os.Arg(1))
+fn main() {
+	db, err := sqlite.open(os.arg(1))
 	if err != nil {
 		panic(err)
 	}
-	if err := db.Exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS seen(pid INTEGER)"); err != nil {
+	if err := db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS seen(pid INTEGER)"); err != nil {
 		panic(err)
 	}
-	st, err := db.Prepare("INSERT INTO seen(pid) VALUES(?)")
+	st, err := db.prepare("INSERT INTO seen(pid) VALUES(?)")
 	if err != nil {
 		panic(err)
 	}
-	st.BindInt(1, os.Getpid())
-	if _, err := st.Step(); err != nil {
+	st.bind_int(1, os.getpid())
+	if _, err := st.step(); err != nil {
 		panic(err)
 	}
-	st.Finalize()
-	db.Close()
+	st.finalize()
+	db.close()
 }

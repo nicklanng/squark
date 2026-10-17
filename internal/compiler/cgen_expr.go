@@ -949,21 +949,21 @@ func (g *gen) builtinCall(e *CallExpr) string {
 		t := e.T.(*Pointer).Elem
 		ct := g.ctype(t)
 		return fmt.Sprintf("((%s*)sq_arena_zero(%s, sizeof(%s), _Alignof(%s), __FILE__, __LINE__))", ct, g.expr(e.InArena), ct, ct)
-	case "vec.Push", "vec.TryPush", "vec.Append", "vec.TryAppend", "vec.Pop", "vec.Clear":
+	case "vec.push", "vec.try_push", "vec.append", "vec.try_append", "vec.pop", "vec.clear":
 		se := unparen(e.Fun).(*SelectorExpr)
 		vt := se.X.info().T.Underlying().(*VecType)
 		p := g.tmp()
 		head := fmt.Sprintf("%s *%s = &(%s); ", g.ctype(se.X.info().T), p, g.exprRaw(se.X))
 		switch e.Builtin {
-		case "vec.Push", "vec.TryPush":
+		case "vec.push", "vec.try_push":
 			// receiver, then argument, then the capacity check: the argument may change the vector
 			v := g.tmp()
 			head += fmt.Sprintf("%s %s = %s; ", g.ctype(vt.Elem), v, g.coerce(args[0], vt.Elem))
-			if e.Builtin == "vec.TryPush" {
+			if e.Builtin == "vec.try_push" {
 				return fmt.Sprintf("({ %sbool _ok = %s->len < %d; if (_ok) %s->a[%s->len++] = %s; _ok; })", head, p, vt.Len, p, p, v)
 			}
 			return fmt.Sprintf("({ %sif (%s->len >= %d) sq_panic_cstr(\"vector is full (capacity %d)\", __FILE__, __LINE__); %s->a[%s->len++] = %s; })", head, p, vt.Len, vt.Len, p, p, v)
-		case "vec.Append", "vec.TryAppend":
+		case "vec.append", "vec.try_append":
 			// a []T or (byte vectors) a string: both have .p and .len
 			s, at := g.tmp(), args[0].info().T
 			if isString(at) {
@@ -974,21 +974,21 @@ func (g *gen) builtinCall(e *CallExpr) string {
 			}
 			fits := fmt.Sprintf("%s->len + %s.len <= %d", p, s, vt.Len)
 			cp := fmt.Sprintf("if (%s.len) memmove(%s->a + %s->len, %s.p, (size_t)%s.len * sizeof(%s)); %s->len += %s.len;", s, p, p, s, s, g.ctype(vt.Elem), p, s)
-			if e.Builtin == "vec.TryAppend" {
+			if e.Builtin == "vec.try_append" {
 				return fmt.Sprintf("({ %sbool _ok = %s; if (_ok) { %s } _ok; })", head, fits, cp)
 			}
 			return fmt.Sprintf("({ %sif (!(%s)) sq_panic_cstr(\"vector is full (capacity %d)\", __FILE__, __LINE__); %s })", head, fits, vt.Len, cp)
-		case "vec.Pop":
+		case "vec.pop":
 			return fmt.Sprintf("({ %sif (%s->len == 0) sq_panic_cstr(\"pop from an empty vector\", __FILE__, __LINE__); %s->a[--%s->len]; })", head, p, p, p)
 		}
 		return fmt.Sprintf("({ %s%s->len = 0; })", head, p)
-	case "arena.Used", "arena.Left", "arena.Cap":
+	case "arena.used", "arena.left", "arena.cap":
 		se := unparen(e.Fun).(*SelectorExpr)
 		a := g.expr(se.X)
 		switch e.Builtin {
-		case "arena.Used":
+		case "arena.used":
 			return "(" + a + ")->used"
-		case "arena.Left":
+		case "arena.left":
 			return "((" + a + ")->cap - (" + a + ")->used)"
 		}
 		return "(" + a + ")->cap"
@@ -1031,7 +1031,7 @@ func (g *gen) builtinCall(e *CallExpr) string {
 		}
 		b.WriteString("})")
 		return b.String()
-	case "simd.Store", "simd.Sum", "simd.Min", "simd.Max", "simd.Any", "simd.All", "simd.Select", "simd.Shuffle", "simd.Swizzle", "simd.First", "simd.Last", "simd.Lookup":
+	case "simd.store", "simd.sum", "simd.min", "simd.max", "simd.any", "simd.all", "simd.select", "simd.shuffle", "simd.swizzle", "simd.first", "simd.last", "simd.lookup":
 		return g.simdBuiltin(e)
 	case "min", "max":
 		if s := simdOf(e.T); s != nil {
@@ -1070,10 +1070,10 @@ func (g *gen) builtinCall(e *CallExpr) string {
 			return fmt.Sprintf("((sq_error){1, %s})", msg(args[0]))
 		}
 		return fmt.Sprintf("((sq_error){%s, %s})", g.coerce(args[0], tInt), msg(args[1]))
-	case "error.Error":
+	case "error.message":
 		se := unparen(e.Fun).(*SelectorExpr)
 		return "(" + g.expr(se.X) + ").msg"
-	case "error.Code":
+	case "error.code":
 		se := unparen(e.Fun).(*SelectorExpr)
 		return "(" + g.expr(se.X) + ").code"
 	}

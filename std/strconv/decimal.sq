@@ -3,99 +3,355 @@
 // atof.go): Copyright 2009 The Go Authors, BSD-style license (https://go.dev/LICENSE). The
 // numbers live in fixed 800-digit buffers on the stack: no heap, no recursion.
 
-package strconv
+module strconv
 
-import "math"
+use math
 
-// decimal is a multi-precision decimal number: digits d[:nd] with the decimal point after dp of
+// Decimal is a multi-precision decimal number: digits d[:nd] with the decimal point after dp of
 // them (dp may be negative or past nd).
-type decimal struct {
-	d     [800]byte
+struct Decimal {
+	d     u8[800]
 	nd    int
 	dp    int
 	neg   bool
 	trunc bool // nonzero digits were dropped beyond d[:nd]
 }
 
-func (a *decimal) trim() {
-	for a.nd > 0 && a.d[a.nd-1] == '0' {
-		a.nd--
+impl Decimal {
+	fn trim(&self) {
+		while self.nd > 0 and self.d[self.nd-1] == '0' {
+			self.nd--
+		}
+		if self.nd == 0 {
+			self.dp = 0
+		}
 	}
-	if a.nd == 0 {
-		a.dp = 0
+
+	// assign sets a to v.
+	fn assign(&self, v u64) {
+		var buf u8[24]
+		n := 0
+		while v > 0 {
+			v1 := v / 10
+			buf[n] = u8(v - 10*v1 + '0')
+			n++
+			v = v1
+		}
+		self.nd = 0
+		for n--; n >= 0; n-- {
+			self.d[self.nd] = buf[n]
+			self.nd++
+		}
+		self.dp = self.nd
+		self.trim()
 	}
 }
 
-// assign sets a to v.
-func (a *decimal) assign(v uint64) {
-	var buf [24]byte
-	n := 0
-	for v > 0 {
-		v1 := v / 10
-		buf[n] = byte(v - 10*v1 + '0')
-		n++
-		v = v1
-	}
-	a.nd = 0
-	for n--; n >= 0; n-- {
-		a.d[a.nd] = buf[n]
-		a.nd++
-	}
-	a.dp = a.nd
-	a.trim()
-}
+const max_shift = 60 // 9<<k must fit in 64 bits
 
-const maxShift = 60 // 9<<k must fit in 64 bits
+impl Decimal {
+	// right_shift divides a by 2^k (k <= max_shift).
+	fn right_shift(&self, k uint) {
+		r, w := 0, 0
+		var n u64
+		for ; n>>k == 0; r++ {
+			if r >= self.nd {
+				if n == 0 {
+					self.nd = 0
+					return
+				}
+				while n>>k == 0 {
+					n = n * 10
+					r++
+				}
+				break
+			}
+			n = n*10 + u64(self.d[r]-'0')
+		}
+		self.dp -= r - 1
+		mask := u64(1)<<k - 1
+		for ; r < self.nd; r++ {
+			c := u64(self.d[r] - '0')
+			dig := n >> k
+			n &= mask
+			self.d[w] = u8(dig + '0')
+			w++
+			n = n*10 + c
+		}
+		while n > 0 {
+			dig := n >> k
+			n &= mask
+			if w < len(self.d) {
+				self.d[w] = u8(dig + '0')
+				w++
+			} else if dig > 0 {
+				self.trunc = true
+			}
+			n = n * 10
+		}
+		self.nd = w
+		self.trim()
+	}
 
-// rightShift divides a by 2^k (k <= maxShift).
-func (a *decimal) rightShift(k uint) {
-	r, w := 0, 0
-	var n uint64
-	for ; n>>k == 0; r++ {
-		if r >= a.nd {
-			if n == 0 {
-				a.nd = 0
+	// left_shift multiplies a by 2^k (k <= max_shift).
+	fn left_shift(&self, k uint) {
+		delta := leftcheats[k].delta
+		if prefix_less(self.d[0:self.nd], leftcheats[k].cutoff) {
+			delta--
+		}
+		r, w := self.nd, self.nd+delta
+		var n u64
+		for r--; r >= 0; r-- {
+			n += u64(self.d[r]-'0') << k
+			quo := n / 10
+			rem := n - 10*quo
+			w--
+			if w < len(self.d) {
+				self.d[w] = u8(rem + '0')
+			} else if rem != 0 {
+				self.trunc = true
+			}
+			n = quo
+		}
+		while n > 0 {
+			quo := n / 10
+			rem := n - 10*quo
+			w--
+			if w < len(self.d) {
+				self.d[w] = u8(rem + '0')
+			} else if rem != 0 {
+				self.trunc = true
+			}
+			n = quo
+		}
+		self.nd += delta
+		if self.nd >= len(self.d) {
+			self.nd = len(self.d)
+		}
+		self.dp += delta
+		self.trim()
+	}
+
+	// shift multiplies a by 2^k (k > 0) or divides it by 2^-k (k < 0).
+	fn shift(&self, k int) {
+		if self.nd == 0 {
+			return
+		}
+		while k > max_shift {
+			self.left_shift(max_shift)
+			k -= max_shift
+		}
+		while k < -max_shift {
+			self.right_shift(max_shift)
+			k += max_shift
+		}
+		if k > 0 {
+			self.left_shift(uint(k))
+		} else if k < 0 {
+			self.right_shift(uint(-k))
+		}
+	}
+
+	// should_round_up reports whether chopping a at nd digits should round up (half to even).
+	fn should_round_up(&self, nd int) -> bool {
+		if nd < 0 or nd >= self.nd {
+			return false
+		}
+		if self.d[nd] == '5' and nd+1 == self.nd { // exactly halfway
+			if self.trunc {
+				return true
+			}
+			return nd > 0 and (self.d[nd-1]-'0')%2 == 1
+		}
+		return self.d[nd] >= '5'
+	}
+
+	fn round(&self, nd int) {
+		if nd < 0 or nd >= self.nd {
+			return
+		}
+		if self.should_round_up(nd) {
+			self.round_up(nd)
+		} else {
+			self.round_down(nd)
+		}
+	}
+
+	fn round_down(&self, nd int) {
+		if nd < 0 or nd >= self.nd {
+			return
+		}
+		self.nd = nd
+		self.trim()
+	}
+
+	fn round_up(&self, nd int) {
+		if nd < 0 or nd >= self.nd {
+			return
+		}
+		for i := nd - 1; i >= 0; i-- {
+			if self.d[i] < '9' {
+				self.d[i]++
+				self.nd = i + 1
 				return
 			}
-			for n>>k == 0 {
-				n = n * 10
-				r++
+		}
+		self.d[0] = '1' // all nines
+		self.nd = 1
+		self.dp++
+	}
+
+	// rounded_integer returns the integer part of a, rounded.
+	fn rounded_integer(&self) -> u64 {
+		if self.dp > 20 {
+			return 0xFFFFFFFFFFFFFFFF
+		}
+		i := 0
+		n := u64(0)
+		for ; i < self.dp and i < self.nd; i++ {
+			n = n*10 + u64(self.d[i]-'0')
+		}
+		for ; i < self.dp; i++ {
+			n *= 10
+		}
+		if self.should_round_up(self.dp) {
+			n++
+		}
+		return n
+	}
+
+	// set reads s ([+-]digits[.digits][e[+-]digits]) into b; false if it isn't such a number.
+	fn set(&self, s str) -> bool {
+		i := 0
+		self.neg, self.trunc = false, false
+		if i < len(s) and (s[i] == '+' or s[i] == '-') {
+			self.neg = s[i] == '-'
+			i++
+		}
+		sawdot, sawdigits := false, false
+		ndig := 0 // significant digits seen, including those dropped once d is full
+		for ; i < len(s); i++ {
+			c := s[i]
+			if c == '.' {
+				if sawdot {
+					return false
+				}
+				sawdot = true
+				self.dp = ndig
+				continue
 			}
-			break
+			if c < '0' or c > '9' {
+				break
+			}
+			sawdigits = true
+			if c == '0' and ndig == 0 { // leading zeros
+				self.dp--
+				continue
+			}
+			ndig++
+			if self.nd < len(self.d) {
+				self.d[self.nd] = c
+				self.nd++
+			} else if c != '0' {
+				self.trunc = true
+			}
 		}
-		n = n*10 + uint64(a.d[r]-'0')
-	}
-	a.dp -= r - 1
-	mask := uint64(1)<<k - 1
-	for ; r < a.nd; r++ {
-		c := uint64(a.d[r] - '0')
-		dig := n >> k
-		n &= mask
-		a.d[w] = byte(dig + '0')
-		w++
-		n = n*10 + c
-	}
-	for n > 0 {
-		dig := n >> k
-		n &= mask
-		if w < len(a.d) {
-			a.d[w] = byte(dig + '0')
-			w++
-		} else if dig > 0 {
-			a.trunc = true
+		if not sawdigits {
+			return false
 		}
-		n = n * 10
+		if not sawdot {
+			self.dp = ndig
+		}
+		if i < len(s) and (s[i] == 'e' or s[i] == 'E') {
+			i++
+			esign := 1
+			if i < len(s) and (s[i] == '+' or s[i] == '-') {
+				if s[i] == '-' {
+					esign = -1
+				}
+				i++
+			}
+			if i >= len(s) or s[i] < '0' or s[i] > '9' {
+				return false
+			}
+			e := 0
+			for ; i < len(s) and s[i] >= '0' and s[i] <= '9'; i++ {
+				if e < 10000 {
+					e = e*10 + int(s[i]-'0')
+				}
+			}
+			self.dp += e * esign
+		}
+		return i == len(s)
 	}
-	a.nd = w
-	a.trim()
+
+	// float_bits returns the float64 closest to d (half to even), and whether it overflowed to ±Inf.
+	fn float_bits(&self) -> (u64, bool) {
+		exp, mant, overflow := bias, u64(0), false
+		switch {
+		case self.nd == 0 or self.dp < -330: // zero (or underflow to zero)
+		case self.dp > 310:
+			overflow = true
+		default:
+			exp = 0
+			while self.dp > 0 { // scale into [0.5, 1)
+				n := 27
+				if self.dp < len(powtab) {
+					n = powtab[self.dp]
+				}
+				self.shift(-n)
+				exp += n
+			}
+			while self.dp < 0 or self.dp == 0 and self.d[0] < '5' {
+				n := 27
+				if -self.dp < len(powtab) {
+					n = powtab[-self.dp]
+				}
+				self.shift(n)
+				exp -= n
+			}
+			exp-- // [0.5, 1) to [1, 2)
+			if exp < bias+1 {
+				n := bias + 1 - exp
+				self.shift(-n)
+				exp += n
+			}
+			if exp-bias >= 1<<exp_bits-1 {
+				overflow = true
+				break
+			}
+			self.shift(1 + mant_bits)
+			mant = self.rounded_integer()
+			if mant == 2<<mant_bits { // rounding carried into a new bit
+				mant >>= 1
+				exp++
+				if exp-bias >= 1<<exp_bits-1 {
+					overflow = true
+					break
+				}
+			}
+			if mant&(1<<mant_bits) == 0 {
+				exp = bias // subnormal
+			}
+		}
+		if overflow {
+			mant, exp = 0, 1<<exp_bits-1+bias
+		}
+		bits := mant & (u64(1)<<mant_bits - 1)
+		bits |= u64((exp-bias)&(1<<exp_bits-1)) << mant_bits
+		if self.neg {
+			bits |= u64(1) << 63
+		}
+		return bits, overflow
+	}
 }
 
-type leftCheat struct {
-	delta  int    // new digits a left shift by k adds
-	cutoff string // one fewer if the number's leading digits are below this (5^k)
+struct LeftCheat {
+	delta  int // new digits a left shift by k adds
+	cutoff str // one fewer if the number's leading digits are below this (5^k)
 }
 
-const leftcheats = [61]leftCheat{
+const leftcheats = LeftCheat[61]{
 	{0, ""},
 	{1, "5"},
 	{1, "25"},
@@ -159,8 +415,8 @@ const leftcheats = [61]leftCheat{
 	{19, "867361737988403547205962240695953369140625"},
 }
 
-// prefixLess reports whether the digits b are lexicographically below s.
-func prefixLess(b []byte, s string) bool {
+// prefix_less reports whether the digits b are lexicographically below s.
+fn prefix_less(b u8[], s str) -> bool {
 	for i := 0; i < len(s); i++ {
 		if i >= len(b) {
 			return true
@@ -172,163 +428,36 @@ func prefixLess(b []byte, s string) bool {
 	return false
 }
 
-// leftShift multiplies a by 2^k (k <= maxShift).
-func (a *decimal) leftShift(k uint) {
-	delta := leftcheats[k].delta
-	if prefixLess(a.d[0:a.nd], leftcheats[k].cutoff) {
-		delta--
-	}
-	r, w := a.nd, a.nd+delta
-	var n uint64
-	for r--; r >= 0; r-- {
-		n += uint64(a.d[r]-'0') << k
-		quo := n / 10
-		rem := n - 10*quo
-		w--
-		if w < len(a.d) {
-			a.d[w] = byte(rem + '0')
-		} else if rem != 0 {
-			a.trunc = true
-		}
-		n = quo
-	}
-	for n > 0 {
-		quo := n / 10
-		rem := n - 10*quo
-		w--
-		if w < len(a.d) {
-			a.d[w] = byte(rem + '0')
-		} else if rem != 0 {
-			a.trunc = true
-		}
-		n = quo
-	}
-	a.nd += delta
-	if a.nd >= len(a.d) {
-		a.nd = len(a.d)
-	}
-	a.dp += delta
-	a.trim()
-}
-
-// shift multiplies a by 2^k (k > 0) or divides it by 2^-k (k < 0).
-func (a *decimal) shift(k int) {
-	if a.nd == 0 {
-		return
-	}
-	for k > maxShift {
-		a.leftShift(maxShift)
-		k -= maxShift
-	}
-	for k < -maxShift {
-		a.rightShift(maxShift)
-		k += maxShift
-	}
-	if k > 0 {
-		a.leftShift(uint(k))
-	} else if k < 0 {
-		a.rightShift(uint(-k))
-	}
-}
-
-// shouldRoundUp reports whether chopping a at nd digits should round up (half to even).
-func (a *decimal) shouldRoundUp(nd int) bool {
-	if nd < 0 || nd >= a.nd {
-		return false
-	}
-	if a.d[nd] == '5' && nd+1 == a.nd { // exactly halfway
-		if a.trunc {
-			return true
-		}
-		return nd > 0 && (a.d[nd-1]-'0')%2 == 1
-	}
-	return a.d[nd] >= '5'
-}
-
-func (a *decimal) round(nd int) {
-	if nd < 0 || nd >= a.nd {
-		return
-	}
-	if a.shouldRoundUp(nd) {
-		a.roundUp(nd)
-	} else {
-		a.roundDown(nd)
-	}
-}
-
-func (a *decimal) roundDown(nd int) {
-	if nd < 0 || nd >= a.nd {
-		return
-	}
-	a.nd = nd
-	a.trim()
-}
-
-func (a *decimal) roundUp(nd int) {
-	if nd < 0 || nd >= a.nd {
-		return
-	}
-	for i := nd - 1; i >= 0; i-- {
-		if a.d[i] < '9' {
-			a.d[i]++
-			a.nd = i + 1
-			return
-		}
-	}
-	a.d[0] = '1' // all nines
-	a.nd = 1
-	a.dp++
-}
-
-// roundedInteger returns the integer part of a, rounded.
-func (a *decimal) roundedInteger() uint64 {
-	if a.dp > 20 {
-		return 0xFFFFFFFFFFFFFFFF
-	}
-	i := 0
-	n := uint64(0)
-	for ; i < a.dp && i < a.nd; i++ {
-		n = n*10 + uint64(a.d[i]-'0')
-	}
-	for ; i < a.dp; i++ {
-		n *= 10
-	}
-	if a.shouldRoundUp(a.dp) {
-		n++
-	}
-	return n
-}
-
 const (
-	mantBits = 52
-	expBits  = 11
-	bias     = -1023
+	mant_bits = 52
+	exp_bits  = 11
+	bias      = -1023
 )
 
-// roundShortest rounds d (= mant * 2^(exp-mantBits)) to the fewest digits that still read back to
+// round_shortest rounds d (= mant * 2^(exp-mant_bits)) to the fewest digits that still read back to
 // the same float64: the digits must stay between the halfway points to the neighbouring floats.
-func roundShortest(d *decimal, mant uint64, exp int) {
+fn round_shortest(d *Decimal, mant u64, exp int) {
 	if mant == 0 {
 		d.nd = 0
 		return
 	}
 	minexp := bias + 1
-	if exp > minexp && 332*(d.dp-d.nd) >= 100*(exp-mantBits) {
+	if exp > minexp and 332*(d.dp-d.nd) >= 100*(exp-mant_bits) {
 		return // already shortest
 	}
-	var upper decimal
+	var upper Decimal
 	upper.assign(mant*2 + 1)
-	upper.shift(exp - mantBits - 1)
-	var mantlo uint64
+	upper.shift(exp - mant_bits - 1)
+	var mantlo u64
 	var explo int
-	if mant > 1<<mantBits || exp == minexp {
+	if mant > 1<<mant_bits or exp == minexp {
 		mantlo, explo = mant-1, exp
 	} else {
 		mantlo, explo = mant*2-1, exp-1
 	}
-	var lower decimal
+	var lower Decimal
 	lower.assign(mantlo*2 + 1)
-	lower.shift(explo - mantBits - 1)
+	lower.shift(explo - mant_bits - 1)
 	inclusive := mant%2 == 0 // round-to-even would keep the bounds themselves
 	upperdelta := 0
 	for ui := 0; ; ui++ {
@@ -337,49 +466,49 @@ func roundShortest(d *decimal, mant uint64, exp int) {
 			break
 		}
 		li := ui - upper.dp + lower.dp
-		l := byte('0')
-		if li >= 0 && li < lower.nd {
+		l := u8('0')
+		if li >= 0 and li < lower.nd {
 			l = lower.d[li]
 		}
-		m := byte('0')
+		m := u8('0')
 		if mi >= 0 {
 			m = d.d[mi]
 		}
-		u := byte('0')
+		u := u8('0')
 		if ui < upper.nd {
 			u = upper.d[ui]
 		}
-		okdown := l != m || inclusive && li+1 == lower.nd
+		okdown := l != m or inclusive and li+1 == lower.nd
 		switch {
-		case upperdelta == 0 && m+1 < u:
+		case upperdelta == 0 and m+1 < u:
 			upperdelta = 2
-		case upperdelta == 0 && m != u:
+		case upperdelta == 0 and m != u:
 			upperdelta = 1
-		case upperdelta == 1 && (m != '9' || u != '0'):
+		case upperdelta == 1 and (m != '9' or u != '0'):
 			upperdelta = 2
 		}
-		okup := upperdelta > 0 && (inclusive || upperdelta > 1 || ui+1 < upper.nd)
+		okup := upperdelta > 0 and (inclusive or upperdelta > 1 or ui+1 < upper.nd)
 		switch {
-		case okdown && okup:
+		case okdown and okup:
 			d.round(mi + 1)
 			return
 		case okdown:
-			d.roundDown(mi + 1)
+			d.round_down(mi + 1)
 			return
 		case okup:
-			d.roundUp(mi + 1)
+			d.round_up(mi + 1)
 			return
 		}
 	}
 }
 
-// appendShortest appends v's shortest round-trip form: plain notation for 1e-6 <= |v| < 1e21,
+// append_shortest appends v's shortest round-trip form: plain notation for 1e-6 <= |v| < 1e21,
 // exponent notation (1.5e+300) outside, as JSON and JavaScript do.
-func appendShortest(dst []byte, v float64) []byte {
-	bits := math.Float64bits(v)
-	exp := int(bits>>mantBits) & (1<<expBits - 1)
-	mant := bits & (uint64(1)<<mantBits - 1)
-	if exp == 1<<expBits-1 {
+fn append_shortest(dst u8[], v f64) -> u8[] {
+	bits := math.float64bits(v)
+	exp := int(bits>>mant_bits) & (1<<exp_bits - 1)
+	mant := bits & (u64(1)<<mant_bits - 1)
+	if exp == 1<<exp_bits-1 {
 		if mant != 0 {
 			return append(dst, "NaN"...)
 		}
@@ -394,17 +523,17 @@ func appendShortest(dst []byte, v float64) []byte {
 	if exp == 0 {
 		exp++ // subnormal
 	} else {
-		mant |= uint64(1) << mantBits
+		mant |= u64(1) << mant_bits
 	}
 	exp += bias
-	var d decimal
+	var d Decimal
 	d.assign(mant)
-	d.shift(exp - mantBits)
-	roundShortest(&d, mant, exp)
+	d.shift(exp - mant_bits)
+	round_shortest(&d, mant, exp)
 	if d.nd == 0 {
 		return append(dst, '0')
 	}
-	if d.dp > -6 && d.dp <= 21 {
+	if d.dp > -6 and d.dp <= 21 {
 		if d.dp <= 0 {
 			dst = append(dst, '0', '.')
 			for i := d.dp; i < 0; i++ {
@@ -436,189 +565,64 @@ func appendShortest(dst []byte, v float64) []byte {
 	} else {
 		dst = append(dst, '+')
 	}
-	return AppendInt(dst, e)
+	return append_int(dst, e)
 }
 
-// set reads s ([+-]digits[.digits][e[+-]digits]) into b; false if it isn't such a number.
-func (b *decimal) set(s string) bool {
-	i := 0
-	b.neg, b.trunc = false, false
-	if i < len(s) && (s[i] == '+' || s[i] == '-') {
-		b.neg = s[i] == '-'
-		i++
-	}
-	sawdot, sawdigits := false, false
-	ndig := 0 // significant digits seen, including those dropped once d is full
-	for ; i < len(s); i++ {
-		c := s[i]
-		if c == '.' {
-			if sawdot {
-				return false
-			}
-			sawdot = true
-			b.dp = ndig
-			continue
-		}
-		if c < '0' || c > '9' {
-			break
-		}
-		sawdigits = true
-		if c == '0' && ndig == 0 { // leading zeros
-			b.dp--
-			continue
-		}
-		ndig++
-		if b.nd < len(b.d) {
-			b.d[b.nd] = c
-			b.nd++
-		} else if c != '0' {
-			b.trunc = true
-		}
-	}
-	if !sawdigits {
-		return false
-	}
-	if !sawdot {
-		b.dp = ndig
-	}
-	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
-		i++
-		esign := 1
-		if i < len(s) && (s[i] == '+' || s[i] == '-') {
-			if s[i] == '-' {
-				esign = -1
-			}
-			i++
-		}
-		if i >= len(s) || s[i] < '0' || s[i] > '9' {
-			return false
-		}
-		e := 0
-		for ; i < len(s) && s[i] >= '0' && s[i] <= '9'; i++ {
-			if e < 10000 {
-				e = e*10 + int(s[i]-'0')
-			}
-		}
-		b.dp += e * esign
-	}
-	return i == len(s)
-}
+const powtab = int[9]{1, 3, 6, 9, 13, 16, 19, 23, 26}
 
-const powtab = [9]int{1, 3, 6, 9, 13, 16, 19, 23, 26}
-
-// floatBits returns the float64 closest to d (half to even), and whether it overflowed to ±Inf.
-func (d *decimal) floatBits() (uint64, bool) {
-	exp, mant, overflow := bias, uint64(0), false
-	switch {
-	case d.nd == 0 || d.dp < -330: // zero (or underflow to zero)
-	case d.dp > 310:
-		overflow = true
-	default:
-		exp = 0
-		for d.dp > 0 { // scale into [0.5, 1)
-			n := 27
-			if d.dp < len(powtab) {
-				n = powtab[d.dp]
-			}
-			d.shift(-n)
-			exp += n
-		}
-		for d.dp < 0 || d.dp == 0 && d.d[0] < '5' {
-			n := 27
-			if -d.dp < len(powtab) {
-				n = powtab[-d.dp]
-			}
-			d.shift(n)
-			exp -= n
-		}
-		exp-- // [0.5, 1) to [1, 2)
-		if exp < bias+1 {
-			n := bias + 1 - exp
-			d.shift(-n)
-			exp += n
-		}
-		if exp-bias >= 1<<expBits-1 {
-			overflow = true
-			break
-		}
-		d.shift(1 + mantBits)
-		mant = d.roundedInteger()
-		if mant == 2<<mantBits { // rounding carried into a new bit
-			mant >>= 1
-			exp++
-			if exp-bias >= 1<<expBits-1 {
-				overflow = true
-				break
-			}
-		}
-		if mant&(1<<mantBits) == 0 {
-			exp = bias // subnormal
-		}
-	}
-	if overflow {
-		mant, exp = 0, 1<<expBits-1+bias
-	}
-	bits := mant & (uint64(1)<<mantBits - 1)
-	bits |= uint64((exp-bias)&(1<<expBits-1)) << mantBits
-	if d.neg {
-		bits |= uint64(1) << 63
-	}
-	return bits, overflow
-}
-
-const pow10 = [23]float64{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13,
+const pow10 = f64[23]{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13,
 	1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22}
 
 // special parses inf, infinity and nan (any case, inf with a sign).
-func special(s string) (float64, bool) {
+fn special(s str) -> (f64, bool) {
 	sign := 1
 	t := s
-	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {
+	if len(t) > 0 and (t[0] == '+' or t[0] == '-') {
 		if t[0] == '-' {
 			sign = -1
 		}
 		t = t[1:]
 	}
-	var low [8]byte
+	var low u8[8]
 	if len(t) > len(low) {
 		return 0, false
 	}
 	for i := 0; i < len(t); i++ {
 		c := t[i]
-		if c >= 'A' && c <= 'Z' {
+		if c >= 'A' and c <= 'Z' {
 			c += 'a' - 'A'
 		}
 		low[i] = c
 	}
-	w := string(low[:len(t)])
+	w := str(low[:len(t)])
 	switch {
-	case w == "inf" || w == "infinity":
-		return math.Inf(sign), true
-	case w == "nan" && len(t) == len(s):
-		return math.NaN(), true
+	case w == "inf" or w == "infinity":
+		return math.inf(sign), true
+	case w == "nan" and len(t) == len(s):
+		return math.na_n(), true
 	}
 	return 0, false
 }
 
-// ParseFloat converts s ("1.5", "-2e-10", "Inf", "NaN") to the nearest float64 (half to even),
-// as Go's strconv.ParseFloat(s, 64) does for decimal input. ErrSyntax if s isn't a number;
-// ErrRange (with ±Inf) if it is too large. Unlike Go, hexadecimal floats ("0x1p4") and
-// underscores ("1_000") are not accepted (ErrSyntax).
-func ParseFloat(s string) (float64, error) {
+// parse_float converts s ("1.5", "-2e-10", "Inf", "NaN") to the nearest float64 (half to even),
+// as Go's strconv.parse_float(s, 64) does for decimal input. Syntax if s isn't a number;
+// Range (with ±Inf) if it is too large. Unlike Go, hexadecimal floats ("0x1p4") and
+// underscores ("1_000") are not accepted (Syntax).
+pub fn parse_float(s str) -> f64 ! {
 	if f, ok := special(s); ok {
 		return f, nil
 	}
-	var d decimal
-	if !d.set(s) {
-		return 0, ErrSyntax
+	var d Decimal
+	if not d.set(s) {
+		return 0, Syntax
 	}
 	// fast path: up to 15 digits and a power of ten up to 22, both exact, one rounding
-	if !d.trunc && d.nd <= 15 && d.dp-d.nd >= -22 && d.dp-d.nd <= 22 {
+	if not d.trunc and d.nd <= 15 and d.dp-d.nd >= -22 and d.dp-d.nd <= 22 {
 		m := 0
 		for i := 0; i < d.nd; i++ {
 			m = m*10 + int(d.d[i]-'0')
 		}
-		f := float64(m)
+		f := f64(m)
 		if e := d.dp - d.nd; e >= 0 {
 			f *= pow10[e]
 		} else {
@@ -629,10 +633,10 @@ func ParseFloat(s string) (float64, error) {
 		}
 		return f, nil
 	}
-	bits, overflow := d.floatBits()
-	f := math.Float64frombits(bits)
+	bits, overflow := d.float_bits()
+	f := math.float64frombits(bits)
 	if overflow {
-		return f, ErrRange
+		return f, Range
 	}
 	return f, nil
 }

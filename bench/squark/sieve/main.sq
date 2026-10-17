@@ -1,23 +1,20 @@
 // sieve counts primes below N. The bit table is a package-level array: static memory, sized at
 // compile time, so the program's maximum memory use is known before it runs.
-package main
+program
 
-import (
-	"os"
-	"strconv"
-)
+use os, strconv
 
-const maxN = 50000000
+const max_n = 50000000
 
-var composite [maxN]bool
+thread composite bool[max_n]
 
-func sieve(n int) int {
+fn sieve(n int) -> int {
 	if n < 3 {
 		return 0
 	}
 	c := composite[:n]
 	for i := 2; i*i < n; i++ {
-		if !c[i] {
+		if not c[i] {
 			for j := i * i; j < n; j += i {
 				c[j] = true
 			}
@@ -25,20 +22,20 @@ func sieve(n int) int {
 	}
 	count := 0
 	for i := 2; i < n; i++ {
-		if !c[i] {
+		if not c[i] {
 			count++
 		}
 	}
 	return count
 }
 
-func main() {
-	n := maxN
-	if os.NArgs() > 1 {
-		v, err := strconv.Atoi(os.Arg(1))
-		if err != nil || v < 0 || v > maxN {
-			println("N must be between 0 and", maxN)
-			os.Exit(2)
+fn main() {
+	n := max_n
+	if os.n_args() > 1 {
+		v, err := strconv.atoi(os.arg(1))
+		if err != nil or v < 0 or v > max_n {
+			println("N must be between 0 and", max_n)
+			os.exit(2)
 		}
 		n = v
 	}

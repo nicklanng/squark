@@ -1,288 +1,341 @@
 // Package http is an HTTP/1.1 server and client. The server runs each connection in its own
 // goroutine, whose read and write buffers live on its (statically sized) stack: no allocation per
 // request. The client (Dial, Client) reads responses into a buffer the caller provides.
-package http
+module http
 
-import (
-	"json"
-	"net"
-	"strconv"
-	"strings"
-	"time"
-)
+use json, net, strconv, strings, time
 
 const (
-	// ReadBufferSize bounds request line + headers + body.
-	ReadBufferSize = 16384
-	// WriteBufferSize is the response staging buffer; larger bodies stream as chunks.
-	WriteBufferSize = 16384
-	// RequestArenaSize is the per-request arena (Request.Arena), freed when the response is done.
-	RequestArenaSize = 16K
-	headerBufferSize = 1024
-	MaxHeaders       = 32
+	// read_buffer_size bounds request line + headers + body.
+	pub read_buffer_size = 16384
+	// write_buffer_size is the response staging buffer; larger bodies stream as chunks.
+	pub write_buffer_size = 16384
+	// request_arena_size is the per-request arena (Request.arena), freed when the response is done.
+	pub request_arena_size = 16K
+	header_buffer_size     = 1024
+	pub max_headers        = 32
 )
 
-// IdleRelease is how long a keep-alive connection may sit idle before its goroutine exits and the
+// idle_release is how long a keep-alive connection may sit idle before its goroutine exits and the
 // connection moves to the runtime's idle set (where it costs no stack until its next request).
-const IdleRelease = 100 * time.Millisecond
+pub const idle_release = 100 * time.millisecond
 
-// ReadHeaderTimeout (5 seconds) is how long a client has to send a request's line and headers,
+// read_header_timeout (5 seconds) is how long a client has to send a request's line and headers,
 // counted from when the request starts arriving. A connection that takes longer gets a 408 and is
 // closed, so slow clients can't hold connection goroutines. Set it in main before serving (with
 // threads, each scheduler thread runs main and sets its own copy).
-var ReadHeaderTimeout = 5 * time.Second
+pub thread read_header_timeout = 5 * time.second
 
-// ReadTimeout (10 seconds) is how long a client has to send a whole request, headers and body,
+// read_timeout (10 seconds) is how long a client has to send a whole request, headers and body,
 // counted the same way. A connection that takes longer gets a 408 and is closed.
-var ReadTimeout = 10 * time.Second
+pub thread read_timeout = 10 * time.second
 
-type Header struct {
-	Name  string
-	Value string
+pub struct Header {
+	pub name  str
+	pub value str
 }
 
 // Request fields are views into the connection's read buffer, valid until the handler returns.
-type Request struct {
-	Method        string
-	Path          string
-	Query         string
-	Proto         string
-	Body          []byte
-	ContentLength int
+pub struct Request {
+	pub method         str
+	pub path           str
+	pub query          str
+	pub proto          str
+	pub body           u8[]
+	pub content_length int
 
-	// Arena is scratch memory for this request: allocate with `x in r.Arena`. Everything in it is
+	// arena is scratch memory for this request: allocate with `x in r.arena`. Everything in it is
 	// gone once the response has been written.
-	Arena arena
+	pub arena arena
 
-	headers   [MaxHeaders]Header
-	nheaders  int
-	params    [MaxPathParams + 1]Header // the matched pattern's wildcard values (see HandleFunc)
-	nparams   int
-	keepAlive bool
-	http10    bool
-	expect100 bool
+	headers    Header[max_headers]
+	nheaders   int
+	params     Header[max_path_params + 1] // the matched pattern's wildcard values (see handle_func)
+	nparams    int
+	keep_alive bool
+	http10     bool
+	expect100  bool
 }
 
-// HeaderValue returns the first value of the named header (case-insensitive), or "".
-func (r *Request) HeaderValue(name string) string {
-	for i := 0; i < r.nheaders; i++ {
-		if strings.EqualFold(r.headers[i].Name, name) {
-			return r.headers[i].Value
+impl Request {
+	// header_value returns the first value of the named header (case-insensitive), or "".
+	pub fn header_value(&self, name str) -> str {
+		for i := 0; i < self.nheaders; i++ {
+			if strings.equal_fold(self.headers[i].name, name) {
+				return self.headers[i].value
+			}
 		}
+		return ""
 	}
-	return ""
-}
 
-// NumHeaders and HeaderAt iterate the request headers.
-func (r *Request) NumHeaders() int        { return r.nheaders }
-func (r *Request) HeaderAt(i int) Header  { return r.headers[i] }
+	// num_headers and header_at iterate the request headers.
+	pub fn num_headers(&self) -> int        { return self.nheaders }
 
-// QueryValue returns the raw (not unescaped) value of key in the query string; QueryParam
-// unescapes it.
-func (r *Request) QueryValue(key string) string {
-	q := r.Query
-	for len(q) > 0 {
-		pair := q
-		if i := strings.IndexByte(q, '&'); i >= 0 {
-			pair = q[:i]
-			q = q[i+1:]
-		} else {
-			q = ""
+	pub fn header_at(&self, i int) -> Header  { return self.headers[i] }
+
+	// query_value returns the raw (not unescaped) value of key in the query string; query_param
+	// unescapes it.
+	pub fn query_value(&self, key str) -> str {
+		q := self.query
+		while len(q) > 0 {
+			pair := q
+			if i := strings.index_byte(q, '&'); i >= 0 {
+				pair = q[:i]
+				q = q[i+1:]
+			} else {
+				q = ""
+			}
+			k, v, _ := strings.cut(pair, "=")
+			if k == key {
+				return v
+			}
 		}
-		k, v, _ := strings.Cut(pair, "=")
-		if k == key {
-			return v
-		}
+		return ""
 	}
-	return ""
 }
 
 // ResponseWriter stages the response in the connection goroutine's write buffer.
-type ResponseWriter struct {
-	conn        net.Conn
-	buf         []byte
-	hdr         []byte
-	status      int
-	wroteHeader bool
-	chunked     bool
-	keepAlive   bool
-	head        bool
-	failed      bool
-	hasType     bool
-	http10      bool // an HTTP/1.0 request: no chunked encoding
-	crlf        bool // a chunk's data went out; its closing CRLF leads the next write
-	dropped     int  // body bytes not sent: HEAD (counted for Content-Length) or a status without a body
-	scratch     arena        // the request's arena (for JSON's buffer)
-	enc         json.Encoder // JSON's state
+pub struct ResponseWriter {
+	conn         net.Conn
+	buf          u8[]
+	hdr          u8[]
+	status_code  int
+	wrote_header bool
+	chunked      bool
+	keep_alive   bool
+	head         bool
+	failed       bool
+	has_type     bool
+	http10       bool         // an HTTP/1.0 request: no chunked encoding
+	crlf         bool         // a chunk's data went out; its closing CRLF leads the next write
+	dropped      int          // body bytes not sent: HEAD (counted for Content-Length) or a status without a body
+	scratch      arena        // the request's arena (for JSON's buffer)
+	enc          json.Encoder // JSON's state
 }
 
-// SetHeader adds a response header. Content-Length, Transfer-Encoding and Date are managed for
-// you and ignored here, as is a name that isn't an HTTP token. "Connection: close" closes the
-// connection after the response. A CR, LF or NUL in value is sent as a space, so a value (say,
-// echoed from the request) can't start a header of its own.
-func (w *ResponseWriter) SetHeader(name, value string) {
-	if w.wroteHeader || !isToken(name) {
-		return
-	}
-	switch {
-	case strings.EqualFold(name, "Content-Type"):
-		w.hasType = true
-	case strings.EqualFold(name, "Content-Length"), strings.EqualFold(name, "Transfer-Encoding"), strings.EqualFold(name, "Date"):
-		return
-	case strings.EqualFold(name, "Connection"):
-		if hasToken(value, "close") {
-			w.keepAlive = false
+impl ResponseWriter {
+	// set_header adds a response header. Content-Length, Transfer-Encoding and Date are managed for
+	// you and ignored here, as is a name that isn't an HTTP token. "Connection: close" closes the
+	// connection after the response. A CR, LF or NUL in value is sent as a space, so a value (say,
+	// echoed from the request) can't start a header of its own.
+	pub fn set_header(&self, name, value str) {
+		if self.wrote_header or not is_token(name) {
+			return
 		}
-		return
-	}
-	if len(w.hdr)+len(name)+len(value)+4 > cap(w.hdr) {
-		return
-	}
-	w.hdr = append(w.hdr, name...)
-	w.hdr = append(w.hdr, ':', ' ')
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		if c == '\r' || c == '\n' || c == 0 {
-			c = ' '
+		switch {
+		case strings.equal_fold(name, "Content-Type"):
+			self.has_type = true
+		case strings.equal_fold(name, "Content-Length"), strings.equal_fold(name, "Transfer-Encoding"), strings.equal_fold(name, "Date"):
+			return
+		case strings.equal_fold(name, "Connection"):
+			if has_token(value, "close") {
+				self.keep_alive = false
+			}
+			return
 		}
-		w.hdr = append(w.hdr, c)
-	}
-	w.hdr = append(w.hdr, '\r', '\n')
-}
-
-// WriteHeader sets the status code (it is sent with the first flush). A code outside 100..999 is
-// sent as 500. Once part of the body has been flushed, the status can't change.
-func (w *ResponseWriter) WriteHeader(code int) {
-	if w.wroteHeader || w.dropped > 0 {
-		return
-	}
-	if code < 100 || code > 999 {
-		code = 500
-	}
-	w.status = code
-}
-
-// bodyless reports whether the status forbids a body (1xx, 204 and 304).
-func (w *ResponseWriter) bodyless() bool {
-	return w.status < 200 || w.status == 204 || w.status == 304
-}
-
-func (w *ResponseWriter) Write(p []byte) (int, error) {
-	n := 0
-	for n < len(p) {
-		if len(w.buf) == cap(w.buf) {
-			w.spill()
+		if len(self.hdr)+len(name)+len(value)+4 > cap(self.hdr) {
+			return
 		}
-		k := min(len(p)-n, cap(w.buf)-len(w.buf))
-		w.buf = append(w.buf, p[n:n+k]...)
-		n += k
-	}
-	return n, nil
-}
-
-func (w *ResponseWriter) WriteString(s string) (int, error) {
-	n := 0
-	for n < len(s) {
-		if len(w.buf) == cap(w.buf) {
-			w.spill()
+		self.hdr = append(self.hdr, name...)
+		self.hdr = append(self.hdr, ':', ' ')
+		for i := 0; i < len(value); i++ {
+			c := value[i]
+			if c == '\r' or c == '\n' or c == 0 {
+				c = ' '
+			}
+			self.hdr = append(self.hdr, c)
 		}
-		k := min(len(s)-n, cap(w.buf)-len(w.buf))
-		w.buf = append(w.buf, s[n:n+k]...)
-		n += k
+		self.hdr = append(self.hdr, '\r', '\n')
 	}
-	return n, nil
+
+	// write_header sets the status code (it is sent with the first flush). A code outside 100..999 is
+	// sent as 500. Once part of the body has been flushed, the status can't change.
+	pub fn write_header(&self, code int) {
+		if self.wrote_header or self.dropped > 0 {
+			return
+		}
+		if code < 100 or code > 999 {
+			code = 500
+		}
+		self.status_code = code
+	}
+
+	// bodyless reports whether the status forbids a body (1xx, 204 and 304).
+	fn bodyless(&self) -> bool {
+		return self.status_code < 200 or self.status_code == 204 or self.status_code == 304
+	}
+
+	pub fn write(&self, p u8[]) -> int ! {
+		n := 0
+		while n < len(p) {
+			if len(self.buf) == cap(self.buf) {
+				self.spill()
+			}
+			k := min(len(p)-n, cap(self.buf)-len(self.buf))
+			self.buf = append(self.buf, p[n:n+k]...)
+			n += k
+		}
+		return n, nil
+	}
+
+	pub fn write_string(&self, s str) -> int ! {
+		n := 0
+		while n < len(s) {
+			if len(self.buf) == cap(self.buf) {
+				self.spill()
+			}
+			k := min(len(s)-n, cap(self.buf)-len(self.buf))
+			self.buf = append(self.buf, s[n:n+k]...)
+			n += k
+		}
+		return n, nil
+	}
+
+	pub fn write_byte(&self, c u8) -> ! {
+		if len(self.buf) == cap(self.buf) {
+			self.spill()
+		}
+		self.buf = append(self.buf, c)
+		return nil
+	}
+
+	pub fn write_int(&self, v int) {
+		var tmp u8[24]
+		self.write(strconv.append_int(tmp[:0], v))
+	}
+
+	// status returns the status code that will be (or was) sent.
+	pub fn status(&self) -> int { return self.status_code }
 }
 
-func (w *ResponseWriter) WriteByte(c byte) error {
-	if len(w.buf) == cap(w.buf) {
-		w.spill()
+extern fn http_date(dst u8[]) -> int stack 8K c"sq_httpdate"
+
+impl ResponseWriter {
+	fn status_line(&self, dst u8[]) -> u8[] {
+		dst = append(dst, "HTTP/1.1 "...)
+		dst = strconv.append_int(dst, self.status_code)
+		dst = append(dst, ' ')
+		dst = append(dst, status_text(self.status_code)...)
+		dst = append(dst, "\r\nDate: "...)
+		var date u8[32]
+		n := http_date(date[:])
+		dst = append(dst, date[:n]...)
+		dst = append(dst, "\r\n"...)
+		if not self.keep_alive {
+			dst = append(dst, "Connection: close\r\n"...)
+		} else if self.http10 {
+			dst = append(dst, "Connection: keep-alive\r\n"...) // HTTP/1.0 closes without it
+		}
+		if not self.has_type and not self.bodyless() {
+			dst = append(dst, "Content-Type: text/plain; charset=utf-8\r\n"...)
+		}
+		return dst
 	}
-	w.buf = append(w.buf, c)
-	return nil
-}
 
-func (w *ResponseWriter) WriteInt(v int) {
-	var tmp [24]byte
-	w.Write(strconv.AppendInt(tmp[:0], v))
-}
-
-// Status returns the status code that will be (or was) sent.
-func (w *ResponseWriter) Status() int { return w.status }
-
-extern "sq_httpdate" func httpDate(dst []byte) int stack 8K
-
-func (w *ResponseWriter) statusLine(dst []byte) []byte {
-	dst = append(dst, "HTTP/1.1 "...)
-	dst = strconv.AppendInt(dst, w.status)
-	dst = append(dst, ' ')
-	dst = append(dst, StatusText(w.status)...)
-	dst = append(dst, "\r\nDate: "...)
-	var date [32]byte
-	n := httpDate(date[:])
-	dst = append(dst, date[:n]...)
-	dst = append(dst, "\r\n"...)
-	if !w.keepAlive {
-		dst = append(dst, "Connection: close\r\n"...)
-	} else if w.http10 {
-		dst = append(dst, "Connection: keep-alive\r\n"...) // HTTP/1.0 closes without it
+	// spill empties a full w.buf: it sends it as a chunk, or, when the response has no body (HEAD, or
+	// a status like 204), only counts it.
+	fn spill(&self) {
+		if self.head or self.bodyless() {
+			self.dropped += len(self.buf)
+			self.buf = self.buf[:0]
+			return
+		}
+		self.flush_chunk()
 	}
-	if !w.hasType && !w.bodyless() {
-		dst = append(dst, "Content-Type: text/plain; charset=utf-8\r\n"...)
-	}
-	return dst
-}
 
-// spill empties a full w.buf: it sends it as a chunk, or, when the response has no body (HEAD, or
-// a status like 204), only counts it.
-func (w *ResponseWriter) spill() {
-	if w.head || w.bodyless() {
-		w.dropped += len(w.buf)
-		w.buf = w.buf[:0]
-		return
+	// flush_chunk sends the buffered body as a chunk, switching to chunked encoding if needed. An
+	// HTTP/1.0 client doesn't know chunks: its body is sent as is, and ends when the connection closes.
+	fn flush_chunk(&self) {
+		var head u8[header_buffer_size + 256]
+		h := head[:0]
+		if not self.wrote_header {
+			self.wrote_header = true
+			if self.http10 {
+				self.keep_alive = false
+			} else {
+				self.chunked = true
+			}
+			h = self.status_line(h)
+			h = append(h, self.hdr...)
+			if self.chunked {
+				h = append(h, "Transfer-Encoding: chunked\r\n"...)
+			}
+			h = append(h, "\r\n"...)
+		}
+		if self.crlf {
+			h = append(h, "\r\n"...)
+			self.crlf = false
+		}
+		if len(self.buf) > 0 and self.chunked {
+			// w.buf may be full, so the chunk's CRLF is sent with the next write instead
+			h = append_hex(h, len(self.buf))
+			h = append(h, "\r\n"...)
+			self.crlf = true
+		}
+		if _, err := self.conn.write2(h, self.buf); err != nil {
+			self.failed = true
+		}
+		self.buf = self.buf[:0]
 	}
-	w.flushChunk()
-}
 
-// flushChunk sends the buffered body as a chunk, switching to chunked encoding if needed. An
-// HTTP/1.0 client doesn't know chunks: its body is sent as is, and ends when the connection closes.
-func (w *ResponseWriter) flushChunk() {
-	var head [headerBufferSize + 256]byte
-	h := head[:0]
-	if !w.wroteHeader {
-		w.wroteHeader = true
-		if w.http10 {
-			w.keepAlive = false
+	// finish sends whatever remains of the response.
+	fn finish(&self) {
+		if self.wrote_header and not self.chunked { // HTTP/1.0, unframed: the rest of the body, then close
+			if len(self.buf) > 0 {
+				if _, err := self.conn.write(self.buf); err != nil {
+					self.failed = true
+				}
+			}
+			return
+		}
+		if self.chunked {
+			const term = "\r\n0\r\n\r\n"
+			if len(self.buf) > 0 and cap(self.buf)-len(self.buf) < len(term) {
+				self.flush_chunk() // no room for the terminator after the data
+			}
+			var tail u8[32]
+			t := tail[:0]
+			if self.crlf {
+				t = append(t, "\r\n"...)
+			}
+			if len(self.buf) > 0 {
+				t = append_hex(t, len(self.buf))
+				t = append(t, "\r\n"...)
+				self.buf = append(self.buf, term...)
+			} else {
+				t = append(t, "0\r\n\r\n"...)
+			}
+			if _, err := self.conn.write2(t, self.buf); err != nil {
+				self.failed = true
+			}
+			return
+		}
+		var head u8[header_buffer_size + 256]
+		h := self.status_line(head[:0])
+		h = append(h, self.hdr...)
+		body := self.buf
+		if self.bodyless() {
+			body = self.buf[:0]
 		} else {
-			w.chunked = true
-		}
-		h = w.statusLine(h)
-		h = append(h, w.hdr...)
-		if w.chunked {
-			h = append(h, "Transfer-Encoding: chunked\r\n"...)
+			h = append(h, "Content-Length: "...)
+			h = strconv.append_int(h, self.dropped+len(self.buf))
+			h = append(h, "\r\n"...)
 		}
 		h = append(h, "\r\n"...)
+		if self.head {
+			body = self.buf[:0]
+		}
+		if _, err := self.conn.write2(h, body); err != nil {
+			self.failed = true
+		}
 	}
-	if w.crlf {
-		h = append(h, "\r\n"...)
-		w.crlf = false
-	}
-	if len(w.buf) > 0 && w.chunked {
-		// w.buf may be full, so the chunk's CRLF is sent with the next write instead
-		h = appendHex(h, len(w.buf))
-		h = append(h, "\r\n"...)
-		w.crlf = true
-	}
-	if _, err := w.conn.Write2(h, w.buf); err != nil {
-		w.failed = true
-	}
-	w.buf = w.buf[:0]
 }
 
-func appendHex(dst []byte, v int) []byte {
+fn append_hex(dst u8[], v int) -> u8[] {
 	const digits = "0123456789abcdef"
-	var tmp [16]byte
+	var tmp u8[16]
 	i := len(tmp)
-	for {
+	loop {
 		i--
 		tmp[i] = digits[v&15]
 		v >>= 4
@@ -293,180 +346,128 @@ func appendHex(dst []byte, v int) []byte {
 	return append(dst, tmp[i:]...)
 }
 
-// finish sends whatever remains of the response.
-func (w *ResponseWriter) finish() {
-	if w.wroteHeader && !w.chunked { // HTTP/1.0, unframed: the rest of the body, then close
-		if len(w.buf) > 0 {
-			if _, err := w.conn.Write(w.buf); err != nil {
-				w.failed = true
-			}
-		}
-		return
-	}
-	if w.chunked {
-		const term = "\r\n0\r\n\r\n"
-		if len(w.buf) > 0 && cap(w.buf)-len(w.buf) < len(term) {
-			w.flushChunk() // no room for the terminator after the data
-		}
-		var tail [32]byte
-		t := tail[:0]
-		if w.crlf {
-			t = append(t, "\r\n"...)
-		}
-		if len(w.buf) > 0 {
-			t = appendHex(t, len(w.buf))
-			t = append(t, "\r\n"...)
-			w.buf = append(w.buf, term...)
-		} else {
-			t = append(t, "0\r\n\r\n"...)
-		}
-		if _, err := w.conn.Write2(t, w.buf); err != nil {
-			w.failed = true
-		}
-		return
-	}
-	var head [headerBufferSize + 256]byte
-	h := w.statusLine(head[:0])
-	h = append(h, w.hdr...)
-	body := w.buf
-	if w.bodyless() {
-		body = w.buf[:0]
-	} else {
-		h = append(h, "Content-Length: "...)
-		h = strconv.AppendInt(h, w.dropped+len(w.buf))
-		h = append(h, "\r\n"...)
-	}
-	h = append(h, "\r\n"...)
-	if w.head {
-		body = w.buf[:0]
-	}
-	if _, err := w.conn.Write2(h, body); err != nil {
-		w.failed = true
-	}
-}
-
 // HandlerFunc handles one request.
-type HandlerFunc func(w *ResponseWriter, r *Request)
+pub HandlerFunc: fn(w *ResponseWriter, r *Request)
 
-// ListenAndServe listens on addr and serves each connection in its own goroutine. With a nil h it
-// dispatches to the patterns registered with HandleFunc.
-func ListenAndServe(addr string, h HandlerFunc) error {
-	l, err := net.Listen(addr)
+// listen_and_serve listens on addr and serves each connection in its own goroutine. With a nil h it
+// dispatches to the patterns registered with handle_func.
+pub fn listen_and_serve(addr str, h HandlerFunc) -> ! {
+	l, err := net.listen(addr)
 	if err != nil {
 		return err
 	}
-	return Serve(l, h)
+	return serve(l, h)
 }
 
-// MaxServers is how many Serve calls one process may run.
-const MaxServers = 16
+// max_servers is how many serve calls one process may run.
+pub const max_servers = 16
 
-const ErrTooManyServers = error(503, "http: too many servers in one process")
+pub fault TooManyServers 503 "http: too many servers in one process"
 
 // handlers holds each running server's handler; idle connections are tagged with its index.
-var handlers [..MaxServers]HandlerFunc
-var wakerStarted bool
+thread handlers HandlerFunc[..max_servers]
+thread waker_started bool
 
-// Serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
-// a CR or LF outside a CRLF, a header name that isn't a token (`Name : v`, folded lines), a
+// serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
+// a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
 // Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
 // get a 400 and a closed connection. `Expect: 100-continue` is answered before the body is read;
 // other expectations get a 417. HTTP/1.0 clients get `Connection: keep-alive` when they ask for it,
 // and a body too long to buffer is sent unframed, ending with the connection, since HTTP/1.0 has
 // no chunked encoding.
-func Serve(l net.Listener, h HandlerFunc) error {
-	if len(handlers) == MaxServers {
-		return ErrTooManyServers
+pub fn serve(l net.Listener, h HandlerFunc) -> ! {
+	if len(handlers) == max_servers {
+		return TooManyServers
 	}
 	id := len(handlers)
-	handlers.Push(h)
-	if !wakerStarted {
-		wakerStarted = true
-		go wakeIdle() // one for all servers: the idle set has a single consumer
+	handlers.push(h)
+	if not waker_started {
+		waker_started = true
+		start wake_idle() // one for all servers: the idle set has a single consumer
 	}
-	for {
-		c, err := l.Accept()
+	loop {
+		c, err := l.accept()
 		if err != nil {
-			if err.Code() == 24 || err.Code() == 23 || err.Code() == 53 || err.Code() == 54 {
+			if err.code() == 24 or err.code() == 23 or err.code() == 53 or err.code() == 54 {
 				continue // EMFILE / ENFILE / ECONNABORTED / ECONNRESET: keep serving
 			}
 			return err
 		}
-		go serveConn(c, id)
+		start serve_conn(c, id)
 	}
 }
 
-// writeError answers a request that won't be served with status and closes the sending side.
-func writeError(c net.Conn, status string) {
-	var b [128]byte
+// write_error answers a request that won't be served with status and closes the sending side.
+fn write_error(c net.Conn, status str) {
+	var b u8[128]
 	m := append(b[:0], "HTTP/1.1 "...)
 	m = append(m, status...)
 	m = append(m, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"...)
-	c.Write(m)
-	c.CloseWrite()
+	c.write(m)
+	c.close_write()
 }
 
-// errorLinger is how long a rejected request's connection stays open to read what the client is
+// error_linger is how long a rejected request's connection stays open to read what the client is
 // still sending: closing a socket with unread input resets it, and the client could miss the answer.
-const errorLinger = 500 * time.Millisecond
+const error_linger = 500 * time.millisecond
 
-// reject answers with status, then reads and drops the client's input for up to errorLinger
+// reject answers with status, then reads and drops the client's input for up to error_linger
 // (at most 1 MiB) before the caller closes the connection.
-func reject(c net.Conn, status string, rbuf []byte) {
-	writeError(c, status)
-	start := time.Now()
+fn reject(c net.Conn, status str, rbuf u8[]) {
+	write_error(c, status)
+	start := time.now()
 	for i := 0; i < (1<<20)/len(rbuf); i++ {
-		left := errorLinger - time.Since(start)
+		left := error_linger - time.since(start)
 		if left <= 0 {
 			return
 		}
-		if m, err := c.ReadTimeout(rbuf, left); err != nil || m == 0 {
+		if m, err := c.read_timeout(rbuf, left); err != nil or m == 0 {
 			return
 		}
 	}
 }
 
-// wakeIdle restarts connections from the idle set when they have a new request.
-task wakeIdle() pool 1 {
-	for {
-		c, id := net.NextIdle()
-		go serveConn(c, id)
+// wake_idle restarts connections from the idle set when they have a new request.
+task wake_idle() pool 1 {
+	loop {
+		c, id := net.next_idle()
+		start serve_conn(c, id)
 	}
 }
 
-// serveConn runs one keep-alive connection while it is busy. At most 10000 run at once; further
-// connections wait for a slot. A connection that stays quiet for IdleRelease is parked in the
+// serve_conn runs one keep-alive connection while it is busy. At most 10000 run at once; further
+// connections wait for a slot. A connection that stays quiet for idle_release is parked in the
 // runtime's idle set and this goroutine exits, returning its whole stack to the OS.
-task serveConn(c net.Conn, id int) pool 10000 {
+task serve_conn(c net.Conn, id int) pool 10000 {
 	h := handlers[id]
-	var rbuf [ReadBufferSize]byte
-	var wbuf [WriteBufferSize]byte
+	var rbuf u8[read_buffer_size]
+	var wbuf u8[write_buffer_size]
 	n := 0
-	for {
-		if n == 0 && !c.WaitReadable(IdleRelease) {
-			c.ParkIdle(id)
+	loop {
+		if n == 0 and not c.wait_readable(idle_release) {
+			c.park_idle(id)
 			return
 		}
 		ok := false
-		n, ok = serveRequest(c, h, rbuf[:], n, wbuf[:])
-		if !ok {
-			c.Close()
+		n, ok = serve_request(c, h, rbuf[:], n, wbuf[:])
+		if not ok {
+			c.close()
 			return
 		}
 	}
 }
 
-// readMore reads into rbuf[n:] until start+limit. It returns how many bytes it read, or 0 if the
+// read_more reads into rbuf[n:] until start+limit. It returns how many bytes it read, or 0 if the
 // connection is done (an error, EOF, or the deadline, which gets a 408).
-func readMore(c net.Conn, rbuf []byte, n int, start time.Time, limit time.Duration) int {
-	left := limit - time.Since(start)
+fn read_more(c net.Conn, rbuf u8[], n int, start time.Time, limit time.Duration) -> int {
+	left := limit - time.since(start)
 	m := 0
-	err := net.ErrTimeout
+	err := net.Timeout
 	if left > 0 {
-		m, err = c.ReadTimeout(rbuf[n:], left)
+		m, err = c.read_timeout(rbuf[n:], left)
 	}
-	if err == net.ErrTimeout {
-		writeError(c, "408 Request Timeout")
+	if err == net.Timeout {
+		write_error(c, "408 Request Timeout")
 	}
 	if err != nil {
 		return 0
@@ -474,63 +475,63 @@ func readMore(c net.Conn, rbuf []byte, n int, start time.Time, limit time.Durati
 	return m
 }
 
-// serveRequest serves one request whose first n bytes are already in rbuf. It returns how many
+// serve_request serves one request whose first n bytes are already in rbuf. It returns how many
 // bytes of the next (pipelined) request remain buffered, and whether to keep the connection.
 //
 //squark:noinline
-func serveRequest(c net.Conn, h HandlerFunc, rbuf []byte, n int, wbuf []byte) (int, bool) {
-	var hbuf [headerBufferSize]byte
-	start := time.Now() // the request has started arriving: its read deadlines count from here
-	end, scan := headerEnd(rbuf[:n], 0)
-	for end == -1 {
+fn serve_request(c net.Conn, h HandlerFunc, rbuf u8[], n int, wbuf u8[]) -> (int, bool) {
+	var hbuf u8[header_buffer_size]
+	start := time.now() // the request has started arriving: its read deadlines count from here
+	end, scan := header_end(rbuf[:n], 0)
+	while end == -1 {
 		if n == len(rbuf) {
 			reject(c, "431 Request Header Fields Too Large", rbuf)
 			return 0, false
 		}
-		m := readMore(c, rbuf, n, start, ReadHeaderTimeout)
+		m := read_more(c, rbuf, n, start, read_header_timeout)
 		if m == 0 {
 			return 0, false
 		}
 		n += m
-		end, scan = headerEnd(rbuf[:n], scan)
+		end, scan = header_end(rbuf[:n], scan)
 	}
 	if end < 0 {
 		reject(c, "400 Bad Request", rbuf)
 		return 0, false
 	}
-	arena scratch RequestArenaSize {
+	with arena scratch request_arena_size {
 		var req Request
-		req.Arena = scratch
-		if status := parseRequest(string(rbuf[:end]), &req); status != "" {
+		req.arena = scratch
+		if status := parse_request(str(rbuf[:end]), &req); status != "" {
 			reject(c, status, rbuf)
 			return 0, false
 		}
-		if req.ContentLength > len(rbuf)-end { // not end+ContentLength: that can overflow
+		if req.content_length > len(rbuf)-end { // not end+content_length: that can overflow
 			reject(c, "413 Request Entity Too Large", rbuf)
 			return 0, false
 		}
-		total := end + req.ContentLength
-		if n < total && req.expect100 {
-			if _, err := c.WriteString("HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
+		total := end + req.content_length
+		if n < total and req.expect100 {
+			if _, err := c.write_string("HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
 				return 0, false
 			}
 		}
-		for n < total {
-			m := readMore(c, rbuf, n, start, ReadTimeout)
+		while n < total {
+			m := read_more(c, rbuf, n, start, read_timeout)
 			if m == 0 {
 				return 0, false
 			}
 			n += m
 		}
-		req.Body = rbuf[end:total]
-		w := ResponseWriter{conn: c, buf: wbuf[:0], hdr: hbuf[:0], status: 200, keepAlive: req.keepAlive, http10: req.http10, head: req.Method == "HEAD", scratch: scratch}
+		req.body = rbuf[end:total]
+		w := ResponseWriter{conn: c, buf: wbuf[:0], hdr: hbuf[:0], status_code: 200, keep_alive: req.keep_alive, http10: req.http10, head: req.method == "HEAD", scratch: scratch}
 		if h == nil {
-			serveMux(&w, &req) // called directly: as a func value it would look recursive
+			serve_mux(&w, &req) // called directly: as a func value it would look recursive
 		} else {
 			h(&w, &req)
 		}
 		w.finish()
-		if !w.keepAlive || w.failed {
+		if not w.keep_alive or w.failed {
 			return 0, false
 		}
 		// keep pipelined bytes
@@ -539,11 +540,11 @@ func serveRequest(c net.Conn, h HandlerFunc, rbuf []byte, n int, wbuf []byte) (i
 	}
 }
 
-// headerEnd scans b from i for the blank line that ends a request head. It returns the index just
+// header_end scans b from i for the blank line that ends a request head. It returns the index just
 // past it; or -1, and where to go on once more input has arrived; or -2 if b has a CR or LF that
 // isn't part of a CRLF (the request line and headers can't contain one).
-func headerEnd(b []byte, i int) (int, int) {
-	for i < len(b) {
+fn header_end(b u8[], i int) -> (int, int) {
+	while i < len(b) {
 		switch b[i] {
 		case '\r':
 			if i+1 == len(b) {
@@ -552,7 +553,7 @@ func headerEnd(b []byte, i int) (int, int) {
 			if b[i+1] != '\n' {
 				return -2, 0
 			}
-			if i >= 2 && b[i-1] == '\n' && b[i-2] == '\r' {
+			if i >= 2 and b[i-1] == '\n' and b[i-2] == '\r' {
 				return i + 2, 0
 			}
 			i += 2
@@ -565,46 +566,46 @@ func headerEnd(b []byte, i int) (int, int) {
 	return -1, i
 }
 
-// isToken reports whether s is an HTTP token (a method or header name).
-func isToken(s string) bool {
+// is_token reports whether s is an HTTP token (a method or header name).
+fn is_token(s str) -> bool {
 	if len(s) == 0 {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0) {
+		if not (c >= 'a' and c <= 'z' or c >= 'A' and c <= 'Z' or c >= '0' and c <= '9' or strings.index_byte("!#$%&'*+-.^_`|~", c) >= 0) {
 			return false
 		}
 	}
 	return true
 }
 
-// hasCtl reports whether s has a control character other than tab.
-func hasCtl(s string) bool {
+// has_ctl reports whether s has a control character other than tab.
+fn has_ctl(s str) -> bool {
 	for i := 0; i < len(s); i++ {
-		if s[i] < ' ' && s[i] != '\t' || s[i] == 0x7f {
+		if s[i] < ' ' and s[i] != '\t' or s[i] == 0x7f {
 			return true
 		}
 	}
 	return false
 }
 
-// trimOWS trims the spaces and tabs around a header value.
-func trimOWS(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
+// trim_ows trims the spaces and tabs around a header value.
+fn trim_ows(s str) -> str {
+	while len(s) > 0 and (s[0] == ' ' or s[0] == '\t') {
 		s = s[1:]
 	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
+	while len(s) > 0 and (s[len(s)-1] == ' ' or s[len(s)-1] == '\t') {
 		s = s[:len(s)-1]
 	}
 	return s
 }
 
-// hasToken reports whether the comma-separated list v contains tok (case-insensitive).
-func hasToken(v, tok string) bool {
-	for len(v) > 0 {
-		item, rest, _ := strings.Cut(v, ",")
-		if strings.EqualFold(trimOWS(item), tok) {
+// has_token reports whether the comma-separated list v contains tok (case-insensitive).
+fn has_token(v, tok str) -> bool {
+	while len(v) > 0 {
+		item, rest, _ := strings.cut(v, ",")
+		if strings.equal_fold(trim_ows(item), tok) {
 			return true
 		}
 		v = rest
@@ -612,15 +613,15 @@ func hasToken(v, tok string) bool {
 	return false
 }
 
-// parseLength parses a Content-Length: decimal digits only. It returns -1 if s isn't one.
-func parseLength(s string) int {
+// parse_length parses a Content-Length: decimal digits only. It returns -1 if s isn't one.
+fn parse_length(s str) -> int {
 	if len(s) == 0 {
 		return -1
 	}
 	n := 0
 	for i := 0; i < len(s); i++ {
 		d := int(s[i]) - '0'
-		if d < 0 || d > 9 || n > (9223372036854775807-d)/10 {
+		if d < 0 or d > 9 or n > (9223372036854775807-d)/10 {
 			return -1
 		}
 		n = n*10 + d
@@ -628,87 +629,87 @@ func parseLength(s string) int {
 	return n
 }
 
-const badRequest = "400 Bad Request"
+const bad_request = "400 Bad Request"
 
-// parseRequest parses a request head (which headerEnd has checked for stray CRs and LFs). It returns
+// parse_request parses a request head (which header_end has checked for stray CRs and LFs). It returns
 // "", or the status to answer with if the request can't be served.
-func parseRequest(head string, r *Request) string {
-	line, rest, ok := strings.Cut(head, "\r\n")
-	if !ok {
-		return badRequest
+fn parse_request(head str, r *Request) -> str {
+	line, rest, ok := strings.cut(head, "\r\n")
+	if not ok {
+		return bad_request
 	}
-	method, line2, ok1 := strings.Cut(line, " ")
-	target, proto, ok2 := strings.Cut(line2, " ")
-	if !ok1 || !ok2 || !isToken(method) || len(target) == 0 || hasCtl(target) {
-		return badRequest
+	method, line2, ok1 := strings.cut(line, " ")
+	target, proto, ok2 := strings.cut(line2, " ")
+	if not ok1 or not ok2 or not is_token(method) or len(target) == 0 or has_ctl(target) {
+		return bad_request
 	}
 	switch {
 	case proto == "HTTP/1.1":
-		r.keepAlive = true
+		r.keep_alive = true
 	case proto == "HTTP/1.0":
 		r.http10 = true
-	case len(proto) == 8 && strings.HasPrefix(proto, "HTTP/") && proto[6] == '.' && proto[5] >= '0' && proto[5] <= '9' && proto[7] >= '0' && proto[7] <= '9':
+	case len(proto) == 8 and strings.has_prefix(proto, "HTTP/") and proto[6] == '.' and proto[5] >= '0' and proto[5] <= '9' and proto[7] >= '0' and proto[7] <= '9':
 		if proto[5] != '1' {
 			return "505 HTTP Version Not Supported"
 		}
-		r.keepAlive = true // a later HTTP/1.x: served as 1.1
+		r.keep_alive = true // a later HTTP/1.x: served as 1.1
 	default:
-		return badRequest
+		return bad_request
 	}
-	r.Method = method
-	r.Proto = proto
-	path, query, _ := strings.Cut(target, "?")
-	r.Path = path
-	r.Query = query
-	r.ContentLength = 0
-	sawLength := false
-	for len(rest) > 0 {
-		hl, more, _ := strings.Cut(rest, "\r\n")
+	r.method = method
+	r.proto = proto
+	path, query, _ := strings.cut(target, "?")
+	r.path = path
+	r.query = query
+	r.content_length = 0
+	saw_length := false
+	while len(rest) > 0 {
+		hl, more, _ := strings.cut(rest, "\r\n")
 		rest = more
 		if len(hl) == 0 {
 			break
 		}
-		// "Name : v" and folded lines (" v") are errors, so a header is never misread as another
-		name, value, ok := strings.Cut(hl, ":")
-		if !ok || !isToken(name) {
-			return badRequest
+		// "name : v" and folded lines (" v") are errors, so a header is never misread as another
+		name, value, ok := strings.cut(hl, ":")
+		if not ok or not is_token(name) {
+			return bad_request
 		}
-		value = trimOWS(value)
-		if hasCtl(value) {
-			return badRequest
+		value = trim_ows(value)
+		if has_ctl(value) {
+			return bad_request
 		}
-		if r.nheaders < MaxHeaders {
-			r.headers[r.nheaders] = Header{Name: name, Value: value}
+		if r.nheaders < max_headers {
+			r.headers[r.nheaders] = Header{name: name, value: value}
 			r.nheaders++
 		}
 		switch {
-		case strings.EqualFold(name, "Content-Length"):
-			cl := parseLength(value)
-			if cl < 0 || sawLength && cl != r.ContentLength {
-				return badRequest // also two different lengths: which one is meant is ambiguous
+		case strings.equal_fold(name, "Content-Length"):
+			cl := parse_length(value)
+			if cl < 0 or saw_length and cl != r.content_length {
+				return bad_request // also two different lengths: which one is meant is ambiguous
 			}
-			sawLength = true
-			r.ContentLength = cl
-		case strings.EqualFold(name, "Connection"):
-			if hasToken(value, "close") {
-				r.keepAlive = false
-			} else if hasToken(value, "keep-alive") {
-				r.keepAlive = true
+			saw_length = true
+			r.content_length = cl
+		case strings.equal_fold(name, "Connection"):
+			if has_token(value, "close") {
+				r.keep_alive = false
+			} else if has_token(value, "keep-alive") {
+				r.keep_alive = true
 			}
-		case strings.EqualFold(name, "Transfer-Encoding"):
-			return badRequest // chunked request bodies are not supported
-		case strings.EqualFold(name, "Expect"):
-			if !strings.EqualFold(value, "100-continue") {
+		case strings.equal_fold(name, "Transfer-Encoding"):
+			return bad_request // chunked request bodies are not supported
+		case strings.equal_fold(name, "Expect"):
+			if not strings.equal_fold(value, "100-continue") {
 				return "417 Expectation Failed"
 			}
-			r.expect100 = !r.http10
+			r.expect100 = not r.http10
 		}
 	}
 	return ""
 }
 
-// StatusText returns the reason phrase for a status code.
-func StatusText(code int) string {
+// status_text returns the reason phrase for a status code.
+pub fn status_text(code int) -> str {
 	switch code {
 	case 200:
 		return "OK"

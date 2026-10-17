@@ -1,488 +1,487 @@
-package json
+module json
 
-import (
-	"strconv"
-	"utf8"
-)
+use strconv, utf8
 
 // Encoder writes one JSON value, usually an object or an array, adding the commas, colons and
-// quotes itself. Object and Array open a container and End closes the innermost one; inside an
-// object, Key names the member whose value comes next. Values are String, Int, Float, Bool, Null
-// and Raw (JSON encoded already):
+// quotes itself. Object and array open a container and end closes the innermost one; inside an
+// object, key names the member whose value comes next. Values are string, int, float, bool, null
+// and raw (JSON encoded already):
 //
-//	e := json.NewEncoder(buf[:0])
-//	e.Object()
-//	e.Key("id")
-//	e.Int(7)
-//	e.Key("tags")
-//	e.Array()
-//	e.String("a")
-//	e.End()
-//	e.End()
-//	if e.Finish() == nil {
-//		w.Write(e.Bytes()) // {"id":7,"tags":["a"]}
+//	e := json.new_encoder(buf[:0])
+//	e.object()
+//	e.key("id")
+//	e.int(7)
+//	e.key("tags")
+//	e.array()
+//	e.string("a")
+//	e.end()
+//	e.end()
+//	if e.finish() == nil {
+//		w.write(e.bytes()) // {"id":7,"tags":["a"]}
 //	}
 //
 // Nothing is written that would make the output invalid: a call out of place (a value in an object
-// without a Key, Key outside an object or twice, End with nothing open or right after a Key, a
-// second top-level value) sets Err to ErrMisuse, nesting deeper than MaxDepth sets ErrDepth, a NaN
-// or infinite Float sets ErrFloat, and Raw of invalid JSON sets ErrSyntax. The first error is kept,
+// without a key, key outside an object or twice, end with nothing open or right after a key, a
+// second top-level value) sets err to Misuse, nesting deeper than max_depth sets Depth, a NaN
+// or infinite float sets Float, and raw of invalid JSON sets Syntax. The first error is kept,
 // and every call after it writes nothing. Finish also checks that the value is complete.
 //
-// The output is appended to the slice given to NewEncoder. When it is full, a call sets ErrFull
-// and writes nothing at all (each call writes all of its output or none); with NewEncoderIn the
-// slice grows into the arena instead. To stream through a small buffer, write e.Bytes() out and
-// call e.Clear() whenever it fills: Clear empties the buffer but keeps the nesting and comma state,
-// so the next call continues the same document. A call that fails with ErrFull can be retried
-// after draining: set e.Err = nil first.
+// The output is appended to the slice given to new_encoder. When it is full, a call sets Full
+// and writes nothing at all (each call writes all of its output or none); with new_encoder_in the
+// slice grows into the arena instead. To stream through a small buffer, write e.bytes() out and
+// call e.clear() whenever it fills: Clear empties the buffer but keeps the nesting and comma state,
+// so the next call continues the same document. A call that fails with Full can be retried
+// after draining: set e.err = nil first.
 //
-// The output is compact unless SetIndent is called first: then it is laid out as Go's
+// The output is compact unless set_indent is called first: then it is laid out as Go's
 // json.MarshalIndent lays out the same value, a member or element per line.
-type Encoder struct {
-	buf    []byte
-	a      arena                 // grows buf; nil from NewEncoder
-	top    int                   // a.Used() when buf was last grown: buf ends there while it still is
-	objs   [MaxDepth / 64]uint64 // bit i: level i is an object (else an array)
-	depth  int
-	first  bool // nothing written yet in the innermost container
-	key    bool // a Key was written: its value is next
-	done   bool // the top-level value has been started
-	indent bool // SetIndent was called: line breaks and indentation
-	prefix string
-	unit   string // the indentation for one level
-	Err    error
+pub struct Encoder {
+	buf       u8[]
+	a         arena               // grows buf; nil from new_encoder
+	top       int                 // a.Used() when buf was last grown: buf ends there while it still is
+	objs      u64[max_depth / 64] // bit i: level i is an object (else an array)
+	depth     int
+	first     bool // nothing written yet in the innermost container
+	after_key bool // a key was written: its value is next
+	done      bool // the top-level value has been started
+	indent    bool // set_indent was called: line breaks and indentation
+	prefix    str
+	unit      str // the indentation for one level
+	pub err   error
 }
 
-// NewEncoder appends to dst, up to its capacity (ErrFull beyond it).
-func NewEncoder(dst []byte) Encoder from dst {
+// new_encoder appends to dst, up to its capacity (Full beyond it).
+pub fn new_encoder(dst u8[]) -> Encoder in dst {
 	return Encoder{buf: dst}
 }
 
-// NewEncoderIn appends to dst (nil is fine) and grows it into a when it is full, doubling as
+// new_encoder_in appends to dst (nil is fine) and grows it into a when it is full, doubling as
 // append in an arena does: in place while the buffer is a's latest allocation, by copying (the old
-// buffer stays allocated until a ends) otherwise. ErrFull if a can't hold the larger buffer.
-func NewEncoderIn(dst []byte, a arena) Encoder from dst, a {
+// buffer stays allocated until a ends) otherwise. Full if a can't hold the larger buffer.
+pub fn new_encoder_in(dst u8[], a arena) -> Encoder in dst, a {
 	return Encoder{buf: dst, a: a, top: -1}
 }
 
-// Bytes returns the output written so far (since the last Clear).
-func (e *Encoder) Bytes() []byte from e { return e.buf }
+impl Encoder {
+	// bytes returns the output written so far (since the last clear).
+	pub fn bytes(&self) -> u8[] in self { return self.buf }
 
-// Clear empties the output buffer but keeps the encoder's state (the open containers, whether a
-// comma comes next, Err), so the calls after it continue the same document: write e.Bytes()
-// somewhere, then call e.Clear(), to stream a large document through a small buffer.
-func (e *Encoder) Clear() { e.buf = e.buf[:0] }
+	// clear empties the output buffer but keeps the encoder's state (the open containers, whether a
+	// comma comes next, err), so the calls after it continue the same document: write e.bytes()
+	// somewhere, then call e.clear(), to stream a large document through a small buffer.
+	pub fn clear(&self) { self.buf = self.buf[:0] }
 
-// SetIndent lays out the rest of the output as Go's json.MarshalIndent(v, prefix, indent) lays out
-// the same value: each member or element of a non-empty object or array starts a new line holding
-// prefix and then indent once per level of nesting, the closing bracket starts a line one level
-// out, a colon is followed by a space, and empty objects and arrays stay {} and []. The first line
-// has no prefix and the last no line break, as with MarshalIndent. Raw values are laid out the same
-// way (as Go lays out a json.RawMessage). Call it before the first value: afterwards it sets
-// ErrMisuse.
-func (e *Encoder) SetIndent(prefix, indent string) {
-	if e.Err != nil {
-		return
-	}
-	if e.done {
-		e.fail(ErrMisuse)
-		return
-	}
-	e.indent = true
-	e.prefix = prefix
-	e.unit = indent
-}
-
-// Finish returns Err, after setting it to ErrMisuse if the document isn't complete: nothing was
-// written, or an array or object is still open.
-func (e *Encoder) Finish() error {
-	if e.Err == nil && (e.depth > 0 || !e.done) {
-		e.Err = ErrMisuse
-	}
-	return e.Err
-}
-
-// Object starts an object: Key and a value for each member, then End.
-func (e *Encoder) Object() { e.open('{') }
-
-// Array starts an array: its elements, then End.
-func (e *Encoder) Array() { e.open('[') }
-
-// End closes the innermost open object or array.
-func (e *Encoder) End() {
-	if e.Err != nil {
-		return
-	}
-	if e.depth == 0 || e.key {
-		e.fail(ErrMisuse)
-		return
-	}
-	nl := e.indent && !e.first // a non-empty container closes on a line of its own
-	n := 1
-	if nl {
-		n += e.lineLen(e.depth - 1)
-	}
-	if !e.room(n) {
-		return
-	}
-	e.depth--
-	if nl {
-		e.newline(e.depth)
-	}
-	if e.inObject(e.depth) {
-		e.buf = append(e.buf, '}')
-	} else {
-		e.buf = append(e.buf, ']')
-	}
-	e.first = false
-}
-
-// Key writes the name of an object's next member; its value comes next.
-func (e *Encoder) Key(name string) {
-	if e.Err != nil {
-		return
-	}
-	if e.depth == 0 || !e.inObject(e.depth-1) || e.key {
-		e.fail(ErrMisuse)
-		return
-	}
-	comma := 1
-	if e.first {
-		comma = 0
-	}
-	n := comma + quotedLen(name) + 1
-	if e.indent {
-		n += e.lineLen(e.depth) + 1 // the line break before it, the space after the colon
-	}
-	if !e.room(n) {
-		return
-	}
-	if comma == 1 {
-		e.buf = append(e.buf, ',')
-	}
-	if e.indent {
-		e.newline(e.depth)
-	}
-	e.buf = AppendString(e.buf, name)
-	e.buf = append(e.buf, ':')
-	if e.indent {
-		e.buf = append(e.buf, ' ')
-	}
-	e.first = false
-	e.key = true
-}
-
-// String writes s as a JSON string, escaped exactly as AppendString does.
-func (e *Encoder) String(s string) {
-	if e.value(quotedLen(s)) {
-		e.buf = AppendString(e.buf, s)
-	}
-}
-
-// Int writes an integer.
-func (e *Encoder) Int(v int) {
-	var tmp [24]byte
-	b := strconv.AppendInt(tmp[:0], v)
-	if e.value(len(b)) {
-		e.buf = append(e.buf, b...)
-	}
-}
-
-// Float writes the shortest decimal that reads back as v (strconv.AppendFloat with prec -1:
-// exponent notation below 1e-6 and from 1e21, as JavaScript writes numbers). JSON has no NaN or
-// infinity: those set ErrFloat.
-func (e *Encoder) Float(v float64) {
-	if e.Err != nil {
-		return
-	}
-	if v-v != 0 { // NaN or ±Inf (Inf-Inf is NaN)
-		e.fail(ErrFloat)
-		return
-	}
-	var tmp [32]byte
-	b := strconv.AppendFloat(tmp[:0], v, -1)
-	if e.value(len(b)) {
-		e.buf = append(e.buf, b...)
-	}
-}
-
-// Bool writes true or false.
-func (e *Encoder) Bool(v bool) {
-	if v {
-		e.literal("true")
-	} else {
-		e.literal("false")
-	}
-}
-
-// Null writes null.
-func (e *Encoder) Null() { e.literal("null") }
-
-// Raw writes b, one complete JSON value encoded already (from another Encoder, a database, a
-// file), as the next value. It is checked as Decoder.Skip checks a value: invalid JSON sets
-// ErrSyntax and writes nothing. It is written as it is, whitespace and all (Go's Marshal compacts
-// a json.RawMessage), unless SetIndent was called: then its whitespace is replaced by the layout's.
-func (e *Encoder) Raw(b []byte) {
-	if e.Err != nil {
-		return
-	}
-	d := NewDecoder(b)
-	if !d.Skip() || !d.End() {
-		e.fail(ErrSyntax)
-		return
-	}
-	if !e.indent {
-		if e.value(len(b)) {
-			e.buf = append(e.buf, b...)
+	// set_indent lays out the rest of the output as Go's json.MarshalIndent(v, prefix, indent) lays out
+	// the same value: each member or element of a non-empty object or array starts a new line holding
+	// prefix and then indent once per level of nesting, the closing bracket starts a line one level
+	// out, a colon is followed by a space, and empty objects and arrays stay {} and []. The first line
+	// has no prefix and the last no line break, as with MarshalIndent. Raw values are laid out the same
+	// way (as Go lays out a json.RawMessage). Call it before the first value: afterwards it sets
+	// Misuse.
+	pub fn set_indent(&self, prefix, indent str) {
+		if self.err != nil {
+			return
 		}
-		return
+		if self.done {
+			self.fail(Misuse)
+			return
+		}
+		self.indent = true
+		self.prefix = prefix
+		self.unit = indent
 	}
-	if e.value(e.layout(b, false)) {
-		e.layout(b, true)
+
+	// finish returns err, after setting it to Misuse if the document isn't complete: nothing was
+	// written, or an array or object is still open.
+	pub fn finish(&self) -> ! {
+		if self.err == nil and (self.depth > 0 or not self.done) {
+			self.err = Misuse
+		}
+		return self.err
 	}
-}
 
-// RawStart is Raw for a value the caller writes itself, for one too large to go through the
-// buffer: it writes what comes before a value here (a comma, a line break and indentation, or
-// nothing) and counts the value as written. The caller then writes exactly one complete JSON value
-// straight after e.Bytes() (drain the buffer and Clear, then json.WriteString(w, s) for a long
-// string, say); it isn't checked, nor laid out by SetIndent (to lay out an object or array as Raw
-// would, write it with an Encoder whose prefix is this one's followed by its indent once per open
-// object or array). False, writing nothing, if a value can't come next (Err is set).
-func (e *Encoder) RawStart() bool { return e.value(0) }
+	// object starts an object: Key and a value for each member, then end.
+	pub fn object(&self) { self.open('{') }
 
-// lineLen is the length of a line break and the indentation of a line at nesting level.
-func (e *Encoder) lineLen(level int) int {
-	return 1 + len(e.prefix) + level*len(e.unit)
-}
+	// array starts an array: its elements, then end.
+	pub fn array(&self) { self.open('[') }
 
-// newline writes a line break and the indentation of a line at nesting level (room checked).
-func (e *Encoder) newline(level int) {
-	e.buf = append(e.buf, '\n')
-	e.buf = append(e.buf, e.prefix...)
-	for i := 0; i < level; i++ {
-		e.buf = append(e.buf, e.unit...)
+	// end closes the innermost open object or array.
+	pub fn end(&self) {
+		if self.err != nil {
+			return
+		}
+		if self.depth == 0 or self.after_key {
+			self.fail(Misuse)
+			return
+		}
+		nl := self.indent and not self.first // a non-empty container closes on a line of its own
+		n := 1
+		if nl {
+			n += self.line_len(self.depth - 1)
+		}
+		if not self.room(n) {
+			return
+		}
+		self.depth--
+		if nl {
+			self.newline(self.depth)
+		}
+		if self.in_object(self.depth) {
+			self.buf = append(self.buf, '}')
+		} else {
+			self.buf = append(self.buf, ']')
+		}
+		self.first = false
 	}
-}
 
-// layout returns the length of b, a valid JSON value, laid out for SetIndent as a value at the
-// current nesting level (its own whitespace dropped, as Go's json.Indent drops it), and writes it
-// too if write is set (room checked).
-func (e *Encoder) layout(b []byte, write bool) int {
-	n := 0
-	level := e.depth
-	i := 0
-	for i < len(b) {
-		c := b[i]
-		j := i + 1 // the end of the token at i, copied as it is unless the case continues
-		switch c {
-		case ' ', '\t', '\n', '\r':
-			i = j
-			continue
-		case '"':
-			for b[j] != '"' {
-				if b[j] == '\\' {
+	// key writes the name of an object's next member; its value comes next.
+	pub fn key(&self, name str) {
+		if self.err != nil {
+			return
+		}
+		if self.depth == 0 or not self.in_object(self.depth-1) or self.after_key {
+			self.fail(Misuse)
+			return
+		}
+		comma := 1
+		if self.first {
+			comma = 0
+		}
+		n := comma + quoted_len(name) + 1
+		if self.indent {
+			n += self.line_len(self.depth) + 1 // the line break before it, the space after the colon
+		}
+		if not self.room(n) {
+			return
+		}
+		if comma == 1 {
+			self.buf = append(self.buf, ',')
+		}
+		if self.indent {
+			self.newline(self.depth)
+		}
+		self.buf = append_string(self.buf, name)
+		self.buf = append(self.buf, ':')
+		if self.indent {
+			self.buf = append(self.buf, ' ')
+		}
+		self.first = false
+		self.after_key = true
+	}
+
+	// string writes s as a JSON string, escaped exactly as append_string does.
+	pub fn string(&self, s str) {
+		if self.value(quoted_len(s)) {
+			self.buf = append_string(self.buf, s)
+		}
+	}
+
+	// int writes an integer.
+	pub fn int(&self, v int) {
+		var tmp u8[24]
+		b := strconv.append_int(tmp[:0], v)
+		if self.value(len(b)) {
+			self.buf = append(self.buf, b...)
+		}
+	}
+
+	// float writes the shortest decimal that reads back as v (strconv.append_float with prec -1:
+	// exponent notation below 1e-6 and from 1e21, as JavaScript writes numbers). JSON has no NaN or
+	// infinity: those set Float.
+	pub fn float(&self, v f64) {
+		if self.err != nil {
+			return
+		}
+		if v-v != 0 { // NaN or ±Inf (Inf-Inf is NaN)
+			self.fail(Float)
+			return
+		}
+		var tmp u8[32]
+		b := strconv.append_float(tmp[:0], v, -1)
+		if self.value(len(b)) {
+			self.buf = append(self.buf, b...)
+		}
+	}
+
+	// bool writes true or false.
+	pub fn bool(&self, v bool) {
+		if v {
+			self.literal("true")
+		} else {
+			self.literal("false")
+		}
+	}
+
+	// null writes null.
+	pub fn null(&self) { self.literal("null") }
+
+	// raw writes b, one complete JSON value encoded already (from another Encoder, a database, a
+	// file), as the next value. It is checked as Decoder.skip checks a value: invalid JSON sets
+	// Syntax and writes nothing. It is written as it is, whitespace and all (Go's Marshal compacts
+	// a json.RawMessage), unless set_indent was called: then its whitespace is replaced by the layout's.
+	pub fn raw(&self, b u8[]) {
+		if self.err != nil {
+			return
+		}
+		d := new_decoder(b)
+		if not d.skip() or not d.end() {
+			self.fail(Syntax)
+			return
+		}
+		if not self.indent {
+			if self.value(len(b)) {
+				self.buf = append(self.buf, b...)
+			}
+			return
+		}
+		if self.value(self.layout(b, false)) {
+			self.layout(b, true)
+		}
+	}
+
+	// raw_start is raw for a value the caller writes itself, for one too large to go through the
+	// buffer: it writes what comes before a value here (a comma, a line break and indentation, or
+	// nothing) and counts the value as written. The caller then writes exactly one complete JSON value
+	// straight after e.bytes() (drain the buffer and clear, then json.write_string(w, s) for a long
+	// string, say); it isn't checked, nor laid out by set_indent (to lay out an object or array as raw
+	// would, write it with an Encoder whose prefix is this one's followed by its indent once per open
+	// object or array). False, writing nothing, if a value can't come next (Err is set).
+	pub fn raw_start(&self) -> bool { return self.value(0) }
+
+	// line_len is the length of a line break and the indentation of a line at nesting level.
+	fn line_len(&self, level int) -> int {
+		return 1 + len(self.prefix) + level*len(self.unit)
+	}
+
+	// newline writes a line break and the indentation of a line at nesting level (room checked).
+	fn newline(&self, level int) {
+		self.buf = append(self.buf, '\n')
+		self.buf = append(self.buf, self.prefix...)
+		for i := 0; i < level; i++ {
+			self.buf = append(self.buf, self.unit...)
+		}
+	}
+
+	// layout returns the length of b, a valid JSON value, laid out for set_indent as a value at the
+	// current nesting level (its own whitespace dropped, as Go's json.Indent drops it), and writes it
+	// too if write is set (room checked).
+	fn layout(&self, b u8[], write bool) -> int {
+		n := 0
+		level := self.depth
+		i := 0
+		while i < len(b) {
+			c := b[i]
+			j := i + 1 // the end of the token at i, copied as it is unless the case continues
+			switch c {
+			case ' ', '\t', '\n', '\r':
+				i = j
+				continue
+			case '"':
+				while b[j] != '"' {
+					if b[j] == '\\' {
+						j++
+					}
 					j++
 				}
 				j++
-			}
-			j++
-		case '{', '[':
-			k := j
-			for b[k] == ' ' || b[k] == '\t' || b[k] == '\n' || b[k] == '\r' {
-				k++
-			}
-			if b[k] == '}' || b[k] == ']' { // empty: {} or [] as it is
-				j = k + 1
-				n += 2
+			case '{', '[':
+				k := j
+				while b[k] == ' ' or b[k] == '\t' or b[k] == '\n' or b[k] == '\r' {
+					k++
+				}
+				if b[k] == '}' or b[k] == ']' { // empty: {} or [] as it is
+					j = k + 1
+					n += 2
+					if write {
+						self.buf = append(self.buf, c, b[k])
+					}
+					i = j
+					continue
+				}
+				level++
+				n += 1 + self.line_len(level)
 				if write {
-					e.buf = append(e.buf, c, b[k])
+					self.buf = append(self.buf, c)
+					self.newline(level)
 				}
 				i = j
 				continue
+			case '}', ']':
+				level--
+				n += self.line_len(level) + 1
+				if write {
+					self.newline(level)
+					self.buf = append(self.buf, c)
+				}
+				i = j
+				continue
+			case ',':
+				n += 1 + self.line_len(level)
+				if write {
+					self.buf = append(self.buf, ',')
+					self.newline(level)
+				}
+				i = j
+				continue
+			case ':':
+				n += 2
+				if write {
+					self.buf = append(self.buf, ':', ' ')
+				}
+				i = j
+				continue
+			default: // a number or literal: up to the next delimiter
+				while j < len(b) and b[j] != ' ' and b[j] != '\t' and b[j] != '\n' and b[j] != '\r' and b[j] != ',' and b[j] != ']' and b[j] != '}' {
+					j++
+				}
 			}
-			level++
-			n += 1 + e.lineLen(level)
+			n += j - i
 			if write {
-				e.buf = append(e.buf, c)
-				e.newline(level)
+				self.buf = append(self.buf, b[i:j]...)
 			}
 			i = j
-			continue
-		case '}', ']':
-			level--
-			n += e.lineLen(level) + 1
-			if write {
-				e.newline(level)
-				e.buf = append(e.buf, c)
-			}
-			i = j
-			continue
-		case ',':
-			n += 1 + e.lineLen(level)
-			if write {
-				e.buf = append(e.buf, ',')
-				e.newline(level)
-			}
-			i = j
-			continue
-		case ':':
-			n += 2
-			if write {
-				e.buf = append(e.buf, ':', ' ')
-			}
-			i = j
-			continue
-		default: // a number or literal: up to the next delimiter
-			for j < len(b) && b[j] != ' ' && b[j] != '\t' && b[j] != '\n' && b[j] != '\r' && b[j] != ',' && b[j] != ']' && b[j] != '}' {
-				j++
-			}
 		}
-		n += j - i
-		if write {
-			e.buf = append(e.buf, b[i:j]...)
+		return n
+	}
+
+	fn fail(&self, err error) {
+		if self.err == nil {
+			self.err = err
 		}
-		i = j
 	}
-	return n
-}
 
-func (e *Encoder) fail(err error) {
-	if e.Err == nil {
-		e.Err = err
+	fn in_object(&self, level int) -> bool {
+		return self.objs[level/64]&(1<<uint(level%64)) != 0
 	}
-}
 
-func (e *Encoder) inObject(level int) bool {
-	return e.objs[level/64]&(1<<uint(level%64)) != 0
-}
+	fn literal(&self, s str) {
+		if self.value(len(s)) {
+			self.buf = append(self.buf, s...)
+		}
+	}
 
-func (e *Encoder) literal(s string) {
-	if e.value(len(s)) {
-		e.buf = append(e.buf, s...)
+	fn open(&self, c u8) {
+		if self.err != nil {
+			return
+		}
+		if self.depth == max_depth {
+			self.fail(Depth)
+			return
+		}
+		if not self.value(1) {
+			return
+		}
+		if c == '{' {
+			self.objs[self.depth/64] |= 1 << uint(self.depth%64)
+		} else {
+			self.objs[self.depth/64] &^= 1 << uint(self.depth%64)
+		}
+		self.depth++
+		self.first = true
+		self.buf = append(self.buf, c)
 	}
-}
 
-func (e *Encoder) open(c byte) {
-	if e.Err != nil {
-		return
-	}
-	if e.depth == MaxDepth {
-		e.fail(ErrDepth)
-		return
-	}
-	if !e.value(1) {
-		return
-	}
-	if c == '{' {
-		e.objs[e.depth/64] |= 1 << uint(e.depth%64)
-	} else {
-		e.objs[e.depth/64] &^= 1 << uint(e.depth%64)
-	}
-	e.depth++
-	e.first = true
-	e.buf = append(e.buf, c)
-}
-
-// value starts a value of n bytes: it checks that a value may come next and that it fits, and
-// writes the comma before it if one is needed. False (Err set, nothing written) if not.
-func (e *Encoder) value(n int) bool {
-	if e.Err != nil {
-		return false
-	}
-	comma := 0
-	nl := false // an array element starts a line with SetIndent
-	if e.depth == 0 {
-		if e.done {
-			e.fail(ErrMisuse)
+	// value starts a value of n bytes: it checks that a value may come next and that it fits, and
+	// writes the comma before it if one is needed. False (Err set, nothing written) if not.
+	fn value(&self, n int) -> bool {
+		if self.err != nil {
 			return false
 		}
-	} else if e.inObject(e.depth - 1) {
-		if !e.key {
-			e.fail(ErrMisuse)
+		comma := 0
+		nl := false // an array element starts a line with set_indent
+		if self.depth == 0 {
+			if self.done {
+				self.fail(Misuse)
+				return false
+			}
+		} else if self.in_object(self.depth - 1) {
+			if not self.after_key {
+				self.fail(Misuse)
+				return false
+			}
+		} else {
+			if not self.first {
+				comma = 1
+			}
+			nl = self.indent
+		}
+		sep := comma
+		if nl {
+			sep += self.line_len(self.depth)
+		}
+		if not self.room(sep + n) {
 			return false
 		}
-	} else {
-		if !e.first {
-			comma = 1
+		if comma == 1 {
+			self.buf = append(self.buf, ',')
 		}
-		nl = e.indent
-	}
-	sep := comma
-	if nl {
-		sep += e.lineLen(e.depth)
-	}
-	if !e.room(sep + n) {
-		return false
-	}
-	if comma == 1 {
-		e.buf = append(e.buf, ',')
-	}
-	if nl {
-		e.newline(e.depth)
-	}
-	e.first = false
-	e.key = false
-	e.done = true
-	return true
-}
-
-// room makes sure n more bytes fit in buf, growing it into the arena if there is one. False
-// (ErrFull) if they don't.
-func (e *Encoder) room(n int) bool {
-	l := len(e.buf)
-	if cap(e.buf)-l >= n {
+		if nl {
+			self.newline(self.depth)
+		}
+		self.first = false
+		self.after_key = false
+		self.done = true
 		return true
 	}
-	if e.a == nil {
-		e.fail(ErrFull)
-		return false
-	}
-	if e.a.Used() != e.top { // buf isn't the arena's latest allocation: copy it to a new block
-		c := max(2*cap(e.buf), l+n, 64)
-		if e.a.Left() < c {
-			e.fail(ErrFull)
+
+	// room makes sure n more bytes fit in buf, growing it into the arena if there is one. False
+	// (Full) if they don't.
+	fn room(&self, n int) -> bool {
+		l := len(self.buf)
+		if cap(self.buf)-l >= n {
+			return true
+		}
+		if self.a == nil {
+			self.fail(Full)
 			return false
 		}
-		nb := make([]byte, l, c) in e.a
-		copy(nb, e.buf)
-		e.buf = nb
-		e.top = e.a.Used()
+		if self.a.used() != self.top { // buf isn't the arena's latest allocation: copy it to a new block
+			c := max(2*cap(self.buf), l+n, 64)
+			if self.a.left() < c {
+				self.fail(Full)
+				return false
+			}
+			nb := make(u8[], l, c) in self.a
+			copy(nb, self.buf)
+			self.buf = nb
+			self.top = self.a.used()
+			return true
+		}
+		while cap(self.buf)-l < n { // buf ends at the arena's top: append doubles it in place
+			c := cap(self.buf)
+			if self.a.left() < c {
+				self.buf = self.buf[:l]
+				self.fail(Full)
+				return false
+			}
+			self.buf = append(self.buf[:c], 0) in self.a
+			self.top = self.a.used()
+		}
+		self.buf = self.buf[:l]
 		return true
 	}
-	for cap(e.buf)-l < n { // buf ends at the arena's top: append doubles it in place
-		c := cap(e.buf)
-		if e.a.Left() < c {
-			e.buf = e.buf[:l]
-			e.fail(ErrFull)
-			return false
-		}
-		e.buf = append(e.buf[:c], 0) in e.a
-		e.top = e.a.Used()
-	}
-	e.buf = e.buf[:l]
-	return true
 }
 
-// quotedLen is len(AppendString(nil, s)), so the Encoder knows a string fits before writing it.
-// Keep it in step with AppendString (TestJSONEncoderRandom would panic on a mismatch).
-func quotedLen(s string) int {
+// quoted_len is len(append_string(nil, s)), so the Encoder knows a string fits before writing it.
+// Keep it in step with append_string (TestJSONEncoderRandom would panic on a mismatch).
+fn quoted_len(s str) -> int {
 	i := special(s, 0)
 	n := 2 + i // the quotes and the bytes copied as they are
-	for i < len(s) {
+	while i < len(s) {
 		c := s[i]
 		next := i + 1
 		if c >= 0x80 {
-			r, size := utf8.DecodeRuneInString(s[i:])
-			if r == utf8.RuneError && size == 1 {
+			r, size := utf8.decode_rune_in_string(s[i:])
+			if r == utf8.rune_error and size == 1 {
 				n += 3 // U+FFFD
-			} else if r == 0x2028 || r == 0x2029 {
+			} else if r == 0x2028 or r == 0x2029 {
 				n += 6
 			} else {
 				n += size
 			}
 			next = i + size
-		} else if c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t' {
+		} else if c == '"' or c == '\\' or c == '\n' or c == '\r' or c == '\t' {
 			n += 2
 		} else {
 			n += 6

@@ -1,19 +1,19 @@
-package main
+program
 
-var global map[string]int cap 8
+thread global int[str; 8]
 
-func get() [..4]int {
-	var v [..4]int
+fn get() -> int[..4] {
+	var v int[..4]
 	return v
 }
 
-func main() {
-	var m map[string]int cap 8
-	m2 := m // ERROR "cannot copy map[string]int cap 8 storage into m2"
-	var view map[string]int = m
+fn main() {
+	var m int[str; 8]
+	m2 := m // ERROR "cannot copy int[str; 8] storage into m2"
+	var view int[str] = m
 	_ = view
-	s := make([]byte, 16) // ERROR "make needs an arena"
-	ch := make(chan int, 4) // ERROR "declare storage at package level: var ch chan int cap N"
-	get().Push(1) // ERROR "cannot call Push on get() (not addressable)"
+	s := make(u8[], 16) // ERROR "make needs an arena"
+	ch := make(int chan, 4) // ERROR "make needs an arena (make(...) in a); otherwise declare storage at package level: thread ch int chan[N]"
+	get().push(1) // ERROR "cannot call push on get() (not addressable)"
 	_, _, _ = m2, s, ch
 }

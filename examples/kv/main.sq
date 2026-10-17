@@ -16,150 +16,140 @@
 //   - a store without a heap: fixed slots, a free list and a map whose keys view the slots
 //   - a line protocol read with bufio.Reader, with an idle timeout
 //   - replies built in a stack buffer, counted in the task's proven stack size
-//   - try, sort.Strings, and threads auto with per-thread state
-package main
+//   - !, sort.strings, and threads auto with per-thread state
+program {
+	threads auto
+}
 
-import (
-	"bufio"
-	"flag"
-	"net"
-	"os"
-	"runtime"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
-)
-
-threads auto
+use bufio, flag, net, os, runtime, sort, strconv, strings, time
 
 const (
-	maxKeys  = 1024
-	maxKey   = 64
-	maxValue = 256
-	maxLine  = 512 // longest command line, with its newline
+	max_keys  = 1024
+	max_key   = 64
+	max_value = 256
+	max_line  = 512 // longest command line, with its newline
 )
 
-const (
-	ErrLineTooLong = error(1, "line too long")
-	ErrIdle        = error(2, "idle timeout")
-	ErrStoreFull   = error(3, "store full")
-	ErrUnknown     = error(4, "unknown command")
-	ErrArgs        = error(5, "wrong number of arguments")
-	ErrNotInteger  = error(6, "value is not an integer")
-	ErrTooLong     = error(7, "key or value too long")
+fault (
+	LineTooLong 1 "line too long"
+	Idle 2 "idle timeout"
+	StoreFull 3 "store full"
+	Unknown 4 "unknown command"
+	Args 5 "wrong number of arguments"
+	NotInteger 6 "value is not an integer"
+	TooLong 7 "key or value too long"
 )
 
-type entry struct {
-	key  [maxKey]byte
+struct Entry {
+	key  u8[max_key]
 	klen int
-	val  [maxValue]byte
+	val  u8[max_value]
 	vlen int
 }
 
-type connStats struct {
+struct ConnStats {
 	commands int
 	reason   error // why the connection ended: nil after QUIT
 }
 
-// The store. Every scheduler thread runs main, so each has its own (thread var): under threads
+// The store. Every scheduler thread runs main, so each has its own (thread): under threads
 // auto a key is seen only by connections on the thread that set it. Run with SQUARK_THREADS=1 for
 // one store shared by every connection.
-thread var slots [maxKeys]entry
-thread var index map[string]int cap maxKeys // key -> slot; a key views its slot's bytes
-thread var free [..maxKeys]int
-thread var used int // slots handed out so far; free holds the ones given back
+thread slots Entry[max_keys]
+thread index int[str; max_keys] // key -> slot; a key views its slot's bytes
+thread free int[..max_keys]
+thread used int // slots handed out so far; free holds the ones given back
 
-// onClose is told how each connection ended (the self-test swaps in its own).
-thread var onClose = logClose
+// on_close is told how each connection ended (the self-test swaps in its own).
+thread on_close = log_close
 
 // ---- the store ----
 
-func get(key string) (string, bool) {
+fn get(key str) -> (str, bool) {
 	i, ok := index[key]
-	if !ok {
+	if not ok {
 		return "", false
 	}
-	return string(slots[i].val[:slots[i].vlen]), true
+	return str(slots[i].val[:slots[i].vlen]), true
 }
 
-func set(key string, val string) error {
+fn set(key str, val str) -> ! {
 	i, ok := index[key]
-	if !ok {
+	if not ok {
 		switch {
 		case len(free) > 0:
-			i = free.Pop()
-		case used < maxKeys:
+			i = free.pop()
+		case used < max_keys:
 			i = used
 			used++
 		default:
-			return ErrStoreFull
+			return StoreFull
 		}
 		e := &slots[i]
 		e.klen = copy(e.key[:], key)
-		index[string(e.key[:e.klen])] = i
+		index[str(e.key[:e.klen])] = i
 	}
 	slots[i].vlen = copy(slots[i].val[:], val)
 	return nil
 }
 
-func del(key string) bool {
+fn del(key str) -> bool {
 	i, ok := index[key]
 	if ok {
 		delete(index, key)
-		free.Push(i)
+		free.push(i)
 	}
 	return ok
 }
 
 // ---- commands ----
 
-// errLine appends err as a -ERR reply line.
-func errLine(out []byte, err error) []byte {
-	return append(append(append(out, "-ERR "...), err.Error()...), '\n')
+// err_line appends err as a -ERR reply line.
+fn err_line(out u8[], err error) -> u8[] {
+	return append(append(append(out, "-ERR "...), err.message()...), '\n')
 }
 
 // execute runs one command line and appends its reply to out. A failure is an error constant,
 // which the caller sends as a -ERR line; quit reports QUIT.
-func execute(line string, out []byte) (reply []byte, quit bool, err error) {
-	name, rest, _ := strings.Cut(strings.TrimSpace(line), " ")
-	var fields [2]string // one more than any command takes, to notice extra arguments
-	args := strings.Fields(rest, fields[:])
-	var lower [8]byte
+fn execute(line str, out u8[]) -> (reply u8[], quit bool, err error) {
+	name, rest, _ := strings.cut(strings.trim_space(line), " ")
+	var fields str[2] // one more than any command takes, to notice extra arguments
+	args := strings.fields(rest, fields[:])
+	var lower u8[8]
 	cmd := name
 	if len(name) <= len(lower) {
-		cmd = string(strings.AppendLower(lower[:0], name))
+		cmd = str(strings.append_lower(lower[:0], name))
 	}
 	switch cmd {
 	case "set":
-		key, val, ok := strings.Cut(strings.TrimSpace(rest), " ")
-		if !ok {
-			return out, false, ErrArgs
+		key, val, ok := strings.cut(strings.trim_space(rest), " ")
+		if not ok {
+			return out, false, Args
 		}
-		if len(key) > maxKey || len(val) > maxValue {
-			return out, false, ErrTooLong
+		if len(key) > max_key or len(val) > max_value {
+			return out, false, TooLong
 		}
-		try set(key, val)
+		set(key, val)!
 		return append(out, "+OK\n"...), false, nil
 	case "get", "del", "incr":
 		if len(args) != 1 {
-			return out, false, ErrArgs
+			return out, false, Args
 		}
 	case "keys":
-		var keys [..maxKeys]string
-		for k := range index {
-			keys.Push(k)
+		var keys str[..max_keys]
+		for k, _ in index {
+			keys.push(k)
 		}
-		sort.Strings(keys[:])
-		out = append(strconv.AppendInt(append(out, '*'), len(keys)), '\n')
-		for _, k := range keys {
+		sort.strings(keys[:])
+		out = append(strconv.append_int(append(out, '*'), len(keys)), '\n')
+		for k in keys {
 			out = append(append(append(out, '$'), k...), '\n')
 		}
 		return out, false, nil
 	case "quit":
 		return append(out, "+BYE\n"...), true, nil
 	default:
-		return out, false, ErrUnknown
+		return out, false, Unknown
 	}
 
 	key := args[0]
@@ -167,7 +157,7 @@ func execute(line string, out []byte) (reply []byte, quit bool, err error) {
 	n := 0
 	switch cmd {
 	case "get":
-		if !ok {
+		if not ok {
 			return append(out, "_\n"...), false, nil
 		}
 		return append(append(append(out, '$'), v...), '\n'), false, nil
@@ -178,39 +168,39 @@ func execute(line string, out []byte) (reply []byte, quit bool, err error) {
 		}
 	case "incr":
 		if ok {
-			if n, err = strconv.Atoi(v); err != nil {
-				return out, false, ErrNotInteger
+			if n, err = strconv.atoi(v); err != nil {
+				return out, false, NotInteger
 			}
 		}
 		n++
-		var num [24]byte
-		try set(key, string(strconv.AppendInt(num[:0], n)))
+		var num u8[24]
+		set(key, str(strconv.append_int(num[:0], n)))!
 	}
-	return append(strconv.AppendInt(append(out, ':'), n), '\n'), false, nil
+	return append(strconv.append_int(append(out, ':'), n), '\n'), false, nil
 }
 
 // ---- connections ----
 
-task serveConn(c net.Conn, idle time.Duration) pool 64 {
-	defer c.Close()
-	var lines [maxLine - 1]byte // room for the longest line (bufio needn't store its newline)
-	r := bufio.NewReader(lines[:])
+task serve_conn(c net.Conn, idle time.Duration) pool 64 {
+	defer c.close()
+	var lines u8[max_line - 1] // room for the longest line (bufio needn't store its newline)
+	r := bufio.new_reader(lines[:])
 	// room for the largest reply, KEYS with a full store: the compiler counts it in the stack size
 	// it proves for this task (squark build -v shows 64 x 96 KiB)
-	var out [maxKeys*(maxKey+2) + 32]byte
-	stats := connStats{}
-	for {
-		// each read gives up with net.ErrTimeout after idle without input (never, if idle <= 0)
-		line, err := r.ReadLine(c.WithTimeout(idle))
+	var out u8[max_keys*(max_key+2) + 32]
+	stats := ConnStats{}
+	loop {
+		// each read gives up with net.Timeout after idle without input (never, if idle <= 0)
+		line, err := r.read_line(c.with_timeout(idle))
 		switch err {
-		case net.ErrTimeout:
-			err = ErrIdle
-		case bufio.ErrTooLong:
-			err = ErrLineTooLong
+		case net.Timeout:
+			err = Idle
+		case bufio.TooLong:
+			err = LineTooLong
 		}
 		if err != nil {
-			if err == ErrIdle || err == ErrLineTooLong {
-				c.Write(errLine(out[:0], err)) // say why before hanging up
+			if err == Idle or err == LineTooLong {
+				c.write(err_line(out[:0], err)) // say why before hanging up
 			}
 			stats.reason = err
 			break
@@ -218,9 +208,9 @@ task serveConn(c net.Conn, idle time.Duration) pool 64 {
 		stats.commands++
 		reply, quit, err := execute(line, out[:0])
 		if err != nil {
-			reply = errLine(out[:0], err)
+			reply = err_line(out[:0], err)
 		}
-		if _, err := c.Write(reply); err != nil {
+		if _, err := c.write(reply); err != nil {
 			stats.reason = err
 			break
 		}
@@ -228,52 +218,52 @@ task serveConn(c net.Conn, idle time.Duration) pool 64 {
 			break
 		}
 	}
-	onClose(stats)
+	on_close(stats)
 }
 
-func logClose(s connStats) {
-	println("connection closed after", s.commands, "commands:", errText(s.reason))
+fn log_close(s ConnStats) {
+	println("connection closed after", s.commands, "commands:", err_text(s.reason))
 }
 
-func errText(err error) string {
+fn err_text(err error) -> str {
 	if err == nil {
 		return "quit"
 	}
-	return err.Error()
+	return err.message()
 }
 
-task acceptLoop(l net.Listener, idle time.Duration) pool 1 {
-	for {
-		c, err := l.Accept()
+task accept_loop(l net.Listener, idle time.Duration) pool 1 {
+	loop {
+		c, err := l.accept()
 		if err != nil {
-			println("accept:", err.Error())
+			println("accept:", err.message())
 			return
 		}
-		go serveConn(c, idle)
+		start serve_conn(c, idle)
 	}
 }
 
 // ---- main ----
 
-func main() {
-	port := flag.Int("port", -1, "port to listen on (without it, kv tests itself)")
-	idle := flag.Duration("idle", 30*time.Second, "close a connection idle for this long")
-	flag.Parse()
+fn main() {
+	port := flag.int_flag("port", -1, "port to listen on (without it, kv tests itself)")
+	idle := flag.duration_flag("idle", 30*time.second, "close a connection idle for this long")
+	flag.parse()
 	if *port < 0 {
-		selfTest()
+		self_test()
 		return
 	}
 
-	var buf [32]byte
-	addr := string(net.AppendHostPort(buf[:0], "", *port))
-	l, err := net.Listen(addr) // every thread listens: the kernel spreads connections over them
+	var buf u8[32]
+	addr := str(net.append_host_port(buf[:0], "", *port))
+	l, err := net.listen(addr) // every thread listens: the kernel spreads connections over them
 	if err != nil {
-		println("listen:", err.Error())
-		os.Exit(1)
+		println("listen:", err.message())
+		os.exit(1)
 	}
-	if runtime.Shard() == 0 {
-		println("kv listening on", addr, "with", runtime.Shards(), "threads")
+	if runtime.shard() == 0 {
+		println("kv listening on", addr, "with", runtime.shards(), "threads")
 	}
-	go acceptLoop(l, *idle)
+	start accept_loop(l, *idle)
 	select {} // serve until killed
 }

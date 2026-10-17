@@ -3,12 +3,11 @@
   "name": "squark",
   "scopeName": "source.squark",
   "fileTypes": ["sq"],
-  "patterns": [{ "include": "#statements" }],
+  "patterns": [{ "include": "#header" }, { "include": "#uses" }, { "include": "#statements" }],
   "repository": {
     "statements": {
       "patterns": [
         { "include": "#comments" },
-        { "include": "#directives" },
         { "include": "#strings" },
         { "include": "#runes" },
         { "include": "#numbers" },
@@ -16,11 +15,89 @@
         { "include": "#contextual" },
         { "include": "#keywords" },
         { "include": "#types" },
+        { "include": "#self" },
+        { "include": "#implicitMember" },
         { "include": "#constants" },
         { "include": "#builtins" },
         { "include": "#calls" },
         { "include": "#operators" },
         { "include": "#punctuation" }
+      ]
+    },
+
+    "header": {
+      "comment": "The file header: program, or module NAME, optionally with a block of directives.",
+      "patterns": [
+        {
+          "begin": "^(program)\\b|^(module)\\s+([A-Za-z_]\\w*)",
+          "end": "(?<=\\})|$",
+          "beginCaptures": {
+            "1": { "name": "keyword.other.package.squark" },
+            "2": { "name": "keyword.other.package.squark" },
+            "3": { "name": "entity.name.namespace.squark" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            {
+              "begin": "\\{",
+              "end": "\\}",
+              "beginCaptures": { "0": { "name": "punctuation.bracket.squark" } },
+              "endCaptures": { "0": { "name": "punctuation.bracket.squark" } },
+              "name": "meta.header.directives.squark",
+              "patterns": [
+                { "include": "#comments" },
+                { "include": "#directives" },
+                { "include": "#statements" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+
+    "directives": {
+      "comment": "Directives in the header block: budget 64M, pool http.serve_conn 256, threads auto, workers 4, link \"sqlite3\", cflags/ldflags.",
+      "match": "^\\s*(budget|pool|workers|threads|link|cflags|ldflags)\\b(?=[ \\t]+[^\\s:=,)])",
+      "captures": { "1": { "name": "keyword.other.directive.squark" } }
+    },
+
+    "uses": {
+      "comment": "Imports: use http, sqlite; use math/rand as r; use ./lib; use ( ... ). Paths are plain or quoted.",
+      "patterns": [
+        {
+          "begin": "^(use)\\s*(\\()",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": { "name": "keyword.other.import.squark" },
+            "2": { "name": "punctuation.bracket.squark" }
+          },
+          "endCaptures": { "0": { "name": "punctuation.bracket.squark" } },
+          "name": "meta.import.squark",
+          "patterns": [{ "include": "#use-specs" }]
+        },
+        {
+          "begin": "^(use)\\b(?=[ \\t]+[^\\s:=,(])",
+          "end": "$",
+          "beginCaptures": { "1": { "name": "keyword.other.import.squark" } },
+          "name": "meta.import.squark",
+          "patterns": [{ "include": "#use-specs" }]
+        }
+      ]
+    },
+
+    "use-specs": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        {
+          "match": "\\b(as)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": { "name": "keyword.other.as.squark" },
+            "2": { "name": "entity.name.namespace.alias.squark" }
+          }
+        },
+        { "match": "[\\w.]+(?:/[\\w.]+)*", "name": "entity.name.namespace.squark" },
+        { "match": ",", "name": "punctuation.separator.comma.squark" }
       ]
     },
 
@@ -52,14 +129,20 @@
       ]
     },
 
-    "directives": {
-      "comment": "Top-level directives: budget 64M, pool http.serveConn 256, threads auto, workers 4, link \"sqlite3\", cflags/ldflags. They start in column 0.",
-      "match": "^(budget|pool|workers|threads|link|cflags|ldflags)\\b(?=[ \\t]+[^\\s:=,)])",
-      "captures": { "1": { "name": "keyword.other.directive.squark" } }
-    },
-
     "strings": {
       "patterns": [
+        {
+          "comment": "an extern's C symbol: c\"sq_read\"",
+          "begin": "(?<![\\w.])(c)(\")",
+          "end": "\"|$",
+          "beginCaptures": {
+            "1": { "name": "storage.type.string.c-symbol.squark" },
+            "2": { "name": "punctuation.definition.string.begin.squark" }
+          },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.squark" } },
+          "name": "string.quoted.double.c-symbol.squark",
+          "patterns": [{ "include": "#escapes" }]
+        },
         {
           "begin": "\"",
           "end": "\"|$",
@@ -95,6 +178,7 @@
     },
 
     "numbers": {
+      "comment": "A '.' followed by another '.' is the range operator (0..n), not a decimal point.",
       "patterns": [
         {
           "comment": "size literals: a decimal integer times 2^10, 2^20 or 2^30 (64K, 8M, 1G)",
@@ -105,55 +189,28 @@
           }
         },
         {
-          "match": "\\b0[xX](?:_?\\h)*(?:\\.(?:\\h(?:_?\\h)*)?)?[pP][+-]?[0-9](?:_?[0-9])*\\b|\\b0[xX]_?\\.\\h(?:_?\\h)*[pP][+-]?[0-9](?:_?[0-9])*\\b",
+          "match": "\\b0[xX](?:_?\\h)*(?:\\.(?!\\.)(?:\\h(?:_?\\h)*)?)?[pP][+-]?[0-9](?:_?[0-9])*\\b|\\b0[xX]_?\\.\\h(?:_?\\h)*[pP][+-]?[0-9](?:_?[0-9])*\\b",
           "name": "constant.numeric.float.hexadecimal.squark"
         },
+        { "match": "\\b0[xX](?:_?\\h)+\\b", "name": "constant.numeric.integer.hexadecimal.squark" },
+        { "match": "\\b0[bB](?:_?[01])+\\b", "name": "constant.numeric.integer.binary.squark" },
         {
-          "match": "\\b0[xX](?:_?\\h)+\\b",
-          "name": "constant.numeric.integer.hexadecimal.squark"
-        },
-        {
-          "match": "\\b0[bB](?:_?[01])+\\b",
-          "name": "constant.numeric.integer.binary.squark"
-        },
-        {
-          "match": "\\b0[oO]?(?:_?[0-7])+\\b",
+          "match": "\\b0[oO]?(?:_?[0-7])+\\b(?!\\.(?!\\.))",
           "name": "constant.numeric.integer.octal.squark"
         },
         {
-          "match": "(?:\\b[0-9](?:_?[0-9])*\\.(?:[0-9](?:_?[0-9])*)?|\\B\\.[0-9](?:_?[0-9])*)(?:[eE][+-]?[0-9](?:_?[0-9])*)?|\\b[0-9](?:_?[0-9])*[eE][+-]?[0-9](?:_?[0-9])*\\b",
+          "match": "(?:\\b[0-9](?:_?[0-9])*\\.(?!\\.)(?:[0-9](?:_?[0-9])*)?|(?<![\\w.])\\.[0-9](?:_?[0-9])*)(?:[eE][+-]?[0-9](?:_?[0-9])*)?|\\b[0-9](?:_?[0-9])*[eE][+-]?[0-9](?:_?[0-9])*\\b",
           "name": "constant.numeric.float.decimal.squark"
         },
-        {
-          "match": "\\b[0-9](?:_?[0-9])*\\b",
-          "name": "constant.numeric.integer.decimal.squark"
-        }
+        { "match": "\\b[0-9](?:_?[0-9])*\\b", "name": "constant.numeric.integer.decimal.squark" }
       ]
     },
 
     "declarations": {
       "patterns": [
         {
-          "comment": "extern \"c_name\" func name(...)",
-          "match": "\\b(extern)\\s+(\"[^\"]*\")\\s+(func)\\s+([A-Za-z_]\\w*)",
-          "captures": {
-            "1": { "name": "storage.modifier.extern.squark" },
-            "2": { "name": "string.quoted.double.squark" },
-            "3": { "name": "keyword.function.squark" },
-            "4": { "name": "entity.name.function.squark" }
-          }
-        },
-        {
-          "comment": "method: func (r *T) Name(",
-          "match": "\\b(func)\\s*(\\([^)]*\\))\\s*([A-Za-z_]\\w*)(?=\\s*\\()",
-          "captures": {
-            "1": { "name": "keyword.function.squark" },
-            "2": { "patterns": [{ "include": "#statements" }] },
-            "3": { "name": "entity.name.function.squark" }
-          }
-        },
-        {
-          "match": "\\b(func)\\s+([A-Za-z_]\\w*)(?=\\s*\\()",
+          "comment": "fn name( and extern fn name(",
+          "match": "\\b(fn)\\s+([A-Za-z_]\\w*)(?=\\s*\\()",
           "captures": {
             "1": { "name": "keyword.function.squark" },
             "2": { "name": "entity.name.function.squark" }
@@ -168,71 +225,128 @@
           }
         },
         {
-          "match": "\\b(type)\\s+([A-Za-z_]\\w*)",
+          "comment": "impl Name { methods }",
+          "match": "\\b(impl)\\s+([A-Za-z_]\\w*)",
+          "captures": { "1": { "name": "keyword.other.impl.squark" }, "2": { "name": "entity.name.type.squark" } }
+        },
+        {
+          "comment": "struct Name { fields }",
+          "match": "\\b(struct)\\s+([A-Za-z_]\\w*)(?=\\s*\\{)",
+          "captures": { "1": { "name": "keyword.type.squark" }, "2": { "name": "entity.name.type.squark" } }
+        },
+        {
+          "comment": "enum Name [T] { members }",
+          "match": "\\b(enum)\\s+([A-Za-z_]\\w*)",
+          "captures": { "1": { "name": "keyword.type.enum.squark" }, "2": { "name": "entity.name.type.enum.squark" } }
+        },
+        {
+          "comment": "Name: T at the start of a line (a named type; labels are indented)",
+          "match": "^(?:(pub)\\s+)?([A-Za-z_]\\w*)(:)(?=[ \\t]+[^\\s/=])",
+          "captures": { "1": { "name": "storage.modifier.pub.squark" }, "2": { "name": "entity.name.type.squark" }, "3": { "name": "punctuation.separator.squark" } }
+        },
+        {
+          "comment": "grouped faults: fault ( NotFound 404 \"not found\" ... )",
+          "begin": "\\b(fault)\\s*(\\()",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": { "name": "keyword.other.fault.squark" },
+            "2": { "name": "punctuation.bracket.squark" }
+          },
+          "endCaptures": { "0": { "name": "punctuation.bracket.squark" } },
+          "patterns": [
+            { "include": "#comments" },
+            {
+              "match": "^\\s*(?:(pub)\\s+)?([A-Za-z_]\\w*)(?=\\s+[-+0-9\"])",
+              "captures": {
+                "1": { "name": "storage.modifier.pub.squark" },
+                "2": { "name": "variable.other.constant.fault.squark" }
+              }
+            },
+            { "include": "#statements" }
+          ]
+        },
+        {
+          "comment": "fault NotFound 404 \"not found\" and fault Closed \"closed\"",
+          "match": "\\b(fault)\\s+([A-Za-z_]\\w*)",
           "captures": {
-            "1": { "name": "keyword.type.squark" },
-            "2": { "name": "entity.name.type.squark" }
+            "1": { "name": "keyword.other.fault.squark" },
+            "2": { "name": "variable.other.constant.fault.squark" }
           }
         },
         {
-          "comment": "arena name SIZE { ... } (statement) and arena name SIZE (package level)",
-          "match": "\\b(arena)\\s+([A-Za-z_]\\w*)(?=\\s+[^\\s{,)=])",
+          "comment": "arena name SIZE (package level) and with arena name SIZE { ... }",
+          "match": "(?<![\\w)\\]]\\.)\\b(arena)\\s+([A-Za-z_]\\w*)(?=\\s+(?!//)[^\\s{,)=])",
           "captures": {
             "1": { "name": "storage.type.arena.squark" },
             "2": { "name": "variable.other.arena.squark" }
           }
         },
         {
-          "comment": "shared var / thread var",
-          "match": "\\b(shared|thread)\\s+(var)\\b",
+          "comment": "package variables: thread x int, shared t = f()",
+          "match": "^(?:(pub)\\s+)?(thread|shared)\\b(?=\\s+[A-Za-z_]\\w*)",
           "captures": {
-            "1": { "name": "storage.modifier.squark" },
-            "2": { "name": "keyword.var.squark" }
+            "1": { "name": "storage.modifier.pub.squark" },
+            "2": { "name": "storage.modifier.squark" }
           }
+        },
+        {
+          "comment": "a label: outer: for ... (on its own line or before the loop)",
+          "match": "^\\s*(?!default\\b)([A-Za-z_]\\w*)(:)(?=\\s*(?:$|//|(?:for|while|loop|switch|select)\\b))",
+          "captures": {
+            "1": { "name": "entity.name.label.squark" },
+            "2": { "name": "punctuation.separator.colon.squark" }
+          }
+        },
+        {
+          "match": "\\b(break|continue)\\s+(?!//)([A-Za-z_]\\w*)",
+          "captures": { "1": { "name": "keyword.control.squark" }, "2": { "name": "entity.name.label.squark" } }
         }
       ]
     },
 
     "contextual": {
-      "comment": "Words that are keywords only in one position and identifiers elsewhere (spec §1).",
+      "comment": "Words that are keywords only in one position and identifiers elsewhere.",
       "patterns": [
         {
+          "comment": "start f(x): launch a task",
+          "match": "(?<![\\w)\\]]\\.)\\bstart\\b(?=\\s+(?!fn\\b)[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*\\s*\\()",
+          "name": "keyword.control.start.squark"
+        },
+        {
+          "comment": "loop { ... }",
+          "match": "(?<![\\w)\\]]\\.)\\bloop\\b(?=\\s*\\{)",
+          "name": "keyword.control.loop.squark"
+        },
+        {
           "comment": "select { ... }",
-          "match": "\\bselect\\b(?=\\s*\\{)",
+          "match": "(?<![\\w)\\]]\\.)\\bselect\\b(?=\\s*\\{)",
           "name": "keyword.control.select.squark"
         },
         {
+          "comment": "with arena name SIZE { ... }",
+          "match": "(?<![\\w)\\]]\\.)\\bwith\\b(?=\\s+arena\\b)",
+          "name": "keyword.control.with.squark"
+        },
+        {
           "comment": "after a signature: pool N, stack 8K",
-          "match": "\\b(pool|stack)\\b(?=\\s+(?:[0-9(]|[A-Za-z_]\\w*\\s*(?:\\{|$|//|\\b(?:pool|stack|blocking|preemptible)\\b)))",
+          "match": "(?<![\\w)\\]]\\.)\\b(pool|stack)\\b(?=\\s+(?:[0-9(]|[A-Za-z_]\\w*\\s*(?:\\{|$|//|c\"|\\b(?:pool|stack|blocking|preemptible)\\b|[(.+\\-*/])))",
           "name": "keyword.other.clause.squark"
         },
         {
-          "match": "\\b(blocking|preemptible)\\b(?=\\s*(?:\\{|$|//|\\b(?:pool|stack|blocking|preemptible)\\b))",
+          "match": "(?<![\\w)\\]]\\.)\\b(blocking|preemptible)\\b(?=\\s*(?:\\{|$|//|c\"|\\b(?:pool|stack|blocking|preemptible)\\b))",
           "name": "keyword.other.clause.squark"
         },
         {
-          "comment": "results provenance: ) T from a, b {",
-          "match": "(?<=[\\w\\])*]\\s)from\\b(?=\\s+[A-Za-z_]\\w*(?:\\s*,\\s*[A-Za-z_]\\w*)*\\s*(?:\\{|$|//|\\b(?:pool|stack|blocking|preemptible)\\b))",
-          "name": "storage.modifier.provenance.squark"
+          "comment": "provenance: -> str in static, and a parameter msg str in static",
+          "match": "\\b(in)\\s+(static)\\b",
+          "captures": {
+            "1": { "name": "keyword.operator.in.squark" },
+            "2": { "name": "storage.modifier.provenance.squark" }
+          }
         },
         {
-          "comment": "results that point to static memory: ) T static {, and a parameter: msg static string",
-          "match": "\\bstatic\\b(?=\\s*(?:\\{|$|//)|\\s+[\\[*A-Za-z_])",
-          "name": "storage.modifier.provenance.squark"
-        },
-        {
-          "comment": "parameter provenance: s string into out",
-          "match": "(?<=[\\w\\])*]\\s)into\\b(?=\\s+[A-Za-z_]\\w*\\s*[,)])",
-          "name": "storage.modifier.provenance.squark"
-        },
-        {
-          "comment": "storage capacity: map[K]V cap N, chan T cap N (not the builtin cap(x))",
-          "match": "\\bcap\\b(?=\\s+[0-9A-Za-z_(])",
-          "name": "keyword.other.capacity.squark"
-        },
-        {
-          "comment": "vector type [..N]T",
-          "match": "(?<=\\[)\\.\\.",
+          "comment": "vector type u8[..64]",
+          "match": "(?<=\\[)\\.\\.(?!\\.)",
           "name": "keyword.operator.vector.squark"
         }
       ]
@@ -241,37 +355,47 @@
     "keywords": {
       "patterns": [
         {
-          "match": "\\b(break|case|continue|default|defer|else|for|go|if|range|return|switch|try)\\b",
+          "match": "(?<![\\w)\\]]\\.)\\b(break|case|continue|default|defer|else|for|if|return|switch|while)\\b",
           "name": "keyword.control.squark"
         },
         {
-          "comment": "allocation in an arena: x in a",
-          "match": "\\bin\\b",
+          "comment": "for x in xs, x in a (allocation in an arena), -> T in s (provenance)",
+          "match": "(?<![\\w)\\]]\\.)\\bin\\b",
           "name": "keyword.operator.in.squark"
         },
-        { "match": "\\b(package|import)\\b", "name": "keyword.other.package.squark" },
-        { "match": "\\bfunc\\b", "name": "keyword.function.squark" },
-        { "match": "\\btask\\b", "name": "keyword.function.task.squark" },
-        { "match": "\\b(var|const)\\b", "name": "keyword.var.squark" },
-        { "match": "\\btype\\b", "name": "keyword.type.squark" },
-        { "match": "\\bextern\\b", "name": "storage.modifier.extern.squark" },
-        { "match": "\\b(struct|map|chan)\\b", "name": "keyword.type.squark" },
-        { "match": "\\barena\\b", "name": "storage.type.arena.squark" }
+        {
+          "match": "(?<![\\w)\\]]\\.)\\b(and|or|not)\\b",
+          "name": "keyword.operator.logical.squark"
+        },
+        { "match": "(?<![\\w)\\]]\\.)\\bfn\\b", "name": "keyword.function.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\btask\\b", "name": "keyword.function.task.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\b(var|const)\\b", "name": "keyword.var.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\benum\\b", "name": "keyword.type.enum.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\bimpl\\b", "name": "keyword.other.impl.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\bfault\\b", "name": "keyword.other.fault.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\bpub\\b", "name": "storage.modifier.pub.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\bextern\\b", "name": "storage.modifier.extern.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\b(struct|chan)\\b", "name": "keyword.type.squark" },
+        { "match": "(?<![\\w)\\]]\\.)\\barena\\b", "name": "storage.type.arena.squark" }
       ]
     },
 
     "types": {
-      "match": "\\b(bool|byte|rune|int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|uintptr|float32|float64|string|error|rawptr|anytype|(?:u?int(?:8x(?:16|32)|16x(?:8|16)|32x(?:4|8)|64x(?:2|4))|float32x(?:4|8)|float64x(?:2|4)))\\b",
+      "match": "(?<![\\w)\\]]\\.)\\b(bool|str|int|uint|uintptr|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|rune|error|rawptr|anytype|[iuf](?:8|16|32|64)x(?:2|4|8|16|32))\\b",
       "name": "storage.type.builtin.squark"
     },
 
-    "constants": {
-      "match": "\\b(true|false|nil|iota)\\b",
-      "name": "constant.language.squark"
+    "implicitMember": {
+      "comment": ".north: a member of the enum the context expects (not x.y, f().y, 0..n)",
+      "match": "(?<![\\w)\\]\"'.])(\\.)([A-Za-z_]\\w*)",
+      "captures": { "1": { "name": "punctuation.accessor.squark" }, "2": { "name": "variable.other.enummember.squark" } }
     },
 
+    "constants": { "match": "(?<![\\w)\\]]\\.)\\b(true|false|nil)\\b", "name": "constant.language.squark" },
+    "self": { "match": "(?<![\\w)\\]]\\.)\\bself\\b", "name": "variable.language.self.squark" },
+
     "builtins": {
-      "match": "\\b(len|cap|append|copy|make|delete|close|panic|print|println|min|max|new)\\b(?=\\s*\\()",
+      "match": "(?<![\\w)\\]]\\.)\\b(len|cap|append|copy|make|delete|close|panic|print|println|min|max|new)\\b(?=\\s*\\()",
       "name": "support.function.builtin.squark"
     },
 
@@ -282,12 +406,21 @@
 
     "operators": {
       "patterns": [
+        { "match": "->", "name": "keyword.operator.arrow.squark" },
         { "match": "<-", "name": "keyword.operator.channel.squark" },
         { "match": ":=", "name": "keyword.operator.assignment.define.squark" },
         { "match": "\\.\\.\\.", "name": "keyword.operator.variadic.squark" },
-        { "match": "(&&|\\|\\||!)(?!=)", "name": "keyword.operator.logical.squark" },
+        { "match": "\\.\\.", "name": "keyword.operator.range.squark" },
+        {
+          "comment": "f()! propagates f's error; -> T ! declares one",
+          "match": "!(?!=)",
+          "name": "keyword.operator.error.squark"
+        },
         { "match": "==|!=|<=|>=|<(?!<)|>(?!>)", "name": "keyword.operator.comparison.squark" },
-        { "match": "(\\+|-|\\*|/|%|&\\^|&|\\||\\^|<<|>>)?=", "name": "keyword.operator.assignment.squark" },
+        {
+          "match": "(\\+|-|\\*|/|%|&\\^|&|\\||\\^|<<|>>)?=",
+          "name": "keyword.operator.assignment.squark"
+        },
         { "match": "\\+\\+|--", "name": "keyword.operator.increment.squark" },
         { "match": "&\\^|<<|>>|[+\\-*/%&|^]", "name": "keyword.operator.arithmetic.squark" }
       ]

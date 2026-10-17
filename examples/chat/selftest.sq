@@ -1,88 +1,83 @@
 // The self-test, run when chat has no arguments: scripted clients on shard 0 talk to the room over
 // real TCP. Each line is awaited by everyone who should hear it before the next is sent, so the
 // transcript is the same on every run.
-package main
+program
 
-import (
-	"bufio"
-	"net"
-	"os"
-	"strings"
-	"time"
-)
+use bufio, net, os, strings, time
 
-const alice, bob, carol, dave, eve = 0, 1, 2, 3, 4
+// Who is one of the scripted clients (an index into peers).
+enum Who { alice, bob, carol, dave, eve }
 
-type Peer struct {
-	name   string
+struct Peer {
+	name   str
 	c      net.Conn
 	hangup bool // close the connection after the next line
-	log    [1024]byte
+	log    u8[1024]
 	n      int
 }
 
-thread var peers [5]Peer
-thread var heard chan int cap 64 // a peer's listener sends the peer's index for each line
+thread peers Peer[5]
+thread heard Who chan[64] // a peer's listener sends who heard each line
 
 // ---- peers ----
 
 // listen records what peer i hears. A peer hangs up from here, not from script: Close doesn't
 // wake a goroutine blocked in Read on the same connection.
-task listen(i int) pool 5 {
+task listen(i Who) pool 5 {
 	p := &peers[i]
-	var buf [MaxNick + 2 + MaxLine]byte // the longest line the room sends
-	r := bufio.NewReader(buf[:])
-	for {
-		text, err := r.ReadLine(p.c)
+	var buf u8[max_nick + 2 + max_line] // the longest line the room sends
+	r := bufio.new_reader(buf[:])
+	loop {
+		text, err := r.read_line(p.c)
 		if err != nil {
 			text = "(disconnected)"
 		}
 		p.n += copy(p.log[p.n:], "  ")
 		p.n += copy(p.log[p.n:], text)
 		p.n += copy(p.log[p.n:], "\n")
-		if p.hangup && err == nil {
+		if p.hangup and err == nil {
 			p.n += copy(p.log[p.n:], "  (hung up)\n")
 		}
 		heard <- i
-		if err != nil || p.hangup {
-			p.c.Close()
+		if err != nil or p.hangup {
+			p.c.close()
 			return
 		}
 	}
 }
 
-func connect(i int, name static string, port int) {
-	var buf [32]byte
-	c, err := net.Dial(string(net.AppendHostPort(buf[:0], "127.0.0.1", port)))
+fn connect(i Who, name str in static, port int) {
+	var buf u8[32]
+	c, err := net.dial(str(net.append_host_port(buf[:0], "127.0.0.1", port)))
 	if err != nil {
 		panic(err)
 	}
 	peers[i].name = name
 	peers[i].c = c
-	go listen(i)
+	start listen(i)
 }
 
 // say sends a line from peer i and waits until each peer in who has heard a line (a peer listed
 // twice, two lines).
-func say(i int, text string, who ...int) {
-	var buf [MaxLine * 2]byte
-	peers[i].c.Write(append(append(buf[:0], text...), '\n'))
+fn say(i Who, text str, who ...Who) {
+	var buf u8[max_line * 2]
+	peers[i].c.write(append(append(buf[:0], text...), '\n'))
 	await(who...)
 }
 
-func await(who ...int) {
-	var want [len(peers)]int
-	for _, i := range who {
+fn await(who ...Who) {
+	var want int[len(peers)]
+	for i in who {
 		want[i]++
 	}
-	for range who {
+	for _ in who {
 		select {
 		case i := <-heard:
 			if want[i] == 0 {
 				panic("chat: a client heard a line it shouldn't have")
 			}
 			want[i]--
-		case <-time.After(5 * time.Second):
+		case <-time.after(5 * time.second):
 			panic("chat: a client is missing a line")
 		}
 	}
@@ -90,46 +85,46 @@ func await(who ...int) {
 
 // ---- the script ----
 
-// selfTestTimeout returns d, or a short timeout in the self-test, so dave, who says nothing, is
+// self_test_timeout returns d, or a short timeout in the self-test, so dave, who says nothing, is
 // timed out quickly.
-func selfTestTimeout(d time.Duration) time.Duration {
-	if os.NArgs() < 2 {
-		return 100 * time.Millisecond
+fn self_test_timeout(d time.Duration) -> time.Duration {
+	if os.n_args() < 2 {
+		return 100 * time.millisecond
 	}
 	return d
 }
 
-func selfTest() {
+fn self_test() {
 	port := start("127.0.0.1:0")
-	connect(alice, "alice", port)
-	say(alice, "hello?", alice)
-	say(alice, "NICK alice", alice)
-	connect(bob, "bob", port)
-	say(bob, "NICK bob", alice, bob)
-	connect(carol, "carol", port)
-	say(carol, "NICK alice", carol)
-	say(carol, "NICK carol", alice, bob, carol)
-	say(alice, "hi all", alice, bob, carol)
-	say(bob, "hey alice", alice, bob, carol)
-	say(carol, "WHO", carol)
-	connect(dave, "dave", port) // says nothing and is timed out
-	await(dave, dave)
-	var long [MaxLine + 50]byte
-	say(carol, string(strings.AppendRepeat(long[:0], "x", len(long))), carol)
-	say(carol, "sorry, cat on keyboard", alice, bob, carol)
-	say(bob, "QUIT", bob, bob, alice, carol)
-	connect(eve, "eve", port)
-	say(eve, "NICK eve", alice, carol, eve)
-	say(eve, "WHO", eve)
-	peers[carol].hangup = true
-	say(eve, "bye carol", alice, carol, eve)
-	await(alice, eve) // carol left
-	say(alice, "QUIT", alice, alice, eve)
-	say(eve, "QUIT", eve, eve)
+	connect(.alice, "alice", port)
+	say(.alice, "hello?", .alice)
+	say(.alice, "NICK alice", .alice)
+	connect(.bob, "bob", port)
+	say(.bob, "NICK bob", .alice, .bob)
+	connect(.carol, "carol", port)
+	say(.carol, "NICK alice", .carol)
+	say(.carol, "NICK carol", .alice, .bob, .carol)
+	say(.alice, "hi all", .alice, .bob, .carol)
+	say(.bob, "hey alice", .alice, .bob, .carol)
+	say(.carol, "WHO", .carol)
+	connect(.dave, "dave", port) // says nothing and is timed out
+	await(.dave, .dave)
+	var long u8[max_line + 50]
+	say(.carol, str(strings.append_repeat(long[:0], "x", len(long))), .carol)
+	say(.carol, "sorry, cat on keyboard", .alice, .bob, .carol)
+	say(.bob, "QUIT", .bob, .bob, .alice, .carol)
+	connect(.eve, "eve", port)
+	say(.eve, "NICK eve", .alice, .carol, .eve)
+	say(.eve, "WHO", .eve)
+	peers[Who.carol].hangup = true
+	say(.eve, "bye carol", .alice, .carol, .eve)
+	await(.alice, .eve) // carol left
+	say(.alice, "QUIT", .alice, .alice, .eve)
+	say(.eve, "QUIT", .eve, .eve)
 
-	for i := range peers {
+	for i, _ in peers {
 		println(peers[i].name, "heard:")
-		os.Stdout.Write(peers[i].log[:peers[i].n])
+		os.stdout.write(peers[i].log[:peers[i].n])
 	}
-	toHub <- Msg{Kind: EvShutdown}
+	to_hub <- Msg{kind: .shutdown}
 }

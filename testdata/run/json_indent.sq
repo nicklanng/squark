@@ -1,95 +1,95 @@
-package main
+program
 
 // json.Encoder.SetIndent: the layout of json.MarshalIndent (a member or element per line, empty
 // containers on one line, "key": value), Raw values laid out again, a top-level scalar, the prefix,
 // SetIndent after the first value (ErrMisuse), and a full buffer (each call all or nothing,
 // line breaks included)
 
-import "json"
+use json
 
-func show(label string, e *json.Encoder) {
-	err := e.Finish()
+fn show(label str, e *json.Encoder) {
+	err := e.finish()
 	println(label)
 	if err != nil {
-		println(string(e.Bytes()), "err:", err.Error())
+		println(str(e.bytes()), "err:", err.message())
 	} else {
-		println(string(e.Bytes()))
+		println(str(e.bytes()))
 	}
 }
 
-func doc(e *json.Encoder) {
-	e.Object()
-	e.Key("id")
-	e.Int(7)
-	e.Key("tags")
-	e.Array()
-	e.String("a")
-	e.String("b")
-	e.End()
-	e.Key("none")
-	e.Array()
-	e.End()
-	e.Key("empty")
-	e.Object()
-	e.End()
-	e.Key("raw")
-	var raw [64]byte
+fn doc(e *json.Encoder) {
+	e.object()
+	e.key("id")
+	e.int(7)
+	e.key("tags")
+	e.array()
+	e.string("a")
+	e.string("b")
+	e.end()
+	e.key("none")
+	e.array()
+	e.end()
+	e.key("empty")
+	e.object()
+	e.end()
+	e.key("raw")
+	var raw u8[64]
 	n := copy(raw[:], ` {"x": [1, {}, [ ], "a,b:{"], "y":{"z":null}} `)
-	e.Raw(raw[:n])
-	e.Key("deep")
-	e.Array()
-	e.Array()
-	e.Object()
-	e.Key("k")
-	e.Bool(true)
-	e.End()
-	e.End()
-	e.End()
-	e.End()
+	e.raw(raw[:n])
+	e.key("deep")
+	e.array()
+	e.array()
+	e.object()
+	e.key("k")
+	e.bool(true)
+	e.end()
+	e.end()
+	e.end()
+	e.end()
 }
 
-func main() {
-	var buf [512]byte
-	e := json.NewEncoder(buf[:0])
-	e.SetIndent("", "  ")
+fn main() {
+	var buf u8[512]
+	e := json.new_encoder(buf[:0])
+	e.set_indent("", "  ")
 	doc(&e)
 	show("two spaces:", &e)
 
-	e = json.NewEncoder(buf[:0])
-	e.SetIndent("> ", "\t")
+	e = json.new_encoder(buf[:0])
+	e.set_indent("> ", "\t")
 	doc(&e)
 	show("prefix and tab:", &e)
 
-	e = json.NewEncoder(buf[:0])
-	e.SetIndent("", "")
-	e.Array()
-	e.Int(1)
-	e.Int(2)
-	e.End()
+	e = json.new_encoder(buf[:0])
+	e.set_indent("", "")
+	e.array()
+	e.int(1)
+	e.int(2)
+	e.end()
 	show("no indent:", &e)
 
-	e = json.NewEncoder(buf[:0])
-	e.SetIndent("  ", "  ")
-	e.String("top")
+	e = json.new_encoder(buf[:0])
+	e.set_indent("  ", "  ")
+	e.string("top")
 	show("scalar:", &e)
 
-	e = json.NewEncoder(buf[:0])
-	e.SetIndent("", " ")
-	e.Array()
-	e.SetIndent("", "  ")
+	e = json.new_encoder(buf[:0])
+	e.set_indent("", " ")
+	e.array()
+	e.set_indent("", "  ")
 	show("late SetIndent:", &e)
 
 	// a full buffer: the call that doesn't fit writes nothing, line break and indentation included
-	var small [12]byte
-	f := json.NewEncoder(small[:0])
-	f.SetIndent("", "    ")
-	f.Array()
-	f.Int(1)
-	f.Int(2)
-	println("full:", f.Err.Error(), len(f.Bytes()), string(f.Bytes()))
-	f.Clear()
-	f.Err = nil
-	f.Int(2)
-	f.End()
+	var small u8[12]
+	f := json.new_encoder(small[:0])
+	f.set_indent("", "    ")
+	f.array()
+	f.int(1)
+	f.int(2)
+	println("full:", f.err.message(), len(f.bytes()), str(f.bytes()))
+	f.clear()
+	f.err = nil
+	f.int(2)
+	f.end()
 	show("after Clear:", &f)
 }

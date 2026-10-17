@@ -23,35 +23,27 @@ import (
 // i <int>, f <float64 bits>, t, F, n (true, false, null), I <hex>,<hex> (SetIndent with that
 // prefix and indent), and . to finish the document, which prints "ok <length>" and the output if
 // all three agree and Finish succeeds, or "err <message>".
-const jsonEncoderProg = `package main
+const jsonEncoderProg = `program
 
-import (
-	"bufio"
-	"bytes"
-	"io"
-	"json"
-	"math"
-	"os"
-	"strconv"
-)
+use bufio, bytes, io, json, math, os, strconv
 
-var lineStore [256K]byte
-var bigStore [256K]byte
-var streamStore [256K]byte
-var small [64]byte
-var arg [128K]byte
-var rawStore [256K]byte
+thread line_store u8[256K]
+thread big_store u8[256K]
+thread stream_store u8[256K]
+thread small u8[64]
+thread arg u8[128K]
+thread raw_store u8[256K]
 
 // SetIndent's arguments, and how deeply the document is nested, for laying out a Raw value that
 // goes through RawStart
-var prefix, indent, nested [256]byte
-var plen, ilen, depth int
+thread prefix, indent, nested u8[256]
+thread plen, ilen, depth int
 
-func unhex(s string) []byte static {
-	return unhexTo(s, arg[:])
+fn unhex(s str) -> u8[] in static {
+	return unhex_to(s, arg[:])
 }
 
-func unhexTo(s string, dst []byte) []byte from dst {
+fn unhex_to(s str, dst u8[]) -> u8[] in dst {
 	n := 0
 	for i := 0; i+1 < len(s); i += 2 {
 		dst[n] = nib(s[i])<<4 | nib(s[i+1])
@@ -60,123 +52,123 @@ func unhexTo(s string, dst []byte) []byte from dst {
 	return dst[:n]
 }
 
-// setIndent parses "I <hex>,<hex>" into prefix and indent.
-func setIndent(line string) {
+// set_indent parses "I <hex>,<hex>" into prefix and indent.
+fn set_indent(line str) {
 	i := 2
-	for line[i] != ',' {
+	while line[i] != ',' {
 		i++
 	}
-	plen = len(unhexTo(line[2:i], prefix[:]))
-	ilen = len(unhexTo(line[i+1:], indent[:]))
+	plen = len(unhex_to(line[2:i], prefix[:]))
+	ilen = len(unhex_to(line[i+1:], indent[:]))
 }
 
-func nib(c byte) byte {
+fn nib(c u8) -> u8 {
 	if c >= 'a' {
 		return c - 'a' + 10
 	}
 	return c - '0'
 }
 
-func parseUint(s string) uint64 {
-	var v uint64
+fn parse_uint(s str) -> u64 {
+	var v u64
 	for i := 0; i < len(s); i++ {
-		v = v*10 + uint64(s[i]-'0')
+		v = v*10 + u64(s[i]-'0')
 	}
 	return v
 }
 
-func apply(e *json.Encoder, line string, b []byte) {
+fn apply(e *json.Encoder, line str, b u8[]) {
 	switch line[0] {
 	case '{':
-		e.Object()
+		e.object()
 	case '[':
-		e.Array()
+		e.array()
 	case ']':
-		e.End()
+		e.end()
 	case 'k':
-		e.Key(string(b))
+		e.key(str(b))
 	case 's':
-		e.String(string(b))
+		e.string(str(b))
 	case 'r':
-		e.Raw(b)
+		e.raw(b)
 	case 'i':
-		v, _ := strconv.Atoi(line[2:])
-		e.Int(v)
+		v, _ := strconv.atoi(line[2:])
+		e.int(v)
 	case 'f':
-		e.Float(math.Float64frombits(parseUint(line[2:])))
+		e.float(math.float64frombits(parse_uint(line[2:])))
 	case 't':
-		e.Bool(true)
+		e.bool(true)
 	case 'F':
-		e.Bool(false)
+		e.bool(false)
 	case 'n':
-		e.Null()
+		e.null()
 	case 'I':
-		e.SetIndent(string(prefix[:plen]), string(indent[:ilen]))
+		e.set_indent(str(prefix[:plen]), str(indent[:ilen]))
 	}
 }
 
 // stream applies a command to an encoder writing through the small buffer into out
-func stream(e *json.Encoder, out *bytes.Buffer, line string, b []byte) {
+fn stream(e *json.Encoder, out *bytes.Buffer, line str, b u8[]) {
 	apply(e, line, b)
-	if e.Err != json.ErrFull {
+	if e.err != json.Full {
 		return
 	}
-	out.Write(e.Bytes())
-	e.Clear()
-	e.Err = nil
+	out.write(e.bytes())
+	e.clear()
+	e.err = nil
 	apply(e, line, b)
-	if e.Err != json.ErrFull {
+	if e.err != json.Full {
 		return
 	}
-	e.Err = nil
-	if line[0] != 's' && line[0] != 'r' {
-		e.Err = json.ErrFull // a key longer than the buffer can't be streamed
+	e.err = nil
+	if line[0] != 's' and line[0] != 'r' {
+		e.err = json.Full // a key longer than the buffer can't be streamed
 		return
 	}
-	if e.RawStart() {
-		out.Write(e.Bytes())
-		e.Clear()
+	if e.raw_start() {
+		out.write(e.bytes())
+		e.clear()
 		if line[0] == 's' {
-			json.WriteString(out, string(b))
+			json.write_string(out, str(b))
 		} else if plen < 0 {
-			out.Write(b)
+			out.write(b)
 		} else {
 			// laid out as Raw would: the prefix carries the indentation of the open containers
 			n := copy(nested[:], prefix[:plen])
 			for i := 0; i < depth; i++ {
 				n += copy(nested[n:], indent[:ilen])
 			}
-			r := json.NewEncoder(rawStore[:0])
-			r.SetIndent(string(nested[:n]), string(indent[:ilen]))
-			r.Raw(b)
-			out.Write(r.Bytes())
+			r := json.new_encoder(raw_store[:0])
+			r.set_indent(str(nested[:n]), str(indent[:ilen]))
+			r.raw(b)
+			out.write(r.bytes())
 		}
 	}
 }
 
-func main() {
-	r := bufio.NewReader(lineStore[:])
-	for {
-		big := json.NewEncoder(bigStore[:0])
-		streamed := json.NewEncoder(small[:0])
-		out := bytes.NewBuffer(streamStore[:0])
+fn main() {
+	r := bufio.new_reader(line_store[:])
+	loop {
+		big := json.new_encoder(big_store[:0])
+		streamed := json.new_encoder(small[:0])
+		out := bytes.new_buffer(stream_store[:0])
 		plen, ilen, depth = -1, 0, 0
-		arena a 1M {
-			grown := json.NewEncoderIn(nil, a)
-			for {
-				line, err := r.ReadLine(os.Stdin)
+		with arena a 1M {
+			grown := json.new_encoder_in(nil, a)
+			loop {
+				line, err := r.read_line(os.stdin)
 				if err == io.EOF {
 					return
 				}
 				if line == "." {
 					break
 				}
-				var b []byte
+				var b u8[]
 				switch line[0] {
 				case 'k', 's', 'r':
 					b = unhex(line[2:])
 				case 'I':
-					setIndent(line)
+					set_indent(line)
 				}
 				apply(&big, line, b)
 				apply(&grown, line, b)
@@ -188,23 +180,23 @@ func main() {
 					depth--
 				}
 			}
-			err := big.Finish()
-			serr := streamed.Finish()
-			gerr := grown.Finish()
-			out.Write(streamed.Bytes())
+			err := big.finish()
+			serr := streamed.finish()
+			gerr := grown.finish()
+			out.write(streamed.bytes())
 			if err != nil {
-				if serr != err || gerr != err {
-					println("err differ", err.Error(), serr.Error(), gerr.Error())
+				if serr != err or gerr != err {
+					println("err differ", err.message(), serr.message(), gerr.message())
 				} else {
-					println("err", err.Error())
+					println("err", err.message())
 				}
-			} else if serr != nil || gerr != nil || string(big.Bytes()) != string(out.Bytes()) || string(big.Bytes()) != string(grown.Bytes()) {
+			} else if serr != nil or gerr != nil or str(big.bytes()) != str(out.bytes()) or str(big.bytes()) != str(grown.bytes()) {
 				println("differ")
 			} else {
-				var head [32]byte
-				h := strconv.AppendInt(append(head[:0], "ok "...), len(big.Bytes()))
-				os.Stdout.Write(append(h, '\n'))
-				os.Stdout.Write(big.Bytes())
+				var head u8[32]
+				h := strconv.append_int(append(head[:0], "ok "...), len(big.bytes()))
+				os.stdout.write(append(h, '\n'))
+				os.stdout.write(big.bytes())
 			}
 		}
 	}

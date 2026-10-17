@@ -50,19 +50,19 @@ var (
 	tInvalid       = &Basic{Invalid, "invalid type"}
 	tBool          = &Basic{Bool, "bool"}
 	tInt           = &Basic{Int, "int"}
-	tInt8          = &Basic{Int8, "int8"}
-	tInt16         = &Basic{Int16, "int16"}
-	tInt32         = &Basic{Int32, "int32"}
-	tInt64         = &Basic{Int64, "int64"}
+	tInt8          = &Basic{Int8, "i8"}
+	tInt16         = &Basic{Int16, "i16"}
+	tInt32         = &Basic{Int32, "i32"}
+	tInt64         = &Basic{Int64, "i64"}
 	tUint          = &Basic{Uint, "uint"}
-	tUint8         = &Basic{Uint8, "byte"}
-	tUint16        = &Basic{Uint16, "uint16"}
-	tUint32        = &Basic{Uint32, "uint32"}
-	tUint64        = &Basic{Uint64, "uint64"}
+	tUint8         = &Basic{Uint8, "u8"}
+	tUint16        = &Basic{Uint16, "u16"}
+	tUint32        = &Basic{Uint32, "u32"}
+	tUint64        = &Basic{Uint64, "u64"}
 	tUintptr       = &Basic{Uintptr, "uintptr"}
-	tFloat32       = &Basic{Float32, "float32"}
-	tFloat64       = &Basic{Float64, "float64"}
-	tString        = &Basic{String, "string"}
+	tFloat32       = &Basic{Float32, "f32"}
+	tFloat64       = &Basic{Float64, "f64"}
+	tString        = &Basic{String, "str"}
 	tRawptr        = &Basic{Rawptr, "rawptr"}
 	tUntypedBool   = &Basic{UntypedBool, "untyped bool"}
 	tUntypedInt    = &Basic{UntypedInt, "untyped int"}
@@ -86,6 +86,7 @@ type Chan struct{ Elem Type }
 type Map struct{ Key, Value Type }
 
 type StructField struct {
+	Pub  bool
 	Name string
 	Type Type
 	Pos  Pos
@@ -117,6 +118,17 @@ type Named struct {
 	underlying Type
 	Methods    []*Func
 	Pkg        *Package
+	Enum       []*Object // an enum's members (constants of this type), in order
+}
+
+// EnumMember returns the enum member called name, or nil.
+func (t *Named) EnumMember(name string) *Object {
+	for _, m := range t.Enum {
+		if m.Name == name {
+			return m
+		}
+	}
+	return nil
 }
 
 // ErrorType is the predeclared error type: a static message plus an integer code.
@@ -150,6 +162,7 @@ type VecType struct {
 // one value in a 128- or 256-bit register.
 type SIMD struct {
 	Name  string
+	CName string // the C type is sq_<CName> (sq_rt.h)
 	Elem  *Basic
 	Lanes int64
 }
@@ -167,7 +180,7 @@ var simdTypes = func() []*SIMD {
 			t    *Basic
 		}{{"int8", tInt8}, {"uint8", tUint8}, {"int16", tInt16}, {"uint16", tUint16}, {"int32", tInt32}, {"uint32", tUint32}, {"int64", tInt64}, {"uint64", tUint64}, {"float32", tFloat32}, {"float64", tFloat64}} {
 			lanes := bits / (sizeofBasic(e.t.Kind) * 8)
-			ts = append(ts, &SIMD{Name: fmt.Sprintf("%sx%d", e.name, lanes), Elem: e.t, Lanes: lanes})
+			ts = append(ts, &SIMD{Name: fmt.Sprintf("%sx%d", e.t.Name, lanes), CName: fmt.Sprintf("%sx%d", e.name, lanes), Elem: e.t, Lanes: lanes})
 		}
 	}
 	return ts
@@ -214,11 +227,21 @@ type ChanStore struct {
 func (t *VecType) Underlying() Type   { return t }
 func (t *MapStore) Underlying() Type  { return t }
 func (t *ChanStore) Underlying() Type { return t }
-func (t *VecType) String() string     { return fmt.Sprintf("[..%d]%s", t.Len, t.Elem) }
+func (t *VecType) String() string     { return fmt.Sprintf("%s[..%d]", elemString(t.Elem), t.Len) }
 func (t *MapStore) String() string {
-	return fmt.Sprintf("map[%s]%s cap %d", t.Key, t.Value, t.Cap)
+	return fmt.Sprintf("%s[%s; %d]", elemString(t.Value), t.Key, t.Cap)
 }
-func (t *ChanStore) String() string { return fmt.Sprintf("chan %s cap %d", t.Elem, t.Cap) }
+func (t *ChanStore) String() string { return fmt.Sprintf("%s chan[%d]", elemString(t.Elem), t.Cap) }
+
+// elemString prints the element of a postfix type: a function or a channel view is
+// parenthesized, as (fn() -> int)[] or (int chan)[4].
+func elemString(t Type) string {
+	switch t.(type) {
+	case *Signature, *Chan:
+		return "(" + t.String() + ")"
+	}
+	return t.String()
+}
 
 // viewOf returns the view type of a storage type, or nil.
 func viewOf(t Type) Type {
@@ -241,11 +264,17 @@ func (t *ArenaType) String() string   { return "arena" }
 
 var tArena = &ArenaType{}
 
-func (t *Array) String() string   { return fmt.Sprintf("[%d]%s", t.Len, t.Elem) }
-func (t *Slice) String() string   { return "[]" + t.Elem.String() }
-func (t *Pointer) String() string { return "*" + t.Elem.String() }
-func (t *Chan) String() string    { return "chan " + t.Elem.String() }
-func (t *Map) String() string     { return "map[" + t.Key.String() + "]" + t.Value.String() }
+func (t *Array) String() string { return fmt.Sprintf("%s[%d]", elemString(t.Elem), t.Len) }
+func (t *Slice) String() string { return elemString(t.Elem) + "[]" }
+func (t *Pointer) String() string {
+	switch t.Elem.(type) {
+	case *Array, *Slice, *VecType, *Map, *MapStore, *Chan, *ChanStore:
+		return "*(" + t.Elem.String() + ")"
+	}
+	return "*" + t.Elem.String()
+}
+func (t *Chan) String() string { return elemString(t.Elem) + " chan" }
+func (t *Map) String() string  { return elemString(t.Value) + "[" + t.Key.String() + "]" }
 func (t *ErrorType) String() string {
 	return "error"
 }
@@ -265,17 +294,29 @@ func (t *Signature) String() string {
 		}
 		ps = append(ps, s)
 	}
-	s := "func(" + strings.Join(ps, ", ") + ")"
-	switch len(t.Results) {
+	s := "fn(" + strings.Join(ps, ", ") + ")"
+	rs := t.Results
+	bang := len(rs) > 0 && rs[len(rs)-1].Type == tError
+	if bang {
+		rs = rs[:len(rs)-1]
+	}
+	switch len(rs) {
 	case 0:
-	case 1:
-		s += " " + t.Results[0].Type.String()
-	default:
-		var rs []string
-		for _, r := range t.Results {
-			rs = append(rs, r.Type.String())
+		if bang {
+			s += " -> !"
 		}
-		s += " (" + strings.Join(rs, ", ") + ")"
+		return s
+	case 1:
+		s += " -> " + rs[0].Type.String()
+	default:
+		var ss []string
+		for _, r := range rs {
+			ss = append(ss, r.Type.String())
+		}
+		s += " -> (" + strings.Join(ss, ", ") + ")"
+	}
+	if bang {
+		s += " !"
 	}
 	return s
 }
@@ -310,19 +351,20 @@ const (
 type Object struct {
 	Kind ObjKind
 	Name string
+	Pub  bool // a package-level name visible to importers (pub)
 	Type Type
 	Pos  Pos
 	Pkg  *Package
 
-	Var     *Var
-	Func    *Func
-	Const   any // constant.Value
-	PkgRef  *Package
+	Var      *Var
+	Func     *Func
+	Const    any // constant.Value
+	PkgRef   *Package
 	TypeDecl *TypeSpec
 
 	// for ObjConst/global ObjVar/ObjType resolution
-	decl    any
-	state   int // 0 unresolved, 1 resolving, 2 done
+	decl  any
+	state int // 0 unresolved, 1 resolving, 2 done
 }
 
 type Var struct {
@@ -338,9 +380,9 @@ type Var struct {
 	// lifetime analysis
 	Depth     int // lexical block depth of declaration (0 = global)
 	AddrTaken bool
-	CName    string // unique C name (locals)
-	Used     bool
-	ReadOnly bool // error constants, constant composites, arenas
+	CName     string // unique C name (locals)
+	Used      bool
+	ReadOnly  bool // error constants, constant composites, arenas
 	ConstData bool // const X = T{...}: must be built from constants only
 	Shared    bool // shared var: one copy for every scheduler thread, read-only after initialization
 	Thread    bool // thread var: one copy per scheduler thread, like var, declared so on purpose
@@ -356,6 +398,7 @@ type Var struct {
 }
 
 type Func struct {
+	Pub      bool
 	Name     string
 	Sig      *Signature
 	Decl     *FuncDecl
@@ -365,21 +408,21 @@ type Func struct {
 	Pragmas  []string
 
 	// analysis results
-	Summary   *Summary
-	Calls     []*Func      // static callees
-	Indirect  []*Signature // signatures of indirect calls through func values
-	GoSites   []*GoStmt
-	Defers    []*DeferStmt
-	AddrTaken bool
-	GoTarget  bool
-	Pool      int   // goroutine pool size if a go target
-	StackHint int64 // //squark:stack N (for externs)
-	Blocking  bool  // extern ... blocking: called on a helper thread while the goroutine waits
-	Preemptible bool // task ... preemptible: loops in it and its callees may yield after a time slice
-	CName     string
-	Intrinsic string
-	IsTask    bool
-	StackLimit int64 // asserted upper bound (stack N on a task or function)
+	Summary     *Summary
+	Calls       []*Func      // static callees
+	Indirect    []*Signature // signatures of indirect calls through func values
+	GoSites     []*GoStmt
+	Defers      []*DeferStmt
+	AddrTaken   bool
+	GoTarget    bool
+	Pool        int   // goroutine pool size if a go target
+	StackHint   int64 // //squark:stack N (for externs)
+	Blocking    bool  // extern ... blocking: called on a helper thread while the goroutine waits
+	Preemptible bool  // task ... preemptible: loops in it and its callees may yield after a time slice
+	CName       string
+	Intrinsic   string
+	IsTask      bool
+	StackLimit  int64 // asserted upper bound (stack N on a task or function)
 
 	// anytype parameters (see generic.go)
 	Generic   bool    // a template: has anytype parameters; never compiled itself
@@ -616,15 +659,24 @@ func refPath(t Type, seen map[Type]bool) (string, Type) {
 }
 
 // containsChan reports whether t is channel storage or an array or struct holding some.
-func containsChan(t Type) bool {
+func containsChan(t Type) bool { return containsChan1(t, map[Type]bool{}) }
+
+// containsChan1 is containsChan, stopping at the types in seen: a struct that contains itself by
+// value is an error reported elsewhere, but checking goes on.
+func containsChan1(t Type, seen map[Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	defer delete(seen, t)
 	switch u := t.Underlying().(type) {
 	case *ChanStore:
 		return true
 	case *Array:
-		return containsChan(u.Elem)
+		return containsChan1(u.Elem, seen)
 	case *Struct:
 		for _, f := range u.Fields {
-			if containsChan(f.Type) {
+			if containsChan1(f.Type, seen) {
 				return true
 			}
 		}
@@ -673,7 +725,7 @@ func whyIncomparable(t Type) string {
 	case *VecType:
 		return "a vector"
 	case *SIMD:
-		return "a SIMD vector (== compares lanes; use (a == b).All())"
+		return "a SIMD vector (== compares lanes; use (a == b).all())"
 	case *Slice:
 		return "a slice"
 	case *Map, *MapStore:

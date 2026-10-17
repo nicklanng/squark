@@ -1,57 +1,54 @@
 // Package json writes and reads JSON without allocating: encoding appends to caller buffers (an
 // Encoder adds the commas and nesting), decoding is a pull parser whose strings are views of the
 // input or of caller buffers, or are copied into an arena.
-package json
+module json
 
-import (
-	"strconv"
-	"utf8"
-)
+use strconv, utf8
 
-const ErrSyntax = error(1, "json: syntax error")
-const ErrType = error(2, "json: unexpected value type")
-const ErrBuffer = error(3, "json: string does not fit in buffer")
-const ErrFull = error(4, "json: output does not fit in buffer")
-const ErrMisuse = error(5, "json: encoder call out of place")
-const ErrDepth = error(6, "json: nested too deeply")
-const ErrFloat = error(7, "json: NaN or infinity has no JSON form")
-const ErrNoArena = error(8, "json: decoder has no arena")
-const ErrTooLong = error(9, "json: string longer than the limit")
+pub fault Syntax 1 "json: syntax error"
+pub fault Type 2 "json: unexpected value type"
+pub fault Buffer 3 "json: string does not fit in buffer"
+pub fault Full 4 "json: output does not fit in buffer"
+pub fault Misuse 5 "json: encoder call out of place"
+pub fault Depth 6 "json: nested too deeply"
+pub fault Float 7 "json: NaN or infinity has no JSON form"
+pub fault NoArena 8 "json: decoder has no arena"
+pub fault TooLong 9 "json: string longer than the limit"
 
 const hex = "0123456789abcdef"
 
 // special returns the index of the first byte of s at or after i that a JSON string can't hold
 // as it is (a control character, '"' or '\\') or that may need it (a non-ASCII byte), or len(s).
 // It checks 16 bytes at a time.
-func special(s string, i int) int {
+fn special(s str, i int) -> int {
 	for ; i+16 <= len(s); i += 16 {
-		v := uint8x16(s[i:])
-		if j := ((v < 0x20) | (v >= 0x80) | (v == '"') | (v == '\\')).First(); j >= 0 {
+		v := u8x16(s[i:])
+		if j := ((v < 0x20) | (v >= 0x80) | (v == '"') | (v == '\\')).first(); j >= 0 {
 			return i + j
 		}
 	}
 	for ; i < len(s); i++ {
-		if c := s[i]; c < 0x20 || c >= 0x80 || c == '"' || c == '\\' {
+		if c := s[i]; c < 0x20 or c >= 0x80 or c == '"' or c == '\\' {
 			return i
 		}
 	}
 	return len(s)
 }
 
-// AppendString appends s as a quoted, escaped JSON string. Invalid UTF-8 becomes U+FFFD, and
+// append_string appends s as a quoted, escaped JSON string. Invalid UTF-8 becomes U+FFFD, and
 // U+2028 and U+2029 are escaped, as Go does.
-func AppendString(dst []byte, s string) []byte {
+pub fn append_string(dst u8[], s str) -> u8[] {
 	dst = append(dst, '"')
 	start := 0
 	for i := special(s, 0); i < len(s); {
 		c := s[i]
 		if c >= 0x80 {
-			r, size := utf8.DecodeRuneInString(s[i:])
-			if r == utf8.RuneError && size == 1 {
+			r, size := utf8.decode_rune_in_string(s[i:])
+			if r == utf8.rune_error and size == 1 {
 				dst = append(dst, s[start:i]...)
 				dst = append(dst, "\uFFFD"...)
 				start = i + 1
-			} else if r == 0x2028 || r == 0x2029 {
+			} else if r == 0x2028 or r == 0x2029 {
 				dst = append(dst, s[start:i]...)
 				dst = append(dst, '\\', 'u', '2', '0', '2', hex[r&0xF])
 				start = i + size
@@ -81,733 +78,736 @@ func AppendString(dst []byte, s string) []byte {
 	return append(dst, '"')
 }
 
-// WriteString writes s to w as a JSON string literal, escaped as AppendString does, without
+// write_string writes s to w as a JSON string literal, escaped as append_string does, without
 // building it in memory first: runs that need no escaping go straight to w. w is any writer with
-// Write([]byte) and WriteString(string) methods (a *bytes.Buffer, *http.ResponseWriter, net.Conn
+// write(u8[]) and write_string(str) methods (a *bytes.Buffer, *http.ResponseWriter, net.conn
 // or os.File); their results are ignored. On an unbuffered writer (a Conn or File) each run is a
 // write: wrap it in a bytes.Buffer for strings with many escapes.
-func WriteString(w anytype, s string) {
-	var esc [16]byte
-	w.WriteString("\"")
+pub fn write_string(w anytype, s str) {
+	var esc u8[16]
+	w.write_string("\"")
 	start := 0
 	for i := special(s, 0); i < len(s); {
 		size := 1
 		if s[i] >= 0x80 {
-			r, n := utf8.DecodeRuneInString(s[i:])
-			if !(r == utf8.RuneError && n == 1) && r != 0x2028 && r != 0x2029 {
+			r, n := utf8.decode_rune_in_string(s[i:])
+			if not (r == utf8.rune_error and n == 1) and r != 0x2028 and r != 0x2029 {
 				i = special(s, i+n)
 				continue
 			}
 			size = n
 		}
-		w.WriteString(s[start:i])
-		e := AppendString(esc[:0], s[i:i+size]) // one character, quoted and escaped
-		w.Write(e[1 : len(e)-1])
+		w.write_string(s[start:i])
+		e := append_string(esc[:0], s[i:i+size]) // one character, quoted and escaped
+		w.write(e[1 : len(e)-1])
 		start = i + size
 		i = special(s, start)
 	}
-	w.WriteString(s[start:])
-	w.WriteString("\"")
+	w.write_string(s[start:])
+	w.write_string("\"")
 }
 
-// AppendInt appends a JSON number.
-func AppendInt(dst []byte, v int) []byte {
-	return strconv.AppendInt(dst, v)
+// append_int appends a JSON number.
+pub fn append_int(dst u8[], v int) -> u8[] {
+	return strconv.append_int(dst, v)
 }
 
-// AppendBool appends true or false.
-func AppendBool(dst []byte, v bool) []byte {
+// append_bool appends true or false.
+pub fn append_bool(dst u8[], v bool) -> u8[] {
 	if v {
 		return append(dst, "true"...)
 	}
 	return append(dst, "false"...)
 }
 
-// Decoder pulls values out of a JSON document. The first error is kept in Err, and every call
+// Decoder pulls values out of a JSON document. The first error is kept in err, and every call
 // after it fails.
-type Decoder struct {
-	data  []byte
-	pos   int
-	depth int
-	first bool
-	a     arena // for Text and Key; nil from NewDecoder
-	Err   error
+pub struct Decoder {
+	data    u8[]
+	pos     int
+	depth   int
+	first   bool
+	a       arena // for text and key; nil from new_decoder
+	pub err error
 }
 
-// NewDecoder reads data. Strings are decoded into caller buffers (String, Field).
-func NewDecoder(data []byte) Decoder from data {
+// new_decoder reads data. Strings are decoded into caller buffers (String, field).
+pub fn new_decoder(data u8[]) -> Decoder in data {
 	return Decoder{data: data}
 }
 
-// NewDecoderIn reads data and can also decode strings into a, at their exact size (Text, Key), so
+// new_decoder_in reads data and can also decode strings into a, at their exact size (Text, key), so
 // callers don't size buffers. Their results are checked as references into the decoder (into both
 // data and a), so they may be kept wherever both live: with a request's Body and Arena,
-// `title, ok := d.Text()` may go into anything that lives until the response is done, and not into
-// a package variable. String and Field work as with NewDecoder.
-func NewDecoderIn(data []byte, a arena) Decoder from data, a {
+// `title, ok := d.text()` may go into anything that lives until the response is done, and not into
+// a package variable. String and field work as with new_decoder.
+pub fn new_decoder_in(data u8[], a arena) -> Decoder in data, a {
 	return Decoder{data: data, a: a}
 }
 
-func (d *Decoder) fail(err error) {
-	if d.Err == nil {
-		d.Err = err
-	}
-}
-
-func (d *Decoder) ws() {
-	for d.pos < len(d.data) {
-		c := d.data[d.pos]
-		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-			return
+impl Decoder {
+	fn fail(&self, err error) {
+		if self.err == nil {
+			self.err = err
 		}
-		d.pos++
 	}
-}
 
-func (d *Decoder) peek() byte {
-	d.ws()
-	if d.pos >= len(d.data) {
-		return 0
+	fn ws(&self) {
+		while self.pos < len(self.data) {
+			c := self.data[self.pos]
+			if c != ' ' and c != '\t' and c != '\n' and c != '\r' {
+				return
+			}
+			self.pos++
+		}
 	}
-	return d.data[d.pos]
-}
 
-// BeginObject consumes '{'.
-func (d *Decoder) BeginObject() bool {
-	if d.Err != nil || d.peek() != '{' {
-		d.fail(ErrSyntax)
-		return false
+	fn peek(&self) -> u8 {
+		self.ws()
+		if self.pos >= len(self.data) {
+			return 0
+		}
+		return self.data[self.pos]
 	}
-	d.pos++
-	d.first = true
-	return true
-}
 
-// BeginArray consumes '['.
-func (d *Decoder) BeginArray() bool {
-	if d.Err != nil || d.peek() != '[' {
-		d.fail(ErrSyntax)
-		return false
-	}
-	d.pos++
-	d.first = true
-	return true
-}
-
-// More reports whether the current array has another element (and consumes the separator).
-func (d *Decoder) More() bool {
-	if d.Err != nil {
-		return false
-	}
-	c := d.peek()
-	if c == ']' {
-		d.pos++
-		d.first = false
-		return false
-	}
-	if !d.first {
-		if c != ',' {
-			d.fail(ErrSyntax)
+	// begin_object consumes '{'.
+	pub fn begin_object(&self) -> bool {
+		if self.err != nil or self.peek() != '{' {
+			self.fail(Syntax)
 			return false
 		}
-		d.pos++
+		self.pos++
+		self.first = true
+		return true
 	}
-	d.first = false
-	return true
-}
 
-// Field reads the next object key into keybuf, returning false at the end of the object.
-func (d *Decoder) Field(keybuf []byte) (string, bool) {
-	if !d.nextField() {
-		return "", false
-	}
-	key, ok := d.String(keybuf)
-	if !ok || !d.colon() {
-		return "", false
-	}
-	return key, true
-}
-
-// Key reads the next object key, as Field does, into the decoder's arena (NewDecoderIn) at its
-// exact size (see NewDecoderIn for how long it may be kept). ErrNoArena on a decoder from
-// NewDecoder, ErrBuffer if the arena is full.
-func (d *Decoder) Key() (string, bool) from d {
-	if !d.nextField() {
-		return "", false
-	}
-	key, ok := d.Text()
-	if !ok || !d.colon() {
-		return "", false
-	}
-	return key, true
-}
-
-// nextField consumes the comma before an object's next key, or the '}' at its end (false).
-func (d *Decoder) nextField() bool {
-	if d.Err != nil {
-		return false
-	}
-	c := d.peek()
-	if c == '}' {
-		d.pos++
-		d.first = false
-		return false
-	}
-	if !d.first {
-		if c != ',' {
-			d.fail(ErrSyntax)
+	// begin_array consumes '['.
+	pub fn begin_array(&self) -> bool {
+		if self.err != nil or self.peek() != '[' {
+			self.fail(Syntax)
 			return false
 		}
-		d.pos++
+		self.pos++
+		self.first = true
+		return true
 	}
-	d.first = false
-	return true
-}
 
-// colon consumes the ':' after a key.
-func (d *Decoder) colon() bool {
-	if d.peek() != ':' {
-		d.fail(ErrSyntax)
-		return false
+	// more reports whether the current array has another element (and consumes the separator).
+	pub fn more(&self) -> bool {
+		if self.err != nil {
+			return false
+		}
+		c := self.peek()
+		if c == ']' {
+			self.pos++
+			self.first = false
+			return false
+		}
+		if not self.first {
+			if c != ',' {
+				self.fail(Syntax)
+				return false
+			}
+			self.pos++
+		}
+		self.first = false
+		return true
 	}
-	d.pos++
-	return true
-}
 
-// String decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD,
-// as in Go. ErrBuffer if the decoded string doesn't fit in buf.
-func (d *Decoder) String(buf []byte) (string, bool) from buf {
-	if !d.quote() {
-		return "", false
+	// field reads the next object key into keybuf, returning false at the end of the object.
+	pub fn field(&self, keybuf u8[]) -> (str, bool) {
+		if not self.next_field() {
+			return "", false
+		}
+		key, ok := self.string(keybuf)
+		if not ok or not self.colon() {
+			return "", false
+		}
+		return key, true
 	}
-	out := buf[:0]
-	for {
-		// a run of bytes that are their own characters (special finds the next that may not be)
-		if j := special(string(d.data), d.pos); j > d.pos {
-			if k := cap(out) - len(out); k < j-d.pos {
-				d.pos += k + 1 // just after the first byte that doesn't fit, as below
-				d.fail(ErrBuffer)
+
+	// key reads the next object key, as field does, into the decoder's arena (new_decoder_in) at its
+	// exact size (see new_decoder_in for how long it may be kept). NoArena on a decoder from
+	// new_decoder, Buffer if the arena is full.
+	pub fn key(&self) -> (str, bool) in self {
+		if not self.next_field() {
+			return "", false
+		}
+		key, ok := self.text()
+		if not ok or not self.colon() {
+			return "", false
+		}
+		return key, true
+	}
+
+	// next_field consumes the comma before an object's next key, or the '}' at its end (false).
+	fn next_field(&self) -> bool {
+		if self.err != nil {
+			return false
+		}
+		c := self.peek()
+		if c == '}' {
+			self.pos++
+			self.first = false
+			return false
+		}
+		if not self.first {
+			if c != ',' {
+				self.fail(Syntax)
+				return false
+			}
+			self.pos++
+		}
+		self.first = false
+		return true
+	}
+
+	// colon consumes the ':' after a key.
+	fn colon(&self) -> bool {
+		if self.peek() != ':' {
+			self.fail(Syntax)
+			return false
+		}
+		self.pos++
+		return true
+	}
+
+	// string decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD,
+	// as in Go. Buffer if the decoded string doesn't fit in buf.
+	pub fn string(&self, buf u8[]) -> (str, bool) in buf {
+		if not self.quote() {
+			return "", false
+		}
+		out := buf[:0]
+		loop {
+			// a run of bytes that are their own characters (special finds the next that may not be)
+			if j := special(str(self.data), self.pos); j > self.pos {
+				if k := cap(out) - len(out); k < j-self.pos {
+					self.pos += k + 1 // just after the first byte that doesn't fit, as below
+					self.fail(Buffer)
+					return "", false
+				}
+				out = append(out, self.data[self.pos:j]...)
+				self.pos = j
+			}
+			r, n := self.char()
+			if n < 0 {
+				if self.err != nil {
+					return "", false
+				}
+				return str(out), true
+			}
+			size := n
+			if n == 0 {
+				size = utf8.rune_len(r)
+			}
+			if cap(out)-len(out) < size {
+				if n > 0 {
+					self.pos -= n - 1 // just after the character's first byte
+				}
+				self.fail(Buffer)
 				return "", false
 			}
-			out = append(out, d.data[d.pos:j]...)
-			d.pos = j
-		}
-		r, n := d.char()
-		if n < 0 {
-			if d.Err != nil {
-				return "", false
-			}
-			return string(out), true
-		}
-		size := n
-		if n == 0 {
-			size = utf8.RuneLen(r)
-		}
-		if cap(out)-len(out) < size {
 			if n > 0 {
-				d.pos -= n - 1 // just after the character's first byte
-			}
-			d.fail(ErrBuffer)
-			return "", false
-		}
-		if n > 0 {
-			out = append(out, d.data[d.pos-n:d.pos]...)
-		} else {
-			out = utf8.AppendRune(out, r)
-		}
-	}
-}
-
-// Text decodes a JSON string, as String does, into the decoder's arena (NewDecoderIn) at its exact
-// size (see NewDecoderIn for how long it may be kept). ErrNoArena on a decoder from NewDecoder,
-// ErrBuffer if the arena is full; the decoded string is measured first, so a full arena uses none
-// of it. TextMax also bounds the length.
-func (d *Decoder) Text() (string, bool) from d {
-	return d.TextMax(maxText)
-}
-
-// maxText is Text's limit: more than any string in memory could hold.
-const maxText = 1 << 62
-
-// TextMax is Text for a string of at most max bytes, decoded (as UTF-8, invalid bytes counting as
-// the 3 of U+FFFD): a longer one sets ErrTooLong and uses none of the arena, so one string in
-// untrusted input can't fill it. After ErrTooLong or ErrBuffer the decoder is at the string's
-// opening quote (Line and Offset point at it).
-func (d *Decoder) TextMax(max int) (string, bool) from d {
-	if d.Err != nil {
-		return "", false
-	}
-	if d.a == nil {
-		d.fail(ErrNoArena)
-		return "", false
-	}
-	d.ws()
-	start := d.pos
-	if !d.quote() {
-		return "", false
-	}
-	n := 0 // a first pass measures the decoded string, up to max
-	for {
-		if j := special(string(d.data), d.pos); j > d.pos {
-			n += j - d.pos
-			d.pos = j
-			if n > max {
-				d.pos = start
-				d.fail(ErrTooLong)
-				return "", false
-			}
-		}
-		r, k := d.char()
-		if k < 0 {
-			break
-		}
-		if k > 0 {
-			n += k
-		} else {
-			n += utf8.RuneLen(r)
-		}
-		if n > max {
-			d.pos = start
-			d.fail(ErrTooLong)
-			return "", false
-		}
-	}
-	if d.Err != nil {
-		return "", false
-	}
-	d.pos = start
-	if d.a.Left() < n {
-		d.fail(ErrBuffer)
-		return "", false
-	}
-	buf := make([]byte, n) in d.a
-	return d.String(buf)
-}
-
-// quote consumes the '"' that starts a string (ErrType if the next value isn't one).
-func (d *Decoder) quote() bool {
-	if d.Err != nil {
-		return false
-	}
-	if d.peek() != '"' {
-		d.fail(ErrType)
-		return false
-	}
-	d.pos++
-	return true
-}
-
-// char decodes the next character of a string at d.pos. It returns n > 0 when the n bytes just
-// consumed (d.data[d.pos-n:d.pos], an ASCII byte or a valid UTF-8 sequence) are the character as
-// they are, n == 0 with the rune r for an escape (or U+FFFD for an invalid byte), and n < 0 at the
-// closing quote or after an error (Err set).
-func (d *Decoder) char() (rune, int) {
-	if d.pos >= len(d.data) {
-		d.fail(ErrSyntax)
-		return 0, -1
-	}
-	c := d.data[d.pos]
-	d.pos++
-	if c == '"' {
-		return 0, -1
-	}
-	if c < 0x20 {
-		d.fail(ErrSyntax)
-		return 0, -1
-	}
-	if c < 0x80 && c != '\\' {
-		return 0, 1
-	}
-	if c >= 0x80 { // a valid UTF-8 sequence as it is; an invalid byte becomes U+FFFD
-		r, size := utf8.DecodeRuneInString(string(d.data[d.pos-1:]))
-		if r == utf8.RuneError && size == 1 {
-			return utf8.RuneError, 0
-		}
-		d.pos += size - 1
-		return 0, size
-	}
-	if d.pos >= len(d.data) {
-		d.fail(ErrSyntax)
-		return 0, -1
-	}
-	e := d.data[d.pos]
-	d.pos++
-	var r rune
-	switch e {
-	case '"', '\\', '/':
-		r = rune(e)
-	case 'n':
-		r = '\n'
-	case 't':
-		r = '\t'
-	case 'r':
-		r = '\r'
-	case 'b':
-		r = 8
-	case 'f':
-		r = 12
-	case 'u':
-		r = d.hex4()
-		if d.Err != nil {
-			return 0, -1
-		}
-		if r >= 0xD800 && r < 0xE000 {
-			// a high surrogate must be followed by a low one; anything else is U+FFFD
-			hi := r
-			r = utf8.RuneError
-			if hi < 0xDC00 && d.pos+1 < len(d.data) && d.data[d.pos] == '\\' && d.data[d.pos+1] == 'u' {
-				save := d.pos
-				d.pos += 2
-				lo := d.hex4()
-				if d.Err != nil {
-					return 0, -1
-				}
-				if lo >= 0xDC00 && lo < 0xE000 {
-					r = 0x10000 + (hi-0xD800)<<10 + (lo - 0xDC00)
-				} else {
-					d.pos = save // not a pair: that escape is decoded on its own
-				}
-			}
-		}
-	default:
-		d.fail(ErrSyntax)
-		return 0, -1
-	}
-	return r, 0
-}
-
-func (d *Decoder) hex4() rune {
-	var r rune
-	for i := 0; i < 4; i++ {
-		if d.pos >= len(d.data) {
-			d.fail(ErrSyntax)
-			return utf8.RuneError
-		}
-		c := d.data[d.pos]
-		d.pos++
-		switch {
-		case c >= '0' && c <= '9':
-			r = r*16 + rune(c-'0')
-		case c >= 'a' && c <= 'f':
-			r = r*16 + rune(c-'a'+10)
-		case c >= 'A' && c <= 'F':
-			r = r*16 + rune(c-'A'+10)
-		default:
-			d.fail(ErrSyntax)
-			return utf8.RuneError
-		}
-	}
-	return r
-}
-
-// number scans a JSON number at d.pos (RFC 8259: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?)
-// and returns where it ends and whether it is an integer (no fraction or exponent).
-func (d *Decoder) number() (int, bool) {
-	p := d.pos
-	if p < len(d.data) && d.data[p] == '-' {
-		p++
-	}
-	switch {
-	case p < len(d.data) && d.data[p] == '0':
-		p++
-	case p < len(d.data) && d.data[p] >= '1' && d.data[p] <= '9':
-		p = d.digits(p)
-	default:
-		d.fail(ErrSyntax)
-		return p, false
-	}
-	isInt := true
-	if p < len(d.data) && d.data[p] == '.' {
-		q := d.digits(p + 1)
-		if q == p+1 {
-			d.fail(ErrSyntax)
-			return q, false
-		}
-		p, isInt = q, false
-	}
-	if p < len(d.data) && (d.data[p] == 'e' || d.data[p] == 'E') {
-		p++
-		if p < len(d.data) && (d.data[p] == '+' || d.data[p] == '-') {
-			p++
-		}
-		q := d.digits(p)
-		if q == p {
-			d.fail(ErrSyntax)
-			return q, false
-		}
-		p, isInt = q, false
-	}
-	return p, isInt
-}
-
-// digits returns the end of the run of digits starting at p.
-func (d *Decoder) digits(p int) int {
-	for p < len(d.data) && d.data[p] >= '0' && d.data[p] <= '9' {
-		p++
-	}
-	return p
-}
-
-// delim checks that a number or literal ends here: at the end of the data, whitespace, or the
-// next separator (so 1x, truex and nullable are errors, not 1, true and null).
-func (d *Decoder) delim() bool {
-	if d.pos >= len(d.data) {
-		return true
-	}
-	switch d.data[d.pos] {
-	case ' ', '\t', '\n', '\r', ',', ']', '}':
-		return true
-	}
-	d.fail(ErrSyntax)
-	return false
-}
-
-// literal consumes word (true, false or null) if it is next, followed by a delimiter.
-func (d *Decoder) literal(word string) bool {
-	if len(d.data)-d.pos < len(word) || string(d.data[d.pos:d.pos+len(word)]) != word {
-		return false
-	}
-	d.pos += len(word)
-	return d.delim()
-}
-
-// Int decodes an integer. A number with a fraction or exponent is ErrType (it is consumed).
-func (d *Decoder) Int() (int, bool) {
-	if d.Err != nil {
-		return 0, false
-	}
-	c := d.peek()
-	if c != '-' && (c < '0' || c > '9') {
-		d.fail(ErrType)
-		return 0, false
-	}
-	start := d.pos
-	end, isInt := d.number()
-	if d.Err != nil {
-		return 0, false
-	}
-	d.pos = end
-	if !isInt || !d.delim() {
-		d.fail(ErrType)
-		return 0, false
-	}
-	v, err := strconv.Atoi(string(d.data[start:end]))
-	if err != nil {
-		d.fail(ErrType) // out of range
-		return 0, false
-	}
-	return v, true
-}
-
-// Float decodes a number as the nearest float64 (an integer too). Too large for a float64 is
-// ErrType.
-func (d *Decoder) Float() (float64, bool) {
-	if d.Err != nil {
-		return 0, false
-	}
-	c := d.peek()
-	if c != '-' && (c < '0' || c > '9') {
-		d.fail(ErrType)
-		return 0, false
-	}
-	start := d.pos
-	end, _ := d.number()
-	if d.Err != nil {
-		return 0, false
-	}
-	d.pos = end
-	if !d.delim() {
-		return 0, false
-	}
-	f, err := strconv.ParseFloat(string(d.data[start:end]))
-	if err != nil {
-		d.fail(ErrType)
-		return 0, false
-	}
-	return f, true
-}
-
-// Bool decodes true or false.
-func (d *Decoder) Bool() (bool, bool) {
-	if d.Err != nil {
-		return false, false
-	}
-	d.ws()
-	if d.literal("true") {
-		return true, true
-	}
-	if d.Err == nil && d.literal("false") {
-		return false, true
-	}
-	d.fail(ErrType)
-	return false, false
-}
-
-// Null consumes a null if it is the next value and reports whether it was (a missing or optional
-// value; anything else is left for the other methods).
-func (d *Decoder) Null() bool {
-	if d.Err != nil || d.peek() != 'n' {
-		return false
-	}
-	return d.literal("null")
-}
-
-// MaxDepth is how deeply Skip follows nested arrays and objects (a deeper value is ErrSyntax),
-// and how deeply an Encoder nests them (ErrDepth). Neither allocates, so each keeps its bracket
-// stack in a fixed array of MaxDepth bits.
-const MaxDepth = 1024
-
-// Skip skips one value of any type, checking that it is valid JSON: brackets match, commas and
-// colons are where they belong, escapes are valid and strings hold no raw control characters
-// (invalid UTF-8 is accepted, as by String). It works iteratively; arrays and objects may nest up
-// to MaxDepth deep.
-func (d *Decoder) Skip() bool {
-	if d.Err != nil {
-		return false
-	}
-	var objs [MaxDepth / 64]uint64 // bit i: level i is an object (else an array)
-	depth := 0
-	for {
-		// a value
-		c := d.peek()
-		switch {
-		case c == '{' || c == '[':
-			if depth == MaxDepth {
-				d.fail(ErrSyntax)
-				return false
-			}
-			obj := c == '{'
-			if obj {
-				objs[depth/64] |= 1 << uint(depth%64)
+				out = append(out, self.data[self.pos-n:self.pos]...)
 			} else {
-				objs[depth/64] &^= 1 << uint(depth%64)
-			}
-			depth++
-			d.pos++
-			if e := d.peek(); e != '}' && e != ']' {
-				if obj && !d.skipKey() {
-					return false
-				}
-				continue // the first element
-			}
-			// empty: its closer is checked below, as after an element
-		case c == '"':
-			if !d.skipString() {
-				return false
-			}
-		case c == 't' || c == 'f' || c == 'n':
-			if !d.literal("true") && d.Err == nil && !d.literal("false") && d.Err == nil && !d.literal("null") {
-				d.fail(ErrSyntax)
-			}
-			if d.Err != nil {
-				return false
-			}
-		default:
-			end, _ := d.number()
-			if d.Err != nil {
-				return false
-			}
-			d.pos = end
-			if !d.delim() {
-				return false
+				out = utf8.append_rune(out, r)
 			}
 		}
-		// after a value: close finished arrays and objects, or take the comma before the next element
-		for {
-			if depth == 0 {
-				return true
-			}
-			obj := objs[(depth-1)/64]&(1<<uint((depth-1)%64)) != 0
-			c = d.peek()
-			if c == ',' {
-				d.pos++
-				if obj && !d.skipKey() {
-					return false
+	}
+
+	// text decodes a JSON string, as string does, into the decoder's arena (new_decoder_in) at its exact
+	// size (see new_decoder_in for how long it may be kept). NoArena on a decoder from new_decoder,
+	// Buffer if the arena is full; the decoded string is measured first, so a full arena uses none
+	// of it. text_max also bounds the length.
+	pub fn text(&self) -> (str, bool) in self {
+		return self.text_max(max_text)
+	}
+
+	// text_max is text for a string of at most max bytes, decoded (as UTF-8, invalid bytes counting as
+	// the 3 of U+FFFD): a longer one sets TooLong and uses none of the arena, so one string in
+	// untrusted input can't fill it. After TooLong or Buffer the decoder is at the string's
+	// opening quote (Line and offset point at it).
+	pub fn text_max(&self, max int) -> (str, bool) in self {
+		if self.err != nil {
+			return "", false
+		}
+		if self.a == nil {
+			self.fail(NoArena)
+			return "", false
+		}
+		self.ws()
+		start := self.pos
+		if not self.quote() {
+			return "", false
+		}
+		n := 0 // a first pass measures the decoded string, up to max
+		loop {
+			if j := special(str(self.data), self.pos); j > self.pos {
+				n += j - self.pos
+				self.pos = j
+				if n > max {
+					self.pos = start
+					self.fail(TooLong)
+					return "", false
 				}
+			}
+			r, k := self.char()
+			if k < 0 {
 				break
 			}
-			if (obj && c == '}') || (!obj && c == ']') {
-				d.pos++
-				depth--
-				continue
+			if k > 0 {
+				n += k
+			} else {
+				n += utf8.rune_len(r)
 			}
-			d.fail(ErrSyntax)
+			if n > max {
+				self.pos = start
+				self.fail(TooLong)
+				return "", false
+			}
+		}
+		if self.err != nil {
+			return "", false
+		}
+		self.pos = start
+		if self.a.left() < n {
+			self.fail(Buffer)
+			return "", false
+		}
+		buf := make(u8[], n) in self.a
+		return self.string(buf)
+	}
+
+	// quote consumes the '"' that starts a string (Type if the next value isn't one).
+	fn quote(&self) -> bool {
+		if self.err != nil {
 			return false
 		}
-	}
-}
-
-// skipKey skips an object key and the colon after it.
-func (d *Decoder) skipKey() bool {
-	if d.peek() != '"' || !d.skipString() {
-		d.fail(ErrSyntax)
-		return false
-	}
-	if d.peek() != ':' {
-		d.fail(ErrSyntax)
-		return false
-	}
-	d.pos++
-	return true
-}
-
-// skipString skips the string at d.pos, checking its escapes and that it holds no control
-// characters.
-func (d *Decoder) skipString() bool {
-	d.pos++
-	for d.pos < len(d.data) {
-		if d.pos = special(string(d.data), d.pos); d.pos >= len(d.data) {
-			break
+		if self.peek() != '"' {
+			self.fail(Type)
+			return false
 		}
-		c := d.data[d.pos]
-		d.pos++
+		self.pos++
+		return true
+	}
+
+	// char decodes the next character of a string at d.pos. It returns n > 0 when the n bytes just
+	// consumed (d.data[d.pos-n:d.pos], an ASCII byte or a valid UTF-8 sequence) are the character as
+	// they are, n == 0 with the rune r for an escape (or U+FFFD for an invalid byte), and n < 0 at the
+	// closing quote or after an error (Err set).
+	fn char(&self) -> (rune, int) {
+		if self.pos >= len(self.data) {
+			self.fail(Syntax)
+			return 0, -1
+		}
+		c := self.data[self.pos]
+		self.pos++
 		if c == '"' {
-			return true
+			return 0, -1
 		}
 		if c < 0x20 {
-			d.fail(ErrSyntax)
-			return false
+			self.fail(Syntax)
+			return 0, -1
 		}
-		if c != '\\' {
-			continue
+		if c < 0x80 and c != '\\' {
+			return 0, 1
 		}
-		if d.pos >= len(d.data) {
-			break
+		if c >= 0x80 { // a valid UTF-8 sequence as it is; an invalid byte becomes U+FFFD
+			r, size := utf8.decode_rune_in_string(str(self.data[self.pos-1:]))
+			if r == utf8.rune_error and size == 1 {
+				return utf8.rune_error, 0
+			}
+			self.pos += size - 1
+			return 0, size
 		}
-		e := d.data[d.pos]
-		d.pos++
+		if self.pos >= len(self.data) {
+			self.fail(Syntax)
+			return 0, -1
+		}
+		e := self.data[self.pos]
+		self.pos++
+		var r rune
 		switch e {
-		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+		case '"', '\\', '/':
+			r = rune(e)
+		case 'n':
+			r = '\n'
+		case 't':
+			r = '\t'
+		case 'r':
+			r = '\r'
+		case 'b':
+			r = 8
+		case 'f':
+			r = 12
 		case 'u':
-			d.hex4()
-			if d.Err != nil {
-				return false
+			r = self.hex4()
+			if self.err != nil {
+				return 0, -1
+			}
+			if r >= 0xD800 and r < 0xE000 {
+				// a high surrogate must be followed by a low one; anything else is U+FFFD
+				hi := r
+				r = utf8.rune_error
+				if hi < 0xDC00 and self.pos+1 < len(self.data) and self.data[self.pos] == '\\' and self.data[self.pos+1] == 'u' {
+					save := self.pos
+					self.pos += 2
+					lo := self.hex4()
+					if self.err != nil {
+						return 0, -1
+					}
+					if lo >= 0xDC00 and lo < 0xE000 {
+						r = 0x10000 + (hi-0xD800)<<10 + (lo - 0xDC00)
+					} else {
+						self.pos = save // not a pair: that escape is decoded on its own
+					}
+				}
 			}
 		default:
-			d.fail(ErrSyntax)
+			self.fail(Syntax)
+			return 0, -1
+		}
+		return r, 0
+	}
+
+	fn hex4(&self) -> rune {
+		var r rune
+		for i := 0; i < 4; i++ {
+			if self.pos >= len(self.data) {
+				self.fail(Syntax)
+				return utf8.rune_error
+			}
+			c := self.data[self.pos]
+			self.pos++
+			switch {
+			case c >= '0' and c <= '9':
+				r = r*16 + rune(c-'0')
+			case c >= 'a' and c <= 'f':
+				r = r*16 + rune(c-'a'+10)
+			case c >= 'A' and c <= 'F':
+				r = r*16 + rune(c-'A'+10)
+			default:
+				self.fail(Syntax)
+				return utf8.rune_error
+			}
+		}
+		return r
+	}
+
+	// number scans a JSON number at d.pos (RFC 8259: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?)
+	// and returns where it ends and whether it is an integer (no fraction or exponent).
+	fn number(&self) -> (int, bool) {
+		p := self.pos
+		if p < len(self.data) and self.data[p] == '-' {
+			p++
+		}
+		switch {
+		case p < len(self.data) and self.data[p] == '0':
+			p++
+		case p < len(self.data) and self.data[p] >= '1' and self.data[p] <= '9':
+			p = self.digits(p)
+		default:
+			self.fail(Syntax)
+			return p, false
+		}
+		is_int := true
+		if p < len(self.data) and self.data[p] == '.' {
+			q := self.digits(p + 1)
+			if q == p+1 {
+				self.fail(Syntax)
+				return q, false
+			}
+			p, is_int = q, false
+		}
+		if p < len(self.data) and (self.data[p] == 'e' or self.data[p] == 'E') {
+			p++
+			if p < len(self.data) and (self.data[p] == '+' or self.data[p] == '-') {
+				p++
+			}
+			q := self.digits(p)
+			if q == p {
+				self.fail(Syntax)
+				return q, false
+			}
+			p, is_int = q, false
+		}
+		return p, is_int
+	}
+
+	// digits returns the end of the run of digits starting at p.
+	fn digits(&self, p int) -> int {
+		while p < len(self.data) and self.data[p] >= '0' and self.data[p] <= '9' {
+			p++
+		}
+		return p
+	}
+
+	// delim checks that a number or literal ends here: at the end of the data, whitespace, or the
+	// next separator (so 1x, truex and nullable are errors, not 1, true and null).
+	fn delim(&self) -> bool {
+		if self.pos >= len(self.data) {
+			return true
+		}
+		switch self.data[self.pos] {
+		case ' ', '\t', '\n', '\r', ',', ']', '}':
+			return true
+		}
+		self.fail(Syntax)
+		return false
+	}
+
+	// literal consumes word (true, false or null) if it is next, followed by a delimiter.
+	fn literal(&self, word str) -> bool {
+		if len(self.data)-self.pos < len(word) or str(self.data[self.pos:self.pos+len(word)]) != word {
 			return false
 		}
+		self.pos += len(word)
+		return self.delim()
 	}
-	d.fail(ErrSyntax)
-	return false
-}
 
-// Offset returns how many bytes of the input have been consumed (at most len(data)).
-func (d *Decoder) Offset() int { return min(d.pos, len(d.data)) }
+	// int decodes an integer. A number with a fraction or exponent is Type (it is consumed).
+	pub fn int(&self) -> (int, bool) {
+		if self.err != nil {
+			return 0, false
+		}
+		c := self.peek()
+		if c != '-' and (c < '0' or c > '9') {
+			self.fail(Type)
+			return 0, false
+		}
+		start := self.pos
+		end, is_int := self.number()
+		if self.err != nil {
+			return 0, false
+		}
+		self.pos = end
+		if not is_int or not self.delim() {
+			self.fail(Type)
+			return 0, false
+		}
+		v, err := strconv.atoi(str(self.data[start:end]))
+		if err != nil {
+			self.fail(Type) // out of range
+			return 0, false
+		}
+		return v, true
+	}
 
-// Line returns the 1-based line the decoder has reached (where an error was found, after one).
-func (d *Decoder) Line() int {
-	n := 1
-	for i := 0; i < d.pos && i < len(d.data); i++ {
-		if d.data[i] == '\n' {
-			n++
+	// float decodes a number as the nearest float64 (an integer too). Too large for a float64 is
+	// Type.
+	pub fn float(&self) -> (f64, bool) {
+		if self.err != nil {
+			return 0, false
+		}
+		c := self.peek()
+		if c != '-' and (c < '0' or c > '9') {
+			self.fail(Type)
+			return 0, false
+		}
+		start := self.pos
+		end, _ := self.number()
+		if self.err != nil {
+			return 0, false
+		}
+		self.pos = end
+		if not self.delim() {
+			return 0, false
+		}
+		f, err := strconv.parse_float(str(self.data[start:end]))
+		if err != nil {
+			self.fail(Type)
+			return 0, false
+		}
+		return f, true
+	}
+
+	// bool decodes true or false.
+	pub fn bool(&self) -> (bool, bool) {
+		if self.err != nil {
+			return false, false
+		}
+		self.ws()
+		if self.literal("true") {
+			return true, true
+		}
+		if self.err == nil and self.literal("false") {
+			return false, true
+		}
+		self.fail(Type)
+		return false, false
+	}
+
+	// null consumes a null if it is the next value and reports whether it was (a missing or optional
+	// value; anything else is left for the other methods).
+	pub fn null(&self) -> bool {
+		if self.err != nil or self.peek() != 'n' {
+			return false
+		}
+		return self.literal("null")
+	}
+
+	// skip skips one value of any type, checking that it is valid JSON: brackets match, commas and
+	// colons are where they belong, escapes are valid and strings hold no raw control characters
+	// (invalid UTF-8 is accepted, as by string). It works iteratively; arrays and objects may nest up
+	// to max_depth deep.
+	pub fn skip(&self) -> bool {
+		if self.err != nil {
+			return false
+		}
+		var objs u64[max_depth / 64] // bit i: level i is an object (else an array)
+		depth := 0
+		loop {
+			// a value
+			c := self.peek()
+			switch {
+			case c == '{' or c == '[':
+				if depth == max_depth {
+					self.fail(Syntax)
+					return false
+				}
+				obj := c == '{'
+				if obj {
+					objs[depth/64] |= 1 << uint(depth%64)
+				} else {
+					objs[depth/64] &^= 1 << uint(depth%64)
+				}
+				depth++
+				self.pos++
+				if e := self.peek(); e != '}' and e != ']' {
+					if obj and not self.skip_key() {
+						return false
+					}
+					continue // the first element
+				}
+				// empty: its closer is checked below, as after an element
+			case c == '"':
+				if not self.skip_string() {
+					return false
+				}
+			case c == 't' or c == 'f' or c == 'n':
+				if not self.literal("true") and self.err == nil and not self.literal("false") and self.err == nil and not self.literal("null") {
+					self.fail(Syntax)
+				}
+				if self.err != nil {
+					return false
+				}
+			default:
+				end, _ := self.number()
+				if self.err != nil {
+					return false
+				}
+				self.pos = end
+				if not self.delim() {
+					return false
+				}
+			}
+			// after a value: close finished arrays and objects, or take the comma before the next element
+			loop {
+				if depth == 0 {
+					return true
+				}
+				obj := objs[(depth-1)/64]&(1<<uint((depth-1)%64)) != 0
+				c = self.peek()
+				if c == ',' {
+					self.pos++
+					if obj and not self.skip_key() {
+						return false
+					}
+					break
+				}
+				if (obj and c == '}') or (not obj and c == ']') {
+					self.pos++
+					depth--
+					continue
+				}
+				self.fail(Syntax)
+				return false
+			}
 		}
 	}
-	return n
+
+	// skip_key skips an object key and the colon after it.
+	fn skip_key(&self) -> bool {
+		if self.peek() != '"' or not self.skip_string() {
+			self.fail(Syntax)
+			return false
+		}
+		if self.peek() != ':' {
+			self.fail(Syntax)
+			return false
+		}
+		self.pos++
+		return true
+	}
+
+	// skip_string skips the string at d.pos, checking its escapes and that it holds no control
+	// characters.
+	fn skip_string(&self) -> bool {
+		self.pos++
+		while self.pos < len(self.data) {
+			if self.pos = special(str(self.data), self.pos); self.pos >= len(self.data) {
+				break
+			}
+			c := self.data[self.pos]
+			self.pos++
+			if c == '"' {
+				return true
+			}
+			if c < 0x20 {
+				self.fail(Syntax)
+				return false
+			}
+			if c != '\\' {
+				continue
+			}
+			if self.pos >= len(self.data) {
+				break
+			}
+			e := self.data[self.pos]
+			self.pos++
+			switch e {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			case 'u':
+				self.hex4()
+				if self.err != nil {
+					return false
+				}
+			default:
+				self.fail(Syntax)
+				return false
+			}
+		}
+		self.fail(Syntax)
+		return false
+	}
+
+	// offset returns how many bytes of the input have been consumed (at most len(data)).
+	pub fn offset(&self) -> int { return min(self.pos, len(self.data)) }
+
+	// line returns the 1-based line the decoder has reached (where an error was found, after one).
+	pub fn line(&self) -> int {
+		n := 1
+		for i := 0; i < self.pos and i < len(self.data); i++ {
+			if self.data[i] == '\n' {
+				n++
+			}
+		}
+		return n
+	}
+
+	// end reports whether only whitespace remains.
+	pub fn end(&self) -> bool {
+		self.ws()
+		return self.err == nil and self.pos == len(self.data)
+	}
 }
 
-// End reports whether only whitespace remains.
-func (d *Decoder) End() bool {
-	d.ws()
-	return d.Err == nil && d.pos == len(d.data)
-}
+// max_text is text's limit: more than any string in memory could hold.
+const max_text = 1 << 62
+
+// max_depth is how deeply skip follows nested arrays and objects (a deeper value is Syntax),
+// and how deeply an Encoder nests them (Depth). Neither allocates, so each keeps its bracket
+// stack in a fixed array of max_depth bits.
+pub const max_depth = 1024
+

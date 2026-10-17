@@ -1,0 +1,5 @@
+program
+
+type Celsius f64 // ERROR "a named type is declared Celsius: T (struct Celsius { ... } for a struct)"
+
+fn main() {}

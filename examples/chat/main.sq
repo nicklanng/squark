@@ -10,255 +10,253 @@
 //   - shared channels between threads, carrying fixed-size values
 //   - state owned by one goroutine (the hub's room) instead of locks
 //   - a line protocol read with bufio.Reader, with login and idle timeouts
-//   - select with time.After, so one stuck relay can't hold up the room
-package main
+//   - select with time.after, so one stuck relay can't hold up the room
+program {
+	threads 4
+}
 
-import (
-	"bufio"
-	"net"
-	"os"
-	"runtime"
-	"sort"
-	"strings"
-	"time"
-)
-
-threads 4
+use bufio, net, os, runtime, sort, strings, time
 
 const (
-	MaxLine      = 256 // longest line a client may send, without its newline
-	MaxNick      = 16
-	MaxClients   = 16
-	Relays       = 4 // shards that take clients: one shared channel each
-	LoginTimeout = 30 * time.Second
-	IdleTimeout  = 5 * time.Minute
+	max_line      = 256 // longest line a client may send, without its newline
+	max_nick      = 16
+	max_clients   = 16
+	num_relays    = 4 // shards that take clients: one shared channel each
+	login_timeout = 30 * time.second
+	idle_timeout  = 5 * time.minute
 )
 
-const (
+// Op is what a Msg asks for.
+enum Op {
 	// sessions (any shard) to the hub (shard 0)
-	EvAccept   = iota // Conn is a new client
-	EvLine            // client ID said Line
-	EvNotice          // tell client ID Line, and only them
-	EvLeave           // client ID is gone; Line is the last thing to tell them, if anything
-	EvShutdown        // stop once the room is empty
+	accept   // conn is a new client
+	line     // client id said line
+	notice   // tell client id line, and only them
+	leave    // client id is gone; line is the last thing to tell them, if anything
+	shutdown // stop once the room is empty
 	// the hub to the relay of a client's shard
-	DoAttach // Conn is client ID: start its session here
-	DoSend   // write Line to client ID
-	DoDetach // write Line (if any) to client ID, then close it
-)
+	attach // conn is client id: start its session here
+	send   // write line to client id
+	detach // write line (if any) to client id, then close it
+}
 
 // Line is text that can cross threads: room for a nick, ": ", a client's line and a newline.
-type Line struct {
-	N    int
-	Text [MaxNick + 2 + MaxLine + 1]byte
+struct Line {
+	n    int
+	text u8[max_nick + 2 + max_line + 1]
 }
 
-type Msg struct {
-	Kind, ID int
-	Conn     net.Conn
-	Line     Line
+impl Line {
+	fn string(&self) -> str { return str(self.text[:self.n]) }
+
+	fn set(&self, parts ...str) {
+		self.n = 0
+		self.add(parts...)
+	}
+
+	// add appends the parts to l, keeping the last byte free for the newline.
+	fn add(&self, parts ...str) {
+		for s in parts {
+			self.n += copy(self.text[self.n:len(self.text)-1], s)
+		}
+	}
 }
 
-type Client struct {
-	Used, Joined bool
-	Shard        int
-	Nick         [MaxNick]byte
-	NickLen      int
+struct Msg {
+	kind Op
+	id   int
+	conn net.Conn
+	line Line
+}
+
+struct Client {
+	used, joined bool
+	shard        int
+	nick_buf     u8[max_nick]
+	nick_len     int
+}
+
+impl Client {
+	fn nick(&self) -> str { return str(self.nick_buf[:self.nick_len]) }
 }
 
 // Hub is the room. It lives on the hub task's stack: no other goroutine can touch it.
-type Hub struct {
-	room               [MaxClients]Client
+struct Hub {
+	room               Client[max_clients]
 	online, shards, rr int
 	sent, dropped      int
+}
+
+impl Hub {
+	fn send(&self, kind Op, id int, line *Line) {
+		select {
+		case relays[self.room[id].shard] <- Msg{kind: kind, id: id, line: *line}:
+			self.sent++
+		case <-time.after(time.second):
+			self.dropped++ // that relay is stuck: don't let it hold up the whole room
+		}
+	}
+
+	fn broadcast(&self, line *Line) {
+		for i, _ in self.room {
+			if self.room[i].joined {
+				self.send(.send, i, line)
+			}
+		}
+	}
+
+	fn accept(&self, c net.Conn) {
+		for i, _ in self.room {
+			if not self.room[i].used {
+				self.room[i] = Client{used: true, shard: self.rr % self.shards} // spread clients over relays
+				self.rr++
+				self.online++
+				relays[self.room[i].shard] <- Msg{kind: .attach, id: i, conn: c}
+				return
+			}
+		}
+		c.write_string("ERR room full\n")
+		c.close()
+	}
+
+	fn said(&self, id int, text str) {
+		c := &self.room[id]
+		var out Line
+		if nick, ok := strings.cut_prefix(text, "NICK "); ok {
+			taken := false
+			for i, _ in self.room {
+				taken = taken or self.room[i].joined and self.room[i].nick() == nick
+			}
+			switch {
+			case c.joined:
+				out.set("ERR you already have a nick")
+			case nick == "" or len(nick) > max_nick or strings.index_byte(nick, ' ') >= 0:
+				out.set("ERR bad nick")
+			case taken:
+				out.set("ERR nick in use")
+			default:
+				c.nick_len = copy(c.nick_buf[:], nick)
+				c.joined = true
+				out.set("* ", nick, " joined")
+				self.broadcast(&out)
+				return
+			}
+		} else if not c.joined {
+			out.set("ERR say NICK name first")
+		} else if text == "WHO" {
+			var names str[..max_clients]
+			for i, _ in self.room {
+				if self.room[i].joined {
+					names.push(self.room[i].nick())
+				}
+			}
+			sort.strings(names[:])
+			out.set("users:")
+			for name in names {
+				out.add(" ", name)
+			}
+		} else {
+			out.set(c.nick(), ": ", text)
+			self.broadcast(&out)
+			return
+		}
+		self.send(.send, id, &out)
+	}
+
+	fn leave(&self, id int, last *Line) {
+		c := &self.room[id]
+		self.send(.detach, id, last)
+		if c.joined {
+			c.joined = false
+			var out Line
+			out.set("* ", c.nick(), " left")
+			self.broadcast(&out)
+		}
+		*c = Client{}
+		self.online--
+	}
 }
 
 // Threads share no memory, so the room is split by owner: shard 0 runs the hub, which keeps the
 // room's state, and each shard runs a relay that owns the sockets of the clients handed to it.
 // They talk over shared channels, whose elements can't hold references: text crosses threads in
 // a fixed-size Line, and a net.Conn, being only a descriptor, crosses as it is.
-shared var toHub chan Msg cap 64
-shared var relays [Relays]chan Msg cap 64 // one per relay
+shared to_hub Msg chan[64]
+shared relays Msg chan[64][num_relays] // one per relay
 
 // how long a new client has to say something: shared, since sessions run on every thread, so
 // it is set before the threads start (the self-test shortens it)
-shared var loginTimeout = selfTestTimeout(LoginTimeout)
+shared login_wait = self_test_timeout(login_timeout)
 
-thread var relayDone chan bool cap 1
-
-// ---- lines ----
-
-func (l *Line) String() string { return string(l.Text[:l.N]) }
-
-func (l *Line) Set(parts ...string) {
-	l.N = 0
-	l.Add(parts...)
-}
-
-// Add appends the parts to l, keeping the last byte free for the newline.
-func (l *Line) Add(parts ...string) {
-	for _, s := range parts {
-		l.N += copy(l.Text[l.N:len(l.Text)-1], s)
-	}
-}
+thread relay_done bool chan[1]
 
 // ---- clients' shards: sessions and relays ----
 
 // session reads one client's lines and passes them to the hub; its relay does the writing.
-task session(c net.Conn, id int) pool MaxClients {
-	var buf [MaxLine]byte
-	r := bufio.NewReader(buf[:])
-	src := c.WithTimeout(loginTimeout) // its reads give up with net.ErrTimeout
-	m := Msg{ID: id}
-	for m.Kind != EvLeave {
-		text, err := r.ReadLine(src)
-		src = c.WithTimeout(IdleTimeout)
-		m.Kind = EvLeave
+task session(c net.Conn, id int) pool max_clients {
+	var buf u8[max_line]
+	r := bufio.new_reader(buf[:])
+	src := c.with_timeout(login_wait) // its reads give up with net.Timeout
+	m := Msg{id: id}
+	while m.kind != .leave {
+		text, err := r.read_line(src)
+		src = c.with_timeout(idle_timeout)
+		m.kind = .leave
 		switch {
-		case err == bufio.ErrTooLong:
-			m.Kind = EvNotice
-			m.Line.Set("ERR line too long")
-		case err == net.ErrTimeout:
-			m.Line.Set("ERR timed out")
+		case err == bufio.TooLong:
+			m.kind = .notice
+			m.line.set("ERR line too long")
+		case err == net.Timeout:
+			m.line.set("ERR timed out")
 		case err != nil:
-			m.Line.Set("") // hung up
+			m.line.set("") // hung up
 		case text == "QUIT":
-			m.Line.Set("BYE")
+			m.line.set("BYE")
 		default:
-			m.Kind = EvLine
-			m.Line.Set(text)
+			m.kind = .line
+			m.line.set(text)
 		}
-		toHub <- m
+		to_hub <- m
 	} // the relay closes c once the hub has seen the client leave
 }
 
 // relay owns its shard's client sockets: it starts their sessions and writes to them.
 task relay(shard int) pool 1 {
-	var conns [MaxClients]net.Conn
-	for m := range relays[shard] {
-		c := &conns[m.ID]
-		if m.Kind == DoAttach {
-			*c = m.Conn
-			go session(m.Conn, m.ID)
+	var conns net.Conn[max_clients]
+	for m in relays[shard] {
+		c := &conns[m.id]
+		if m.kind == .attach {
+			*c = m.conn
+			start session(m.conn, m.id)
 			continue
 		}
-		if m.Line.N > 0 {
-			m.Line.Text[m.Line.N] = '\n'
-			c.Write(m.Line.Text[:m.Line.N+1])
+		if m.line.n > 0 {
+			m.line.text[m.line.n] = '\n'
+			c.write(m.line.text[:m.line.n+1])
 		}
-		if m.Kind == DoDetach {
-			c.Close()
+		if m.kind == .detach {
+			c.close()
 		}
 	}
-	relayDone <- true
+	relay_done <- true
 }
 
 // ---- the hub (shard 0) ----
 
-func (c *Client) nick() string { return string(c.Nick[:c.NickLen]) }
-
-func (h *Hub) send(kind, id int, line *Line) {
-	select {
-	case relays[h.room[id].Shard] <- Msg{Kind: kind, ID: id, Line: *line}:
-		h.sent++
-	case <-time.After(time.Second):
-		h.dropped++ // that relay is stuck: don't let it hold up the whole room
-	}
-}
-
-func (h *Hub) broadcast(line *Line) {
-	for i := range h.room {
-		if h.room[i].Joined {
-			h.send(DoSend, i, line)
-		}
-	}
-}
-
-func (h *Hub) accept(c net.Conn) {
-	for i := range h.room {
-		if !h.room[i].Used {
-			h.room[i] = Client{Used: true, Shard: h.rr % h.shards} // spread clients over relays
-			h.rr++
-			h.online++
-			relays[h.room[i].Shard] <- Msg{Kind: DoAttach, ID: i, Conn: c}
-			return
-		}
-	}
-	c.WriteString("ERR room full\n")
-	c.Close()
-}
-
-func (h *Hub) said(id int, text string) {
-	c := &h.room[id]
-	var out Line
-	if nick, ok := strings.CutPrefix(text, "NICK "); ok {
-		taken := false
-		for i := range h.room {
-			taken = taken || h.room[i].Joined && h.room[i].nick() == nick
-		}
-		switch {
-		case c.Joined:
-			out.Set("ERR you already have a nick")
-		case nick == "" || len(nick) > MaxNick || strings.IndexByte(nick, ' ') >= 0:
-			out.Set("ERR bad nick")
-		case taken:
-			out.Set("ERR nick in use")
-		default:
-			c.NickLen = copy(c.Nick[:], nick)
-			c.Joined = true
-			out.Set("* ", nick, " joined")
-			h.broadcast(&out)
-			return
-		}
-	} else if !c.Joined {
-		out.Set("ERR say NICK name first")
-	} else if text == "WHO" {
-		var names [..MaxClients]string
-		for i := range h.room {
-			if h.room[i].Joined {
-				names.Push(h.room[i].nick())
-			}
-		}
-		sort.Strings(names[:])
-		out.Set("users:")
-		for _, name := range names {
-			out.Add(" ", name)
-		}
-	} else {
-		out.Set(c.nick(), ": ", text)
-		h.broadcast(&out)
-		return
-	}
-	h.send(DoSend, id, &out)
-}
-
-func (h *Hub) leave(id int, last *Line) {
-	c := &h.room[id]
-	h.send(DoDetach, id, last)
-	if c.Joined {
-		c.Joined = false
-		var out Line
-		out.Set("* ", c.nick(), " left")
-		h.broadcast(&out)
-	}
-	*c = Client{}
-	h.online--
-}
-
 task hub() pool 1 {
-	h := Hub{shards: min(runtime.Shards(), Relays)}
-	for stopping := false; !stopping || h.online > 0; {
-		m := <-toHub
-		switch m.Kind {
-		case EvAccept:
-			h.accept(m.Conn)
-		case EvLine:
-			h.said(m.ID, m.Line.String())
-		case EvNotice:
-			h.send(DoSend, m.ID, &m.Line)
-		case EvLeave:
-			h.leave(m.ID, &m.Line)
-		case EvShutdown:
+	h := Hub{shards: min(runtime.shards(), num_relays)}
+	for stopping := false; not stopping or h.online > 0; {
+		m := <-to_hub
+		switch m.kind {
+		case .accept:
+			h.accept(m.conn)
+		case .line:
+			h.said(m.id, m.line.string())
+		case .notice:
+			h.send(.send, m.id, &m.line)
+		case .leave:
+			h.leave(m.id, &m.line)
+		case .shutdown:
 			stopping = true
 		}
 	}
@@ -269,42 +267,42 @@ task hub() pool 1 {
 }
 
 task acceptor(l net.Listener) pool 1 {
-	for {
-		c, err := l.Accept()
+	loop {
+		c, err := l.accept()
 		if err != nil {
-			println("accept:", err.Error())
+			println("accept:", err.message())
 			return
 		}
-		toHub <- Msg{Kind: EvAccept, Conn: c}
+		to_hub <- Msg{kind: .accept, conn: c}
 	}
 }
 
 // ---- main ----
 
 // start listens on addr and opens the room, on shard 0; it returns the port.
-func start(addr string) int {
-	l, err := net.Listen(addr)
+fn start(addr str) -> int {
+	l, err := net.listen(addr)
 	if err != nil {
-		println("listen:", err.Error())
-		os.Exit(1)
+		println("listen:", err.message())
+		os.exit(1)
 	}
-	go hub()
-	go acceptor(l)
-	return l.Port()
+	start hub()
+	start acceptor(l)
+	return l.port()
 }
 
-func main() {
-	shard := runtime.Shard()
-	if shard >= Relays {
+fn main() {
+	shard := runtime.shard()
+	if shard >= num_relays {
 		return // more threads than relay channels (SQUARK_THREADS): this one takes no clients
 	}
-	go relay(shard)
+	start relay(shard)
 	if shard == 0 {
-		if os.NArgs() < 2 {
-			selfTest()
+		if os.n_args() < 2 {
+			self_test()
 		} else {
-			println("chat on port", start(os.Arg(1)))
+			println("chat on port", start(os.arg(1)))
 		}
 	}
-	<-relayDone
+	<-relay_done
 }

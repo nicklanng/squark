@@ -17,7 +17,6 @@ func init() {
 	for _, t := range []*Basic{tBool, tInt, tInt8, tInt16, tInt32, tInt64, tUint, tUint8, tUint16, tUint32, tUint64, tUintptr, tFloat32, tFloat64, tString, tRawptr} {
 		universe.Insert(&Object{Kind: ObjType, Name: t.Name, Type: t, state: 2})
 	}
-	universe.Insert(&Object{Kind: ObjType, Name: "uint8", Type: tUint8, state: 2})
 	for _, t := range simdTypes {
 		universe.Insert(&Object{Kind: ObjType, Name: t.Name, Type: t, state: 2})
 	}
@@ -27,7 +26,6 @@ func init() {
 	universe.Insert(&Object{Kind: ObjConst, Name: "true", Type: tUntypedBool, Const: constant.MakeBool(true), state: 2})
 	universe.Insert(&Object{Kind: ObjConst, Name: "false", Type: tUntypedBool, Const: constant.MakeBool(false), state: 2})
 	universe.Insert(&Object{Kind: ObjNil, Name: "nil", Type: tUntypedNil, state: 2})
-	universe.Insert(&Object{Kind: ObjConst, Name: "iota", Type: tUntypedInt, state: 2})
 	for _, b := range builtinNames {
 		universe.Insert(&Object{Kind: ObjBuiltin, Name: b, state: 2})
 	}
@@ -47,10 +45,9 @@ type Checker struct {
 	scope     *Scope
 	depth     int
 	breakable []Stmt
-	afterCall *CallExpr // a select case's time.After(d), the one place it may appear
+	afterCall *CallExpr      // a select case's time.After(d), the one place it may appear
 	labels    map[string]Pos // labels seen in the current function
 	loopDepth int
-	iota      int64 // -1 when not in a const decl
 	varCount  int
 	namedRes  []*Var
 
@@ -65,7 +62,7 @@ type Checker struct {
 
 // Check type-checks the whole program.
 func Check(prog *Program) error {
-	c := &Checker{prog: prog, fileScopes: map[*File]map[string]*Package{}, iota: -1}
+	c := &Checker{prog: prog, fileScopes: map[*File]map[string]*Package{}}
 	prog.InitFunc = &Func{Name: "__init", Sig: &Signature{}}
 	for _, pkg := range prog.Packages {
 		c.collect(pkg)
@@ -114,11 +111,11 @@ func Check(prog *Program) error {
 	}
 	main := prog.Main.Scope.LookupLocal("main")
 	if main == nil || main.Kind != ObjFunc {
-		return ErrorList{{Pos{File: prog.Main.Dir}, "function main is undeclared in the main package"}}
+		return ErrorList{{Pos{File: prog.Main.Dir}, "function main is undeclared in the program"}}
 	}
 	prog.MainFunc = main.Func
 	if len(main.Func.Sig.Params) != 0 || len(main.Func.Sig.Results) != 0 {
-		return ErrorList{{main.Pos, "func main must have no arguments and no return values"}}
+		return ErrorList{{main.Pos, "fn main must have no arguments and no return values"}}
 	}
 	return nil
 }
@@ -136,8 +133,11 @@ func (c *Checker) errorf(pos Pos, format string, args ...any) {
 	c.errs = append(c.errs, &Error{pos, msg})
 }
 
-func isExported(name string) bool {
-	return len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z'
+// visible reports whether a name declared in pkg (pub or not) can be used from another
+// package. Nothing imports package main, so its names are open to the std functions its values
+// are passed to (anytype instances).
+func visible(pub bool, pkg *Package) bool {
+	return pub || pkg == nil || pkg.Name == "main"
 }
 
 // collect enters all package-level objects into package scopes.
@@ -179,7 +179,7 @@ func (c *Checker) collect(pkg *Package) {
 				switch d.Tok {
 				case TYPE:
 					for _, ts := range d.Types {
-						o := &Object{Kind: ObjType, Name: ts.Name.Name, Pos: ts.Name.P, Pkg: pkg, TypeDecl: ts}
+						o := &Object{Kind: ObjType, Name: ts.Name.Name, Pos: ts.Name.P, Pkg: pkg, TypeDecl: ts, Pub: ts.Pub}
 						n := &Named{Obj: o, Pkg: pkg}
 						o.Type = n
 						o.decl = f
@@ -194,9 +194,9 @@ func (c *Checker) collect(pkg *Package) {
 							// read-only values, shared by every scheduler thread; each name is
 							// classified on its own (const ErrA, N = error(1, "a"), 5)
 							if i < len(vs.Values) && len(vs.Values) == len(vs.Names) && (isErrorValue(vs.Values[i]) || isCompositeExpr(vs.Values[i])) {
-								one := &ValueSpec{Doc: vs.Doc, Names: []*Ident{name}, Type: vs.Type, Values: []Expr{vs.Values[i]}, Iota: vs.Iota, P: vs.P}
+								one := &ValueSpec{Doc: vs.Doc, Names: []*Ident{name}, Type: vs.Type, Values: []Expr{vs.Values[i]}, P: vs.P}
 								v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, ReadOnly: true, ConstData: isCompositeExpr(vs.Values[i]), Spec: one}
-								o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f}
+								o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f, Pub: vs.Pub}
 								v.Obj = o
 								name.Obj = o
 								pkg.Globals = append(pkg.Globals, v)
@@ -204,7 +204,7 @@ func (c *Checker) collect(pkg *Package) {
 								pkg.GlobalInits = append(pkg.GlobalInits, one)
 								continue
 							}
-							o := &Object{Kind: ObjConst, Name: name.Name, Pos: name.P, Pkg: pkg, decl: constDecl{vs, i, f}}
+							o := &Object{Kind: ObjConst, Name: name.Name, Pos: name.P, Pkg: pkg, decl: constDecl{vs, i, f}, Pub: vs.Pub}
 							name.Obj = o
 							declare(o)
 						}
@@ -213,7 +213,7 @@ func (c *Checker) collect(pkg *Package) {
 					for _, vs := range d.Values {
 						for _, name := range vs.Names {
 							v := &Var{Name: name.Name, Pos: name.P, Global: true, Pkg: pkg, Shared: d.Shared, Thread: d.Thread, ReadOnly: d.Shared, Spec: vs}
-							o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f}
+							o := &Object{Kind: ObjVar, Name: name.Name, Pos: name.P, Pkg: pkg, Var: v, decl: f, Pub: vs.Pub}
 							v.Obj = o
 							name.Obj = o
 							pkg.Globals = append(pkg.Globals, v)
@@ -224,14 +224,14 @@ func (c *Checker) collect(pkg *Package) {
 				}
 			case *ArenaDecl:
 				v := &Var{Name: d.Name.Name, Pos: d.Name.P, Global: true, Pkg: pkg, Type: tArena, ReadOnly: true, ArenaSizeExpr: d.Size}
-				o := &Object{Kind: ObjVar, Name: d.Name.Name, Pos: d.Name.P, Pkg: pkg, Var: v, Type: tArena, decl: f}
+				o := &Object{Kind: ObjVar, Name: d.Name.Name, Pos: d.Name.P, Pkg: pkg, Var: v, Type: tArena, decl: f, Pub: d.Pub}
 				v.Obj = o
 				d.Name.Obj = o
 				pkg.Globals = append(pkg.Globals, v)
 				pkg.Arenas = append(pkg.Arenas, v)
 				declare(o)
 			case *FuncDecl:
-				fn := &Func{Name: d.Name.Name, Decl: d, Pkg: pkg, Pragmas: d.Pragmas}
+				fn := &Func{Name: d.Name.Name, Decl: d, Pkg: pkg, Pragmas: d.Pragmas, Pub: d.Pub}
 				for _, pr := range d.Pragmas {
 					fields := strings.Fields(pr)
 					if len(fields) == 0 {
@@ -240,7 +240,7 @@ func (c *Checker) collect(pkg *Package) {
 					switch fields[0] {
 					case "noinline":
 					case "extern", "stack", "goroutines":
-						c.errorf(d.P, "//squark:%s is gone: use extern func ... stack N, or task ... pool N", fields[0])
+						c.errorf(d.P, "//squark:%s is gone: use extern fn ... stack N, or task ... pool N", fields[0])
 					default:
 						c.errorf(d.P, "unknown pragma //squark:%s", fields[0])
 					}
@@ -252,7 +252,7 @@ func (c *Checker) collect(pkg *Package) {
 						fn.Extern = d.Name.Name
 					}
 					if d.Stack == nil {
-						c.errorf(d.P, "extern func %s needs a stack budget (extern func %s(...) stack 8K): the stack proof depends on it", d.Name.Name, d.Name.Name)
+						c.errorf(d.P, "extern fn %s needs a stack budget (extern fn %s(...) stack 8K): the stack proof depends on it", d.Name.Name, d.Name.Name)
 					}
 				case KindTask:
 					fn.IsTask = true
@@ -261,7 +261,7 @@ func (c *Checker) collect(pkg *Package) {
 					}
 				}
 				if d.Body == nil && d.Kind != KindExtern {
-					c.errorf(d.P, "missing function body (use extern func to bind a C function)")
+					c.errorf(d.P, "missing function body (use extern fn to bind a C function)")
 				}
 				pkg.Funcs = append(pkg.Funcs, fn)
 				c.prog.Funcs = append(c.prog.Funcs, fn)
@@ -272,7 +272,7 @@ func (c *Checker) collect(pkg *Package) {
 					c.errorf(d.P, "init functions are not supported; initialize in main")
 					continue
 				}
-				o := &Object{Kind: ObjFunc, Name: d.Name.Name, Pos: d.Name.P, Pkg: pkg, Func: fn, decl: f}
+				o := &Object{Kind: ObjFunc, Name: d.Name.Name, Pos: d.Name.P, Pkg: pkg, Func: fn, decl: f, Pub: d.Pub}
 				d.Name.Obj = o
 				declare(o)
 			}
@@ -309,28 +309,38 @@ func isCompositeExpr(x Expr) bool {
 // checkSharedType reports a shared var whose type could let one thread change what another reads.
 // Shared channels are the exception: their operations are synchronized, and their elements may not
 // hold references at all (a string could view one thread's own memory).
-func (c *Checker) checkSharedType(n *Ident, t Type) {
+func (c *Checker) checkSharedType(n *Ident, t Type) { c.checkSharedType1(n, t, map[Type]bool{}) }
+
+// checkSharedType1 is checkSharedType for t, met inside the types in seen. A struct that contains
+// itself by value is reported elsewhere, but its fields are still walked here, so seen stops the
+// walk going round it for ever.
+func (c *Checker) checkSharedType1(n *Ident, t Type, seen map[Type]bool) {
+	if seen[t] {
+		return
+	}
+	seen[t] = true
+	defer delete(seen, t)
 	switch u := t.Underlying().(type) {
 	case *ChanStore:
 		if d := refDesc(u.Elem); d != "" {
-			c.errorf(n.P, "shared var %s: a shared channel's elements can't hold references (%s): send numbers, bools, errors or arrays and structs of them; a string or slice could view one thread's own memory", n.Name, d)
+			c.errorf(n.P, "shared %s: a shared channel's elements can't hold references (%s): send numbers, bools, errors or arrays and structs of them; a string or slice could view one thread's own memory", n.Name, d)
 		}
 		return
 	case *Array:
 		if containsChan(u.Elem) { // an array of channels (or of structs holding some)
-			c.checkSharedType(n, u.Elem)
+			c.checkSharedType1(n, u.Elem, seen)
 			return
 		}
 	case *Struct:
 		if containsChan(t) {
 			for _, f := range u.Fields {
-				c.checkSharedType(n, f.Type)
+				c.checkSharedType1(n, f.Type, seen)
 			}
 			return
 		}
 	}
 	if bad := constDataType(t, map[Type]bool{}); bad != nil {
-		c.errorf(n.P, "shared var %s: %s can't be shared (only numbers, strings, bools, errors, channels, and arrays or structs of them: nothing a shared value points to could be kept read-only)", n.Name, bad)
+		c.errorf(n.P, "shared %s: %s can't be shared (only numbers, strings, bools, errors, channels, and arrays or structs of them: nothing a shared value points to could be kept read-only)", n.Name, bad)
 	}
 }
 
@@ -664,7 +674,7 @@ func (c *Checker) resolveDecls(pkg *Package) {
 	var workersDir, threadsDir *Directive
 	for _, d := range pkg.Budgets {
 		if pkg != c.prog.Main {
-			c.errorf(d.P, "%s is only allowed in package main", d.Name)
+			c.errorf(d.P, "%s is only allowed in the program header (program { %s ... }), not in a module", d.Name, d.Name)
 			continue
 		}
 		c.setFile(c.fileOf(d.P))
@@ -705,7 +715,7 @@ func (c *Checker) resolveDecls(pkg *Package) {
 		case "pool":
 			fn := c.findTask(d.Target)
 			if fn == nil {
-				c.errorf(d.P, "pool %s: no task named %s (write pkg.task, e.g. pool http.serveConn 256)", d.Target, d.Target)
+				c.errorf(d.P, "pool %s: no task named %s (write pkg.task, e.g. pool http.serve_conn 256)", d.Target, d.Target)
 				continue
 			}
 			c.checkPool(d.Value, n)
@@ -791,7 +801,7 @@ func (c *Checker) globalVarSpec(vs *ValueSpec) {
 		}
 		if n.Obj.Var.Shared && t != tInvalid {
 			if containsChan(t) {
-				c.errorf(x.Pos(), "shared var %s: shared channels are declared without a value (shared var %s chan T cap N)", n.Name, n.Name)
+				c.errorf(x.Pos(), "shared %s: shared channels are declared without a value (shared %s T chan[N])", n.Name, n.Name)
 			} else {
 				c.checkSharedType(n, t)
 			}
@@ -830,6 +840,50 @@ func (c *Checker) resolveNamed(n *Named) {
 	}
 	n.underlying = u
 	o.state = 2
+	if o.TypeDecl.Form == "enum" {
+		c.enumMembers(n, o.TypeDecl)
+	}
+}
+
+// enumMembers gives an enum its members: constants of the enum's type, each the value written or
+// the previous member's plus one (the first is 0).
+func (c *Checker) enumMembers(n *Named, ts *TypeSpec) {
+	saved := c.fileImports
+	c.setFile(n.Obj.decl.(*File))
+	defer func() { c.fileImports = saved }()
+	if !isInteger(n.underlying) {
+		c.errorf(ts.Type.Pos(), "enum %s must have an integer type, not %s", n.Obj.Name, n.underlying)
+		return
+	}
+	if len(ts.Enum) == 0 {
+		c.errorf(ts.Name.P, "enum %s has no members", n.Obj.Name)
+	}
+	next := constant.MakeInt64(0)
+	for _, m := range ts.Enum {
+		v := next
+		if m.Value != nil {
+			c.expr(m.Value)
+			cv := m.Value.info().Const
+			if cv == nil || cv.Kind() != constant.Int {
+				if m.Value.info().Mode != ModeInvalid {
+					c.errorf(m.Value.Pos(), "enum member %s.%s needs a constant integer, not %s", n.Obj.Name, m.Name.Name, exprString(m.Value))
+				}
+				continue
+			}
+			v = cv
+		}
+		if _, ok := representable(v, n.underlying); !ok {
+			c.errorf(m.Name.P, "enum member %s.%s = %s overflows %s", n.Obj.Name, m.Name.Name, v, n.underlying)
+		}
+		if n.EnumMember(m.Name.Name) != nil {
+			c.errorf(m.Name.P, "duplicate enum member %s.%s", n.Obj.Name, m.Name.Name)
+			continue
+		}
+		o := &Object{Kind: ObjConst, Name: m.Name.Name, Type: n, Const: v, Pos: m.Name.P, Pkg: n.Pkg, Pub: ts.Pub, state: 2}
+		m.Name.Obj = o
+		n.Enum = append(n.Enum, o)
+		next = constant.BinaryOp(v, gotoken.ADD, constant.MakeInt64(1))
+	}
 }
 
 // checkValueCycle reports types that contain themselves by value.
@@ -866,7 +920,7 @@ func (c *Checker) checkValueCycle(t Type, path []*Named) bool {
 // channel in between breaks the cycle (type S struct{ next func() S }).
 func (c *Checker) checkRefCycle(start *Named, t Type, seen map[Type]bool) bool {
 	if t == Type(start) && len(seen) > 0 {
-		c.errorf(start.Obj.Pos, "invalid recursive type %s: it refers to itself without a struct in between; wrap it in one (type %s struct{ ... })", start.Obj.Name, start.Obj.Name)
+		c.errorf(start.Obj.Pos, "invalid recursive type %s: it refers to itself without a struct in between; wrap it in one (struct %s { ... })", start.Obj.Name, start.Obj.Name)
 		return true
 	}
 	if seen[t] {
@@ -910,12 +964,9 @@ func (c *Checker) resolveConst(o *Object) {
 	o.state = 1
 	cd := o.decl.(constDecl)
 	savedImports := c.fileImports
-	savedIota := c.iota
 	c.setFile(cd.file)
-	c.iota = int64(cd.spec.Iota)
 	defer func() {
 		c.fileImports = savedImports
-		c.iota = savedIota
 		o.state = 2
 	}()
 	var typ Type
@@ -929,9 +980,7 @@ func (c *Checker) resolveConst(o *Object) {
 		return
 	}
 	x := cd.spec.Values[cd.index]
-	// constant expressions may be shared between specs via implicit repetition; recheck with fresh info
-	x = cloneExpr(x)
-	c.expr(x)
+	c.exprHint(x, typ)
 	if x.info().Const == nil {
 		if x.info().Mode != ModeInvalid {
 			c.errorf(x.Pos(), "%s is not constant", exprString(x))
@@ -941,7 +990,7 @@ func (c *Checker) resolveConst(o *Object) {
 		return
 	}
 	if typ != nil && simdOf(typ) != nil {
-		c.errorf(o.Pos, "invalid constant type %s: SIMD vectors can't be constants; use a var", typ)
+		c.errorf(o.Pos, "invalid constant type %s: SIMD vectors can't be constants; use a variable", typ)
 		o.Type = tInvalid
 		o.Const = constant.MakeUnknown()
 		return
@@ -1114,8 +1163,8 @@ func (c *Checker) typExpr1(x Expr) Type {
 					c.errorf(e.Sel.P, "undefined type: %s.%s", id.Name, e.Sel.Name)
 					return tInvalid
 				}
-				if !isExported(e.Sel.Name) {
-					c.errorf(e.Sel.P, "%s.%s is not exported", id.Name, e.Sel.Name)
+				if !visible(o.Pub, pkg) {
+					c.errorf(e.Sel.P, "%s.%s is not pub", id.Name, e.Sel.Name)
 				}
 				e.Sel.Obj = o
 				e.Kind = SelQualified
@@ -1128,7 +1177,12 @@ func (c *Checker) typExpr1(x Expr) Type {
 		return c.typExpr(e.X)
 	case *StarExpr:
 		return &Pointer{Elem: c.typExpr(e.X)}
+	case *IndexExpr: // T[n] or V[K], parsed as an expression
+		return c.typExpr(&ArrayType{P: e.X.Pos(), Len: e.Index, Elem: e.X, MaybeMap: true})
 	case *ArrayType:
+		if e.MaybeMap && c.namesType(e.Len) {
+			return c.typExpr(&MapType{P: e.P, Key: e.Len, Value: e.Elem})
+		}
 		elem := c.typExpr(e.Elem)
 		if e.Len == nil {
 			return &Slice{Elem: elem}
@@ -1188,13 +1242,35 @@ func (c *Checker) typExpr1(x Expr) Type {
 					c.errorf(n.P, "duplicate field %s", n.Name)
 				}
 				seen[n.Name] = true
-				st.Fields = append(st.Fields, &StructField{Name: n.Name, Type: t, Pos: n.P})
+				st.Fields = append(st.Fields, &StructField{Name: n.Name, Type: t, Pos: n.P, Pub: f.Pub})
 			}
 		}
 		return c.checkTypeSize(e.Pos(), st)
 	}
 	c.errorf(x.Pos(), "%s is not a type", exprString(x))
 	return tInvalid
+}
+
+// namesType reports whether x (inside the brackets of V[x]) names a type, which makes V[x] a
+// map rather than an array.
+func (c *Checker) namesType(x Expr) bool {
+	switch e := x.(type) {
+	case *Ident:
+		o := c.lookup(e.Name)
+		return o != nil && o.Kind == ObjType
+	case *SelectorExpr:
+		if id, ok := e.X.(*Ident); ok {
+			if pkg := c.fileImports[id.Name]; pkg != nil && c.lookupLocalShadow(id.Name) == nil {
+				o := pkg.Scope.LookupLocal(e.Sel.Name)
+				return o != nil && o.Kind == ObjType
+			}
+		}
+	case *StarExpr:
+		return true
+	case *ParenExpr:
+		return c.namesType(e.X)
+	}
+	return false
 }
 
 func validMapKey(t Type) bool {
@@ -1298,7 +1374,7 @@ func (c *Checker) funcBody(fn *Func) {
 			// a named result is a variable whose value is copied out on return, and a copy of used
 			// map or channel storage aliases the original
 			if s := storageIn(r.Type); s != nil && r.Name != "_" {
-				c.errorf(r.Pos, "named result %s holds %s storage, which can't be copied out on return; return an unnamed %s built by a literal, or take a *%s parameter to fill", r.Name, s, r.Type, r.Type)
+				c.errorf(r.Pos, "named result %s holds %s storage, which can't be copied out on return; return an unnamed %s built by a literal, or take a %s parameter to fill", r.Name, s, r.Type, &Pointer{Elem: r.Type})
 			}
 			r.Depth = 2
 			r.CName = c.newVarName(r.Name)

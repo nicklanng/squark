@@ -1,14 +1,14 @@
-package main
+program
 
-func main() {
-	const u uint8 = 1
+fn main() {
+	const u u8 = 1
 	v := u << 8 // ERROR "constant 256 overflows"
 	n := 3
-	var f float64 = 1 << n // ERROR "shifted operand 1 (type float64) must be integer"
-	var b uint8 = 300 << n // ERROR "constant 300 overflows"
+	var f f64 = 1 << n // ERROR "shifted operand 1 (type f64) must be integer"
+	var b u8 = 300 << n // ERROR "constant 300 overflows"
 	println(v, f, b)
 }
 
-func floatShift(s uint) float64 {
-	return float64(1 << s) // ERROR "shifted operand 1 (type float64) must be integer"
+fn float_shift(s uint) -> f64 {
+	return f64(1 << s) // ERROR "shifted operand 1 (type f64) must be integer"
 }

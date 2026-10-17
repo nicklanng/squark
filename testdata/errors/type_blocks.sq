@@ -1,0 +1,9 @@
+program
+
+struct C {
+	n int
+
+	fn get(&self) -> int { return self.n } // ERROR "methods go in an impl block after the struct: impl C { fn ... }"
+}
+
+fn main() {}

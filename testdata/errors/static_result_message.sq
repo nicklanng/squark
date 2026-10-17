@@ -1,0 +1,29 @@
+program
+
+// A callee whose result is static memory says so, rather than naming an argument it doesn't have
+// or the receiver (BUGS.md Q2).
+
+thread gs str[]
+
+fn get() -> str[] { return gs }
+
+struct T {
+	s str[]
+}
+
+impl T {
+	fn get(&self) -> str[] { return gs }
+}
+
+fn main() {
+	var b u8[4]
+	with arena a 1K {
+		s := get() // ERROR "get keeps its result in static memory"
+		s[0] = str(b[:]) in a
+	}
+	with arena c 1K {
+		var t T
+		u := t.get() // ERROR "t.get keeps its result in static memory"
+		u[0] = str(b[:]) in c
+	}
+}

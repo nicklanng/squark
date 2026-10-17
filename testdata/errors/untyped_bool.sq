@@ -1,17 +1,17 @@
-package main
+program
 
 // a comparison's untyped bool converts only to boolean types
 
-type Flag bool
+Flag: bool
 
-func show(s string) {}
+fn show(s str) {}
 
-func main() {
+fn main() {
 	x := 3
-	show(x > 0) // ERROR "cannot use x > 0 (untyped bool value) as type string"
+	show(x > 0) // ERROR "cannot use x > 0 (untyped bool value) as type str"
 	var n int = x > 1 // ERROR "untyped bool value"
 	_ = n
 	var f Flag = x > 2
-	var b bool = x < 2 && f == true
+	var b bool = x < 2 and f == true
 	_ = b
 }

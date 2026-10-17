@@ -1,68 +1,62 @@
 // Package net provides TCP listeners and connections. Blocking calls park only the calling
 // goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
-package net
+module net
 
-import (
-	"io"
-	"os"
-	"strconv"
-	"strings"
-	"time"
-)
+use io, os, strconv, strings, time
 
-type Listener struct {
-	fd int
+pub struct Listener {
+	sysfd int
 }
 
-type Conn struct {
-	fd int
+pub struct Conn {
+	sysfd int
 }
 
-extern "sq_listen_tcp" func listenTCP(host string, port int, backlog int) int stack 8K
+extern fn listen_tcp(host str, port int, backlog int) -> int stack 8K c"sq_listen_tcp"
 
-extern "sq_local_port" func localPort(fd int) int stack 8K
+extern fn local_port(fd int) -> int stack 8K c"sq_local_port"
 
-extern "sq_close_write" func closeWrite(fd int) int stack 8K
+extern fn close_write(fd int) -> int stack 8K c"sq_close_write"
 
-extern "sq_accept" func accept(fd int) int stack 8K
+extern fn accept(fd int) -> int stack 8K c"sq_accept"
 
-extern "sq_dial_tcp" func dialTCP(host string, port int) int stack 8K
+extern fn dial_tcp(host str, port int) -> int stack 8K c"sq_dial_tcp"
 
-extern "sq_read" func sysRead(fd int, b []byte) int stack 8K
+extern fn sys_read(fd int, b u8[]) -> int stack 8K c"sq_read"
 
-extern "sq_read_timeout" func sysReadTimeout(fd int, b []byte, timeoutNs int) int stack 8K
+extern fn sys_read_timeout(fd int, b u8[], timeout_ns int) -> int stack 8K c"sq_read_timeout"
 
-extern "sq_write" func sysWrite(fd int, b []byte) int stack 8K
+extern fn sys_write(fd int, b u8[]) -> int stack 8K c"sq_write"
 
-extern "sq_write_str" func sysWriteStr(fd int, s string) int stack 8K
+extern fn sys_write_str(fd int, s str) -> int stack 8K c"sq_write_str"
 
-extern "sq_writev2" func sysWritev2(fd int, a []byte, b []byte) int stack 8K
+extern fn sys_writev2(fd int, a u8[], b u8[]) -> int stack 8K c"sq_writev2"
 
-extern "sq_close" func sysClose(fd int) int stack 8K
+extern fn sys_close(fd int) -> int stack 8K c"sq_close"
 
-extern "sq_wait_idle" func waitIdle(fd int, graceNs int) int stack 8K
+extern fn wait_idle(fd int, grace_ns int) -> int stack 8K c"sq_wait_idle"
 
-extern "sq_park_idle" func parkIdle(fd int, tag int) stack 8K
+extern fn park_idle(fd int, tag int) stack 8K c"sq_park_idle"
 
-extern "sq_next_idle" func nextIdle() int stack 8K
+extern fn sys_next_idle() -> int stack 8K c"sq_next_idle"
 
-extern "sq_idle_count" func idleCount() int stack 8K
+extern fn sys_idle_count() -> int stack 8K c"sq_idle_count"
 
-const ErrBadAddress = error(22, "invalid address (want host:port)")
+pub fault BadAddress 22 "invalid address (want host:port)"
 
-// ErrTimeout is returned by ReadTimeout when nothing arrived in time.
-const ErrTimeout = error(-20, "i/o timeout")
+// Timeout is returned by read_timeout when nothing arrived in time.
+pub fault Timeout -20 "i/o timeout"
 
-const sqETimeout = 65536 // sq_read_timeout returns -sqETimeout for a timeout
+const sq_e_timeout = 65536 // sq_read_timeout returns -sq_e_timeout for a timeout
 
-func splitHostPort(addr string) (string, int, error) {
-	i := strings.LastIndexByte(addr, ':')
+fn split_host_port(addr str) -> (str, int) ! {
+	i := strings.last_index_byte(addr, ':')
 	if i < 0 {
-		return "", 0, ErrBadAddress
+		return "", 0, BadAddress
 	}
-	port, err := strconv.Atoi(addr[i+1:])
-	if err != nil || port < 0 || port > 65535 {
-		return "", 0, ErrBadAddress
+	port, err := strconv.atoi(addr[i+1:])
+	if err != nil or port < 0 or port > 65535 {
+		return "", 0, BadAddress
 	}
 	host := addr[:i]
 	if host == "localhost" {
@@ -71,180 +65,187 @@ func splitHostPort(addr string) (string, int, error) {
 	return host, port, nil
 }
 
-// AppendHostPort appends "host:port" to dst, as Go's JoinHostPort: a host containing ':' (an IPv6
-// literal) is put in brackets, "[::1]:80". An empty host gives ":port", which Listen takes as
-// every interface. (Listen and Dial take IPv4 addresses and "localhost" only.)
-func AppendHostPort(dst []byte, host string, port int) []byte from dst {
-	if strings.IndexByte(host, ':') >= 0 {
+// append_host_port appends "host:port" to dst, as Go's JoinHostPort: a host containing ':' (an IPv6
+// literal) is put in brackets, "[::1]:80". An empty host gives ":port", which listen takes as
+// every interface. (Listen and dial take IPv4 addresses and "localhost" only.)
+pub fn append_host_port(dst u8[], host str, port int) -> u8[] in dst {
+	if strings.index_byte(host, ':') >= 0 {
 		dst = append(append(append(dst, '['), host...), ']')
 	} else {
 		dst = append(dst, host...)
 	}
-	return strconv.AppendInt(append(dst, ':'), port)
+	return strconv.append_int(append(dst, ':'), port)
 }
 
-// Listen opens a TCP listener on addr ("host:port" or ":port").
-func Listen(addr string) (Listener, error) {
-	host, port, err := splitHostPort(addr)
+// listen opens a TCP listener on addr ("host:port" or ":port").
+pub fn listen(addr str) -> Listener ! {
+	host, port, err := split_host_port(addr)
 	if err != nil {
-		return Listener{fd: -1}, err
+		return Listener{sysfd: -1}, err
 	}
-	fd := listenTCP(host, port, 4096)
+	fd := listen_tcp(host, port, 4096)
 	if fd < 0 {
-		return Listener{fd: -1}, os.Errno(-fd)
+		return Listener{sysfd: -1}, os.errno(-fd)
 	}
-	return Listener{fd: fd}, nil
+	return Listener{sysfd: fd}, nil
 }
 
-func (l Listener) Accept() (Conn, error) {
-	fd := accept(l.fd)
-	if fd < 0 {
-		return Conn{fd: -1}, os.Errno(-fd)
+impl Listener {
+	pub fn accept(self) -> Conn ! {
+		fd := accept(self.sysfd)
+		if fd < 0 {
+			return Conn{sysfd: -1}, os.errno(-fd)
+		}
+		return Conn{sysfd: fd}, nil
 	}
-	return Conn{fd: fd}, nil
+
+	// port returns the port l listens on: the one the system chose, after listen(":0").
+	pub fn port(self) -> int { return local_port(self.sysfd) }
+
+	pub fn close(self) -> ! {
+		if r := sys_close(self.sysfd); r < 0 {
+			return os.errno(-r)
+		}
+		return nil
+	}
 }
 
-// Port returns the port l listens on: the one the system chose, after Listen(":0").
-func (l Listener) Port() int { return localPort(l.fd) }
-
-func (l Listener) Close() error {
-	if r := sysClose(l.fd); r < 0 {
-		return os.Errno(-r)
-	}
-	return nil
-}
-
-// Dial connects to a TCP address.
-func Dial(addr string) (Conn, error) {
-	host, port, err := splitHostPort(addr)
+// dial connects to a TCP address.
+pub fn dial(addr str) -> Conn ! {
+	host, port, err := split_host_port(addr)
 	if err != nil {
-		return Conn{fd: -1}, err
+		return Conn{sysfd: -1}, err
 	}
-	fd := dialTCP(host, port)
+	fd := dial_tcp(host, port)
 	if fd < 0 {
-		return Conn{fd: -1}, os.Errno(-fd)
+		return Conn{sysfd: -1}, os.errno(-fd)
 	}
-	return Conn{fd: fd}, nil
+	return Conn{sysfd: fd}, nil
 }
 
-func (c Conn) Fd() int { return c.fd }
+impl Conn {
+	pub fn fd(self) -> int { return self.sysfd }
 
-func (c Conn) Read(p []byte) (int, error) {
-	n := sysRead(c.fd, p)
-	if n < 0 {
-		return 0, os.Errno(-n)
+	pub fn read(self, p u8[]) -> int ! {
+		n := sys_read(self.sysfd, p)
+		if n < 0 {
+			return 0, os.errno(-n)
+		}
+		if n == 0 and len(p) > 0 {
+			return 0, io.EOF
+		}
+		return n, nil
 	}
-	if n == 0 && len(p) > 0 {
-		return 0, io.EOF
+
+	// read_timeout is read that waits at most d for input: if nothing arrives in time it returns 0 and
+	// Timeout. Input that is already waiting is read at once, whatever d is. d <= 0 means no
+	// deadline (a plain read), so a caller counting down to a deadline checks there is time left.
+	pub fn read_timeout(self, p u8[], d time.Duration) -> int ! {
+		if d <= 0 {
+			return self.read(p)
+		}
+		n := sys_read_timeout(self.sysfd, p, int(d))
+		if n == -sq_e_timeout {
+			return 0, Timeout
+		}
+		if n < 0 {
+			return 0, os.errno(-n)
+		}
+		if n == 0 and len(p) > 0 {
+			return 0, io.EOF
+		}
+		return n, nil
 	}
-	return n, nil
+
+	// with_timeout returns c as a source whose read is c.read_timeout(p, d), for readers that take
+	// anything with a read method: r.read_line(c.with_timeout(idle)) returns Timeout when no input
+	// comes for d. The limit applies to each read, not to a whole line. d <= 0 means no deadline.
+	pub fn with_timeout(self, d time.Duration) -> TimedConn { return TimedConn{c: self, d: d} }
+
+	pub fn write(self, p u8[]) -> int ! {
+		n := sys_write(self.sysfd, p)
+		if n < 0 {
+			return 0, os.errno(-n)
+		}
+		if n < len(p) {
+			return n, io.ShortWrite
+		}
+		return n, nil
+	}
+
+	pub fn write_string(self, s str) -> int ! {
+		n := sys_write_str(self.sysfd, s)
+		if n < 0 {
+			return 0, os.errno(-n)
+		}
+		if n < len(s) {
+			return n, io.ShortWrite
+		}
+		return n, nil
+	}
+
+	// write2 writes a then b, using a single writev where possible.
+	pub fn write2(self, a, b u8[]) -> int ! {
+		n := sys_writev2(self.sysfd, a, b)
+		if n < 0 {
+			return 0, os.errno(-n)
+		}
+		if n < len(a)+len(b) {
+			return n, io.ShortWrite
+		}
+		return n, nil
+	}
+
+	// wait_readable parks until c is readable and returns true, or returns false if nothing arrives
+	// within grace.
+	pub fn wait_readable(self, grace time.Duration) -> bool {
+		return wait_idle(self.sysfd, int(grace)) == 0
+	}
+
+	// park_idle hands c to the runtime's idle set with a tag (0..255) that next_idle returns with it,
+	// e.g. to say which server it belongs to. No goroutine waits for it: when it becomes readable it is
+	// returned by next_idle. The calling goroutine's stack is returned to the OS when it exits, so an
+	// idle connection costs no memory beyond the kernel's socket.
+	pub fn park_idle(self, tag int) {
+		park_idle(self.sysfd, tag)
+	}
+
+	// close_write shuts down the sending side: the peer reads EOF once it has read everything sent,
+	// while c can still read. Close a connection this way after a final reply, so the reply isn't
+	// lost to a reset when unread input remains.
+	pub fn close_write(self) -> ! {
+		if r := close_write(self.sysfd); r < 0 {
+			return os.errno(-r)
+		}
+		return nil
+	}
+
+	pub fn close(self) -> ! {
+		if r := sys_close(self.sysfd); r < 0 {
+			return os.errno(-r)
+		}
+		return nil
+	}
 }
 
-// ReadTimeout is Read that waits at most d for input: if nothing arrives in time it returns 0 and
-// ErrTimeout. Input that is already waiting is read at once, whatever d is. d <= 0 means no
-// deadline (a plain Read), so a caller counting down to a deadline checks there is time left.
-func (c Conn) ReadTimeout(p []byte, d time.Duration) (int, error) {
-	if d <= 0 {
-		return c.Read(p)
-	}
-	n := sysReadTimeout(c.fd, p, int(d))
-	if n == -sqETimeout {
-		return 0, ErrTimeout
-	}
-	if n < 0 {
-		return 0, os.Errno(-n)
-	}
-	if n == 0 && len(p) > 0 {
-		return 0, io.EOF
-	}
-	return n, nil
-}
-
-// TimedConn is a Conn whose reads time out: see Conn.WithTimeout.
-type TimedConn struct {
+// TimedConn is a Conn whose reads time out: see Conn.with_timeout.
+pub struct TimedConn {
 	c Conn
 	d time.Duration
 }
 
-// WithTimeout returns c as a source whose Read is c.ReadTimeout(p, d), for readers that take
-// anything with a Read method: r.ReadLine(c.WithTimeout(idle)) returns ErrTimeout when no input
-// comes for d. The limit applies to each read, not to a whole line. d <= 0 means no deadline.
-func (c Conn) WithTimeout(d time.Duration) TimedConn { return TimedConn{c: c, d: d} }
-
-// Read is ReadTimeout with t's limit.
-func (t TimedConn) Read(p []byte) (int, error) { return t.c.ReadTimeout(p, t.d) }
-
-func (c Conn) Write(p []byte) (int, error) {
-	n := sysWrite(c.fd, p)
-	if n < 0 {
-		return 0, os.Errno(-n)
-	}
-	if n < len(p) {
-		return n, io.ErrShortWrite
-	}
-	return n, nil
+impl TimedConn {
+	// read is read_timeout with t's limit.
+	pub fn read(self, p u8[]) -> int ! { return self.c.read_timeout(p, self.d) }
 }
 
-func (c Conn) WriteString(s string) (int, error) {
-	n := sysWriteStr(c.fd, s)
-	if n < 0 {
-		return 0, os.Errno(-n)
-	}
-	if n < len(s) {
-		return n, io.ErrShortWrite
-	}
-	return n, nil
+// next_idle blocks until a parked connection becomes readable and returns it with its tag.
+// Only one goroutine may call next_idle at a time.
+pub fn next_idle() -> (Conn, int) {
+	v := sys_next_idle()
+	return Conn{sysfd: v & 0xffffffff}, v >> 32
 }
 
-// Write2 writes a then b, using a single writev where possible.
-func (c Conn) Write2(a, b []byte) (int, error) {
-	n := sysWritev2(c.fd, a, b)
-	if n < 0 {
-		return 0, os.Errno(-n)
-	}
-	if n < len(a)+len(b) {
-		return n, io.ErrShortWrite
-	}
-	return n, nil
-}
+// idle_count reports how many connections are parked in the idle set.
+pub fn idle_count() -> int { return sys_idle_count() }
 
-// WaitReadable parks until c is readable and returns true, or returns false if nothing arrives
-// within grace.
-func (c Conn) WaitReadable(grace time.Duration) bool {
-	return waitIdle(c.fd, int(grace)) == 0
-}
-
-// ParkIdle hands c to the runtime's idle set with a tag (0..255) that NextIdle returns with it,
-// e.g. to say which server it belongs to. No goroutine waits for it: when it becomes readable it is
-// returned by NextIdle. The calling goroutine's stack is returned to the OS when it exits, so an
-// idle connection costs no memory beyond the kernel's socket.
-func (c Conn) ParkIdle(tag int) {
-	parkIdle(c.fd, tag)
-}
-
-// NextIdle blocks until a parked connection becomes readable and returns it with its tag.
-// Only one goroutine may call NextIdle at a time.
-func NextIdle() (Conn, int) {
-	v := nextIdle()
-	return Conn{fd: v & 0xffffffff}, v >> 32
-}
-
-// IdleCount reports how many connections are parked in the idle set.
-func IdleCount() int { return idleCount() }
-
-// CloseWrite shuts down the sending side: the peer reads EOF once it has read everything sent,
-// while c can still read. Close a connection this way after a final reply, so the reply isn't
-// lost to a reset when unread input remains.
-func (c Conn) CloseWrite() error {
-	if r := closeWrite(c.fd); r < 0 {
-		return os.Errno(-r)
-	}
-	return nil
-}
-
-func (c Conn) Close() error {
-	if r := sysClose(c.fd); r < 0 {
-		return os.Errno(-r)
-	}
-	return nil
-}

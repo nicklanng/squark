@@ -1,16 +1,16 @@
-package main
+program
 
 // A nil pointer to a huge array: the offset of p[i] is far past any unmapped page, so only an
 // explicit check stops the write from landing in h.
-var h [8]int
-var gp *[1 << 36]int
+thread h int[8]
+thread gp *(int[1 << 36])
 
-type Config struct{ Port int }
+struct Config { port int }
 
-func port(c *Config) int { return c.Port }
+fn port(c *Config) -> int { return c.port }
 
-func main() {
+fn main() {
 	var gt *Config
-	println(&gt.Port == nil) // never printed: taking the address of a nil pointer's field panics
+	println(&gt.port == nil) // never printed: taking the address of a nil pointer's field panics
 	_ = port
 }

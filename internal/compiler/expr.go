@@ -164,6 +164,8 @@ func (c *Checker) expr1(x Expr, hint Type) {
 		c.invalid(e)
 	case *TryExpr:
 		c.tryExpr(e)
+	case *ImplicitMember:
+		c.implicitMember(e, hint)
 	case *InExpr:
 		c.inExpr(e, hint)
 	case *ArrayType, *MapType, *ChanType, *StructType, *FuncType:
@@ -263,7 +265,7 @@ func storageIn(t Type) Type {
 }
 
 func storageInSeen(t Type, seen map[Type]bool) Type {
-	if seen[t] {
+	if t == nil || seen[t] { // nil: a loop variable with no type, such as a second one over an integer
 		return nil
 	}
 	seen[t] = true
@@ -303,7 +305,7 @@ func (c *Checker) checkNestedStorageCopy(x Expr, t Type, into string) bool {
 		return true
 	}
 	if s := storageIn(t); s != nil {
-		c.errorf(x.Pos(), "cannot copy %s%s: %s contains %s storage; use a pointer (*%s) instead", exprString(x), into, t, s, t)
+		c.errorf(x.Pos(), "cannot copy %s%s: %s contains %s storage; use a pointer (%s) instead", exprString(x), into, t, s, &Pointer{Elem: t})
 		return false
 	}
 	return true
@@ -317,7 +319,7 @@ func (c *Checker) checkElemsCopy(x Expr, elem Type) bool {
 		return false
 	}
 	if s := storageIn(elem); s != nil {
-		c.errorf(x.Pos(), "cannot copy the elements of %s: %s contains %s storage; use a slice of pointers ([]*%s) instead", exprString(x), elem, s, elem)
+		c.errorf(x.Pos(), "cannot copy the elements of %s: %s contains %s storage; use a slice of pointers (%s) instead", exprString(x), elem, s, &Slice{Elem: &Pointer{Elem: elem}})
 		return false
 	}
 	return true
@@ -350,7 +352,7 @@ func (c *Checker) tryExpr(e *TryExpr) {
 		return
 	}
 	if _, ok := unparen(e.X).(*CallExpr); !ok {
-		c.errorf(e.P, "try needs a function call")
+		c.errorf(e.P, "the ! operator needs a function call")
 		c.invalid(e)
 		return
 	}
@@ -364,19 +366,19 @@ func (c *Checker) tryExpr(e *TryExpr) {
 		}
 	}
 	if len(results) == 0 {
-		c.errorf(e.P, "try needs a call whose last result is an error; %s returns nothing", exprString(e.X))
+		c.errorf(e.P, "the ! operator needs a call whose last result is an error; %s returns nothing", exprString(e.X))
 		c.invalid(e)
 		return
 	}
 	if _, ok := results[len(results)-1].Underlying().(*ErrorType); !ok {
-		c.errorf(e.P, "try needs a call whose last result is an error; %s returns %s", exprString(e.X), results[len(results)-1])
+		c.errorf(e.P, "the ! operator needs a call whose last result is an error; %s returns %s", exprString(e.X), results[len(results)-1])
 		c.invalid(e)
 		return
 	}
 	if c.sig == nil || len(c.sig.Results) == 0 {
-		c.errorf(e.P, "try can only be used in a function whose last result is error")
+		c.errorf(e.P, "the ! operator can only be used in a function whose last result is error")
 	} else if _, ok := c.sig.Results[len(c.sig.Results)-1].Type.Underlying().(*ErrorType); !ok {
-		c.errorf(e.P, "try can only be used in a function whose last result is error")
+		c.errorf(e.P, "the ! operator can only be used in a function whose last result is error")
 	}
 	rest := results[:len(results)-1]
 	switch len(rest) {
@@ -415,15 +417,6 @@ func (c *Checker) ident(e *Ident) {
 		}
 		e.Mode = ModeVar
 	case ObjConst:
-		if o.Name == "iota" && o.Pkg == nil {
-			if c.iota < 0 {
-				c.errorf(e.P, "cannot use iota outside constant declaration")
-				c.invalid(e)
-				return
-			}
-			e.T, e.Const, e.Mode = tUntypedInt, constant.MakeInt64(c.iota), ModeConst
-			return
-		}
 		c.resolveConst(o)
 		e.T = o.Type
 		e.Const = o.Const.(constant.Value)
@@ -608,7 +601,7 @@ func setType(x Expr, t Type) {
 func kindName(k BasicKind) string {
 	switch k {
 	case UntypedString:
-		return "string"
+		return "str"
 	case UntypedBool:
 		return "bool"
 	case UntypedFloat:
@@ -711,8 +704,8 @@ func (c *Checker) compositeLit(e *CompositeLit, hint Type) {
 					c.errorf(id.P, "unknown field %s in struct literal of type %s", id.Name, t)
 					continue
 				}
-				if foreign && !isExported(id.Name) {
-					c.errorf(id.P, "cannot refer to unexported field %s in struct literal of type %s", id.Name, t)
+				if foreign && !visible(u.Fields[fi].Pub, named.Pkg) {
+					c.errorf(id.P, "cannot refer to field %s in struct literal of type %s: it isn't pub", id.Name, t)
 				}
 				if seen[id.Name] {
 					c.errorf(id.P, "duplicate field name %s in struct literal", id.Name)
@@ -735,8 +728,8 @@ func (c *Checker) compositeLit(e *CompositeLit, hint Type) {
 				c.errorf(el.Pos(), "mixture of field:value and value elements in struct literal")
 				continue
 			}
-			if foreign && !isExported(u.Fields[i].Name) {
-				c.errorf(el.Pos(), "implicit assignment to unexported field %s in struct literal of type %s", u.Fields[i].Name, t)
+			if foreign && !visible(u.Fields[i].Pub, named.Pkg) {
+				c.errorf(el.Pos(), "implicit assignment to field %s in struct literal of type %s: it isn't pub", u.Fields[i].Name, t)
 			}
 			c.exprHint(el, u.Fields[i].Type)
 			c.assignable(el, u.Fields[i].Type, "struct literal")
@@ -750,7 +743,7 @@ func (c *Checker) compositeLit(e *CompositeLit, hint Type) {
 	case *SIMD:
 		c.indexedElts(e.Elts, u.Elem, u.Lanes)
 	case *Map:
-		c.errorf(e.P, "map literals are not supported; use make(map[K]V, capacity) and assign entries")
+		c.errorf(e.P, "map literals are not supported; use make(V[K], capacity) and assign entries")
 	default:
 		if t != tInvalid {
 			c.errorf(e.P, "invalid composite literal type %s", t)
@@ -830,8 +823,8 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 				c.invalid(e)
 				return
 			}
-			if !isExported(e.Sel.Name) {
-				c.errorf(e.Sel.P, "%s.%s is not exported", id.Name, e.Sel.Name)
+			if !visible(obj.Pub, pkg) {
+				c.errorf(e.Sel.P, "%s.%s is not pub", id.Name, e.Sel.Name)
 			}
 			e.Kind = SelQualified
 			e.Sel.Obj = obj
@@ -865,6 +858,24 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 		return
 	}
 	if xi.Mode == ModeType {
+		// Kind.member: an enum's member
+		if named, ok := xi.T.(*Named); ok {
+			c.resolveNamed(named)
+			if m := named.EnumMember(e.Sel.Name); m != nil {
+				if named.Pkg != c.pkg && !visible(m.Pub, named.Pkg) {
+					c.errorf(e.Sel.P, "%s isn't pub", exprString(e))
+				}
+				e.Kind = SelQualified
+				e.Sel.Obj = m
+				e.T, e.Const, e.Mode = named, m.Const.(constant.Value), ModeConst
+				return
+			}
+			if named.Obj.TypeDecl != nil && named.Obj.TypeDecl.Form == "enum" {
+				c.errorf(e.Sel.P, "%s has no member %s", named.Obj.Name, e.Sel.Name)
+				c.invalid(e)
+				return
+			}
+		}
 		c.errorf(e.Pos(), "method expressions are not supported (%s)", exprString(e))
 		c.invalid(e)
 		return
@@ -881,14 +892,14 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 	t := xi.T
 	if _, ok := t.Underlying().(*ErrorType); ok {
 		switch name {
-		case "Error":
+		case "message":
 			e.Kind = SelBuiltinMethod
 			e.T = &Signature{Results: []*Var{{Type: tString}}}
-		case "Code":
+		case "code":
 			e.Kind = SelBuiltinMethod
 			e.T = &Signature{Results: []*Var{{Type: tInt}}}
 		default:
-			c.errorf(e.Sel.P, "%s.%s undefined (type error has methods Error and Code)", exprString(e.X), name)
+			c.errorf(e.Sel.P, "%s.%s undefined (type error has methods message and code)", exprString(e.X), name)
 			c.invalid(e)
 			return
 		}
@@ -901,20 +912,20 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 	if vt, ok := t.Underlying().(*VecType); ok && isVecMethod(name) {
 		var sig *Signature
 		switch name {
-		case "Push":
+		case "push":
 			sig = &Signature{Params: []*Var{{Type: vt.Elem}}}
-		case "TryPush":
+		case "try_push":
 			sig = &Signature{Params: []*Var{{Type: vt.Elem}}, Results: []*Var{{Type: tBool}}}
-		case "Pop":
+		case "pop":
 			sig = &Signature{Results: []*Var{{Type: vt.Elem}}}
-		case "Clear":
+		case "clear":
 			sig = &Signature{}
-		case "Append": // a []T, or a string for a byte vector (see call.go)
+		case "append": // a []T, or a string for a byte vector (see call.go)
 			sig = &Signature{Params: []*Var{{Type: &Slice{Elem: vt.Elem}}}}
-		case "TryAppend":
+		case "try_append":
 			sig = &Signature{Params: []*Var{{Type: &Slice{Elem: vt.Elem}}}, Results: []*Var{{Type: tBool}}}
 		default:
-			c.errorf(e.Sel.P, "%s.%s undefined (vectors have Push, TryPush, Append, TryAppend, Pop and Clear)", exprString(e.X), name)
+			c.errorf(e.Sel.P, "%s.%s undefined (vectors have push, try_push, append, try_append, pop and clear)", exprString(e.X), name)
 			c.invalid(e)
 			return
 		}
@@ -943,7 +954,7 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 	}
 	if _, ok := t.Underlying().(*ArenaType); ok {
 		switch name {
-		case "Used", "Left", "Cap":
+		case "used", "left", "cap":
 			e.Kind = SelBuiltinMethod
 			e.T = &Signature{Results: []*Var{{Type: tInt}}}
 			e.Mode = ModeValue
@@ -952,7 +963,7 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 			}
 			return
 		}
-		c.errorf(e.Sel.P, "%s.%s undefined (type arena has methods Used, Left and Cap)", exprString(e.X), name)
+		c.errorf(e.Sel.P, "%s.%s undefined (type arena has methods used, left and cap)", exprString(e.X), name)
 		c.invalid(e)
 		return
 	}
@@ -960,8 +971,8 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 	if st != nil {
 		for i, f := range st.Fields {
 			if f.Name == name {
-				if named != nil && named.Pkg != c.pkg && !isExported(name) {
-					c.errorf(e.Sel.P, "%s.%s undefined (cannot refer to unexported field %s)", exprString(e.X), name, name)
+				if named != nil && named.Pkg != c.pkg && !visible(f.Pub, named.Pkg) {
+					c.errorf(e.Sel.P, "%s.%s undefined (cannot refer to field %s: it isn't pub)", exprString(e.X), name, name)
 				}
 				e.Kind = SelField
 				e.Path = []int{i}
@@ -983,8 +994,8 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 			if m.Name != name {
 				continue
 			}
-			if named.Pkg != c.pkg && !isExported(name) {
-				c.errorf(e.Sel.P, "%s.%s undefined (cannot refer to unexported method %s)", exprString(e.X), name, name)
+			if named.Pkg != c.pkg && !visible(m.Pub, named.Pkg) {
+				c.errorf(e.Sel.P, "%s.%s undefined (cannot refer to method %s: it isn't pub)", exprString(e.X), name, name)
 			}
 			e.Kind = SelMethod
 			e.Method = m
@@ -1005,7 +1016,7 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 			if rt := m.Sig.Recv.Type; !ptrRecv && !freshValue(e.X) {
 				// the receiver is a copy, and a copy of used map or channel storage aliases it
 				if s := storageIn(rt); s != nil {
-					c.errorf(e.Pos(), "cannot call %s on a copy of %s: %s holds %s storage; give %s a pointer receiver (*%s)", name, exprString(e.X), rt, s, name, rt)
+					c.errorf(e.Pos(), "cannot call %s on a copy of %s: %s holds %s storage; give %s a &self receiver (a %s)", name, exprString(e.X), rt, s, name, &Pointer{Elem: rt})
 				}
 			}
 			if !callee {
@@ -1015,7 +1026,7 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 		}
 	}
 	if _, ok := t.Underlying().(*VecType); ok {
-		c.errorf(e.Sel.P, "%s.%s undefined (vectors have Push, TryPush, Append, TryAppend, Pop and Clear)", exprString(e.X), name)
+		c.errorf(e.Sel.P, "%s.%s undefined (vectors have push, try_push, append, try_append, pop and clear)", exprString(e.X), name)
 	} else {
 		c.errorf(e.Sel.P, "%s.%s undefined (type %s has no field or method %s)", exprString(e.X), name, t, name)
 	}
@@ -1024,10 +1035,43 @@ func (c *Checker) selector(e *SelectorExpr, callee bool) {
 
 func isVecMethod(name string) bool {
 	switch name {
-	case "Push", "TryPush", "Append", "TryAppend", "Pop", "Clear":
+	case "push", "try_push", "append", "try_append", "pop", "clear":
 		return true
 	}
 	return false
+}
+
+func isImplicitMember(x Expr) bool {
+	_, ok := unparen(x).(*ImplicitMember)
+	return ok
+}
+
+// implicitMember resolves .name against the enum the context expects.
+func (c *Checker) implicitMember(e *ImplicitMember, hint Type) {
+	named, _ := hint.(*Named)
+	if named != nil {
+		c.resolveNamed(named)
+	}
+	if named == nil || len(named.Enum) == 0 {
+		what := "here no enum is expected"
+		if hint != nil && hint != tInvalid {
+			what = hint.String() + " is expected here, not an enum"
+		}
+		c.errorf(e.P, "can't tell which enum .%s belongs to: %s (write Type.%s)", e.Name.Name, what, e.Name.Name)
+		c.invalid(e)
+		return
+	}
+	m := named.EnumMember(e.Name.Name)
+	if m == nil {
+		c.errorf(e.Name.P, "%s has no member %s", named.Obj.Name, e.Name.Name)
+		c.invalid(e)
+		return
+	}
+	if named.Pkg != c.pkg && !visible(m.Pub, named.Pkg) {
+		c.errorf(e.P, "%s.%s isn't pub", named, e.Name.Name)
+	}
+	e.Name.Obj = m
+	e.T, e.Const, e.Mode = named, m.Const.(constant.Value), ModeConst
 }
 
 // ---- index & slice ----
@@ -1055,8 +1099,9 @@ func (c *Checker) checkIndex(x Expr, length int64) {
 func (c *Checker) index(e *IndexExpr) {
 	c.expr(e.X)
 	if e.X.info().Mode == ModeType {
-		c.errorf(e.P, "generic types are not supported")
-		c.invalid(e)
+		// T[n] or V[K] in an expression (make(int[str], n)): a type
+		e.T = c.typExpr(e)
+		e.Mode = ModeType
 		return
 	}
 	if !c.value(e.X) {
@@ -1182,7 +1227,7 @@ func (c *Checker) sliceExpr(e *SliceExpr) {
 			return
 		}
 		if e.Max != nil {
-			c.errorf(e.P, "invalid operation: 3-index slice of string")
+			c.errorf(e.P, "invalid operation: 3-index slice of str")
 		}
 		if isUntyped(xi.T) {
 			c.convertUntyped(e.X, tString, "slice expression")
@@ -1344,7 +1389,17 @@ func isComparison(op Tok) bool {
 }
 
 func (c *Checker) binary(e *BinaryExpr) {
-	if !c.valueExpr(e.X, nil) || !c.valueExpr(e.Y, nil) {
+	// d == .north: the other operand says which enum
+	var checked bool
+	switch {
+	case isImplicitMember(e.X) && !isImplicitMember(e.Y):
+		checked = c.valueExpr(e.Y, nil) && c.valueExpr(e.X, e.Y.info().T)
+	case isImplicitMember(e.Y):
+		checked = c.valueExpr(e.X, nil) && c.valueExpr(e.Y, e.X.info().T)
+	default:
+		checked = c.valueExpr(e.X, nil) && c.valueExpr(e.Y, nil)
+	}
+	if !checked {
 		c.invalid(e)
 		return
 	}

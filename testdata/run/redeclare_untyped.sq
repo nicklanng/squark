@@ -1,13 +1,13 @@
-package main
+program
 
 // a := redeclaring an existing variable converts an untyped value to that variable's type
 
-func main() {
-	var a int8
+fn main() {
+	var a i8
 	a, b := 100, 2
-	var f float32
+	var f f32
 	f, c := 1, 2.5
-	var u uint64
+	var u u64
 	u, d := 1<<63, "x"
 	println(a, b, f, c, u, d)
 }

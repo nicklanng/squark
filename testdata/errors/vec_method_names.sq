@@ -1,12 +1,14 @@
-package main
+program
 
 // a vector type's built-in methods take these names: a user method would never be called
-type Stack [..3]int
+Stack: int[..3]
 
-func (s *Stack) Push(x int) {} // ERROR "method Stack.Push would be hidden by the vector method Push"
+impl Stack {
+	fn push(&self, x int) {} // ERROR "method Stack.push would be hidden by the vector method push"
 
-func (s *Stack) Clear() {} // ERROR "method Stack.Clear would be hidden by the vector method Clear"
+	fn clear(&self) {} // ERROR "method Stack.clear would be hidden by the vector method clear"
 
-func (s *Stack) Top() int { return s[len(s)-1] }
+	fn top(&self) -> int { return self[len(self)-1] }
+}
 
-func main() {}
+fn main() {}

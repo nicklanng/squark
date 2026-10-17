@@ -1,15 +1,15 @@
-package main
+program
 
 // changed through its address only: the nil check must stay
-type P struct{ v int }
+struct P { v int }
 
 //squark:noinline
-func viaAddr(pp **P) { *pp = nil }
+fn via_addr(pp **P) { *pp = nil }
 
-func main() {
+fn main() {
 	x := P{1}
 	q := &x
-	viaAddr(&q)
+	via_addr(&q)
 	println("before")
 	println(q.v)
 }

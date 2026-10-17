@@ -1,0 +1,17 @@
+program
+
+struct C { n int }
+
+impl Missing { // ERROR "undefined: Missing"
+	fn get(self) -> int { return 0 }
+}
+
+impl C {
+	fn get(self) -> int { return self.n }
+}
+
+impl C {
+	fn get(&self) -> int { return 1 } // ERROR "method C.get already declared"
+}
+
+fn main() {}

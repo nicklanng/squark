@@ -87,7 +87,7 @@ func TestSharedChanDeadlock(t *testing.T) {
 		{"select", "", "select {\n\tcase <-c:\n\tcase d <- 1:\n\t}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bin := buildSource(t, "package main\n\n"+tc.directive+"\nshared var c chan int cap 0\nshared var d chan int cap 0\n\nfunc main() {\n\t"+tc.body+"\n}\n")
+			bin := buildSource(t, "program {\n"+tc.directive+"}\n\nshared c int chan[0]\nshared d int chan[0]\n\nfn main() {\n\t"+tc.body+"\n}\n")
 			wantDeadlock(t, tc.name, bin)
 		})
 	}
@@ -96,32 +96,28 @@ func TestSharedChanDeadlock(t *testing.T) {
 // TestWaitReadableDeadlock: a WaitReadable that timed out leaves nothing registered with the
 // poller, so a goroutine that then blocks for good is reported as a deadlock instead of hanging.
 func TestWaitReadableDeadlock(t *testing.T) {
-	bin := buildSource(t, `package main
+	bin := buildSource(t, `program
 
-import (
-	"net"
-	"strconv"
-	"time"
-)
+use net, strconv, time
 
-var never chan int cap 1
+thread never int chan[1]
 
-func main() {
-	l, err := net.Listen("127.0.0.1:0")
+fn main() {
+	l, err := net.listen("127.0.0.1:0")
 	if err != nil {
 		panic(err)
 	}
-	var b [32]byte
-	c, err := net.Dial(string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), l.Port())))
+	var b u8[32]
+	c, err := net.dial(str(strconv.append_int(append(b[:0], "127.0.0.1:"...), l.port())))
 	if err != nil {
 		panic(err)
 	}
 	_ = c
-	server, err := l.Accept()
+	server, err := l.accept()
 	if err != nil {
 		panic(err)
 	}
-	println(server.WaitReadable(10 * time.Millisecond))
+	println(server.wait_readable(10 * time.millisecond))
 	<-never
 }
 `)
@@ -132,56 +128,51 @@ func main() {
 // stops listening there: the runtime's own copy of the socket (macOS shares one between threads)
 // is closed too, and listening again works.
 func TestListenerCloseThreads(t *testing.T) {
-	src := `package main
+	src := `program {
+	%s
+}
 
-import (
-	"net"
-	"os"
-	"runtime"
-	"time"
-)
+use net, os, runtime, time
 
-%s
-
-func main() {
-	if runtime.Shard() != 0 {
+fn main() {
+	if runtime.shard() != 0 {
 		return
 	}
-	l, err := net.Listen(os.Arg(1))
+	l, err := net.listen(os.arg(1))
 	if err != nil {
 		println("listen:", err)
 		return
 	}
-	l.Close()
-	time.Sleep(200 * time.Millisecond) // every worker has closed its listener
-	if c, err := net.Dial(os.Arg(1)); err == nil {
+	l.close()
+	time.sleep(200 * time.millisecond) // every worker has closed its listener
+	if c, err := net.dial(os.arg(1)); err == nil {
 		println("dial after close: connected")
-		c.Close()
+		c.close()
 	} else {
 		println("dial after close: refused")
 	}
-	if os.Arg(2) != "relisten" {
+	if os.arg(2) != "relisten" {
 		return
 	}
-	l, err = net.Listen(os.Arg(1))
+	l, err = net.listen(os.arg(1))
 	if err != nil {
 		println("listen again:", err)
 		return
 	}
-	c, err := net.Dial(os.Arg(1))
+	c, err := net.dial(os.arg(1))
 	if err != nil {
 		println("dial:", err)
 		return
 	}
-	s, err := l.Accept()
+	s, err := l.accept()
 	if err != nil {
 		println("accept:", err)
 		return
 	}
 	println("relisten: ok")
-	s.Close()
-	c.Close()
-	l.Close()
+	s.close()
+	c.close()
+	l.close()
 }
 `
 	// (with workers, which process gets a connection is the kernel's choice: no relistening)
@@ -216,17 +207,14 @@ func TestHugeDurations(t *testing.T) {
 // TestSQLiteNULPath:a database path with a NUL byte is invalid (EINVAL, as os.Open reports it)
 // instead of opening the file named by the part before the NUL.
 func TestSQLiteNULPath(t *testing.T) {
-	bin := buildSource(t, `package main
+	bin := buildSource(t, `program
 
-import (
-	"os"
-	"sqlite"
-)
+use os, sqlite
 
 arena a 256
 
-func main() {
-	_, err := sqlite.Open(os.Arg(1) + "/db\x00.evil" in a)
+fn main() {
+	_, err := sqlite.open(os.arg(1) + "/db\x00.evil" in a)
 	println(err)
 }
 `)

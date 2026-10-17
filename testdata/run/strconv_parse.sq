@@ -1,9 +1,9 @@
-package main
+program
 
-import "strconv"
+use strconv
 
-func show(s string, base int) {
-	n, err := strconv.ParseInt(s, base)
+fn show(s str, base int) {
+	n, err := strconv.parse_int(s, base)
 	if err != nil {
 		println(s, base, "error:", err)
 		return
@@ -11,7 +11,7 @@ func show(s string, base int) {
 	println(s, base, n)
 }
 
-func main() {
+fn main() {
 	show("_", 10)
 	show("1_000", 10)
 	show("-_", 10)

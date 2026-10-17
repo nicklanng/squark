@@ -1,20 +1,20 @@
-package main
+program
 
 // multi-target assignment: index and pointer operands on the left are evaluated before any store
 
-type P struct{ n int }
+struct P { n int }
 
-var m map[int]int cap 8
+thread m int[int; 8]
 
-func two() (int, int) { return 2, 7 }
+fn two() -> (int, int) { return 2, 7 }
 
-func main() {
-	var x [4]int
+fn main() {
+	var x int[4]
 	i := 0
 	i, x[i] = 2, 7
 	println(i, x[0], x[2])
 
-	s := []int{0, 0, 0}
+	s := int[]{0, 0, 0}
 	j := 0
 	j, s[j] = 1, 5
 	println(j, s[0], s[1])
@@ -28,7 +28,7 @@ func main() {
 	k, m[k] = 3, 10
 	println(k, m[1], m[3])
 
-	var y [4]int
+	var y int[4]
 	n := 0
 	n, y[n] = two()
 	println(n, y[0], y[2])
@@ -38,7 +38,7 @@ func main() {
 	q, ok = m[1]
 	println(q, ok)
 
-	ps := [2]P{}
+	ps := P[2]{}
 	r := 0
 	r, ps[r].n = 1, 4
 	println(r, ps[0].n, ps[1].n)

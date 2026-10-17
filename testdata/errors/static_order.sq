@@ -1,9 +1,9 @@
-package main
+program
 
-var kept string
+thread kept str
 
-func keep(name string static) { // ERROR "static goes before the type: write name static string"
+fn keep(name static str) { // ERROR "static goes after the type: write name str in static"
 	kept = name
 }
 
-func main() { keep("x") }
+fn main() { keep("x") }

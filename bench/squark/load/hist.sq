@@ -1,24 +1,24 @@
-package main
+program
 
 // Hist is a small HDR-style log-linear histogram of nanosecond latencies, the same as
 // bench/load/hist.go: each power-of-two range is split into 128 linear sub-buckets, so any
 // recorded value is reported with < 0.8% relative error.
 const (
-	subBits    = 7
-	subCount   = 1 << subBits
-	histBucket = (64-subBits)*subCount + subCount
+	sub_bits    = 7
+	sub_count   = 1 << sub_bits
+	hist_bucket = (64-sub_bits)*sub_count + sub_count
 )
 
-type Hist struct {
-	counts [histBucket]uint64
-	n      uint64
-	sum    uint64
-	max    uint64
-	min    uint64
+struct Hist {
+	counts u64[hist_bucket]
+	n      u64
+	sum    u64
+	max    u64
+	min    u64
 }
 
 // len64 is Go's bits.Len64: the number of bits needed to represent x.
-func len64(x uint64) int {
+fn len64(x u64) -> int {
 	n := 0
 	if x >= 1<<32 {
 		x >>= 32
@@ -32,86 +32,89 @@ func len64(x uint64) int {
 		x >>= 8
 		n += 8
 	}
-	for x != 0 {
+	while x != 0 {
 		x >>= 1
 		n++
 	}
 	return n
 }
 
-func bucketOf(v uint64) int {
-	if v < 2*subCount {
+fn bucket_of(v u64) -> int {
+	if v < 2*sub_count {
 		return int(v)
 	}
-	exp := len64(v) - (subBits + 1)
-	return exp*subCount + int(v>>uint(exp))
+	exp := len64(v) - (sub_bits + 1)
+	return exp*sub_count + int(v>>uint(exp))
 }
 
-// bucketMid returns a representative value (midpoint) for bucket i.
-func bucketMid(i int) uint64 {
-	if i < 2*subCount {
-		return uint64(i)
+// bucket_mid returns a representative value (midpoint) for bucket i.
+fn bucket_mid(i int) -> u64 {
+	if i < 2*sub_count {
+		return u64(i)
 	}
-	exp := i/subCount - 1
-	mant := uint64(i - exp*subCount)
+	exp := i/sub_count - 1
+	mant := u64(i - exp*sub_count)
 	lo := mant << uint(exp)
-	return lo + (uint64(1)<<uint(exp))/2
+	return lo + (u64(1)<<uint(exp))/2
 }
 
-func (h *Hist) record(ns int) {
-	v := uint64(ns)
-	h.counts[bucketOf(v)]++
-	h.n++
-	h.sum += v
-	if v > h.max {
-		h.max = v
-	}
-	if h.min == 0 || v < h.min {
-		h.min = v
-	}
-}
-
-func (h *Hist) merge(o *Hist) {
-	for i := 0; i < histBucket; i++ {
-		h.counts[i] += o.counts[i]
-	}
-	h.n += o.n
-	h.sum += o.sum
-	if o.max > h.max {
-		h.max = o.max
-	}
-	if o.min != 0 && (h.min == 0 || o.min < h.min) {
-		h.min = o.min
-	}
-}
-
-// quantile returns the q-quantile in nanoseconds.
-func (h *Hist) quantile(q float64) int {
-	if h.n == 0 {
-		return 0
-	}
-	target := uint64(q*float64(h.n) + 0.5)
-	if target < 1 {
-		target = 1
-	}
-	var seen uint64
-	for i := 0; i < histBucket; i++ {
-		seen += h.counts[i]
-		if seen >= target {
-			v := bucketMid(i)
-			if v > h.max {
-				v = h.max
-			}
-			return int(v)
+impl Hist {
+	fn record(&self, ns int) {
+		v := u64(ns)
+		self.counts[bucket_of(v)]++
+		self.n++
+		self.sum += v
+		if v > self.max {
+			self.max = v
+		}
+		if self.min == 0 or v < self.min {
+			self.min = v
 		}
 	}
-	return int(h.max)
+
+	fn merge(&self, o *Hist) {
+		for i := 0; i < hist_bucket; i++ {
+			self.counts[i] += o.counts[i]
+		}
+		self.n += o.n
+		self.sum += o.sum
+		if o.max > self.max {
+			self.max = o.max
+		}
+		if o.min != 0 and (self.min == 0 or o.min < self.min) {
+			self.min = o.min
+		}
+	}
+
+	// quantile returns the q-quantile in nanoseconds.
+	fn quantile(&self, q f64) -> int {
+		if self.n == 0 {
+			return 0
+		}
+		target := u64(q*f64(self.n) + 0.5)
+		if target < 1 {
+			target = 1
+		}
+		var seen u64
+		for i := 0; i < hist_bucket; i++ {
+			seen += self.counts[i]
+			if seen >= target {
+				v := bucket_mid(i)
+				if v > self.max {
+					v = self.max
+				}
+				return int(v)
+			}
+		}
+		return int(self.max)
+	}
+
+	// mean returns the mean in nanoseconds.
+	fn mean(&self) -> int {
+		if self.n == 0 {
+			return 0
+		}
+		return int(self.sum / self.n)
+	}
 }
 
-// mean returns the mean in nanoseconds.
-func (h *Hist) mean() int {
-	if h.n == 0 {
-		return 0
-	}
-	return int(h.sum / h.n)
-}

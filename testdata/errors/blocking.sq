@@ -1,14 +1,14 @@
-package main
+program
 
-extern func usleepish(us int) int stack 8K blocking // fine: an extern
+extern fn usleepish(us int) -> int stack 8K blocking // fine: an extern
 
-func slow(n int) int stack 8K blocking { // ERROR "only extern functions can be blocking"
+fn slow(n int) -> int stack 8K blocking { // ERROR "only extern functions can be blocking"
 	return n
 }
 
-type blocking int // still an ordinary name
+Blocking: int // still an ordinary name
 
-func main() {
-	var b blocking = 2
+fn main() {
+	var b Blocking = 2
 	println(slow(int(b)))
 }

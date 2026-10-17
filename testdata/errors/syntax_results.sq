@@ -1,0 +1,5 @@
+program
+
+fn f() int { return 1 } // ERROR "results follow ->: write -> identifier \"int\""
+
+fn main() {}

@@ -1,171 +1,176 @@
-package http
+module http
 
-import "json"
+use json
 
 // JSON writes a JSON document into a response as it is built, with commas, nesting and escaping
 // handled (a json.Encoder underneath, writing into the response's own buffer). A document of any
 // size takes no memory beyond the response's buffer, and long strings are written without being
 // copied:
 //
-//	j := w.JSON()
-//	j.Object()
-//	j.Key("id")
-//	j.Int(7)
-//	j.Key("tags")
-//	j.Array()
-//	j.String("a")
-//	j.End()
-//	j.End()                    // {"id":7,"tags":["a"]}
+//	j := w.json()
+//	j.object()
+//	j.key("id")
+//	j.int(7)
+//	j.key("tags")
+//	j.array()
+//	j.string("a")
+//	j.end()
+//	j.end()                    // {"id":7,"tags":["a"]}
 //
-// A call out of place (a value in an object without a Key, End with nothing open) records an
+// A call out of place (a value in an object without a key, end with nothing open) records an
 // error instead of writing invalid JSON, and later calls write nothing: Finish reports it.
-type JSON ResponseWriter // the response, seen as a JSON document (its encoder is a field of it)
+pub JSON: ResponseWriter // the response, seen as a JSON document (its encoder is a field of it)
 
-// jsonDirect is the length from which String and Raw write a value straight to the response
+// json_direct is the length from which string and raw write a value straight to the response
 // instead of through the encoder (which must fit a whole value in the write buffer).
-const jsonDirect = 1024
+const json_direct = 1024
 
-// JSON sets the response's Content-Type to application/json (unless already set) and returns a
-// JSON writer for its body, which builds the document straight into the response's buffer. Set
-// the status with WriteHeader first if it isn't 200, and don't write to w directly while the
-// document is open.
-func (w *ResponseWriter) JSON() *JSON from w {
-	if !w.hasType {
-		w.SetHeader("Content-Type", "application/json")
-	}
-	w.enc = json.NewEncoder(w.buf)
-	return (*JSON)(w)
-}
-
-// full takes the encoder's output as the response's staged bytes. If the last call didn't fit, it
-// sends what is staged so the caller can make the call again, and reports true.
-func (j *JSON) full() bool {
-	w := (*ResponseWriter)(j)
-	w.buf = j.enc.Bytes()
-	if j.enc.Err != json.ErrFull {
-		return false
-	}
-	w.spill()
-	j.enc.Clear()
-	j.enc.Err = nil
-	return true
-}
-
-// direct prepares for writing a value to the response without the encoder: the encoder has
-// written what precedes it, and everything staged is sent so the encoder can start afresh after.
-func (j *JSON) direct() bool {
-	if !j.enc.RawStart() && !(j.full() && j.enc.RawStart()) {
-		return false
-	}
-	j.full()
-	(*ResponseWriter)(j).spill()
-	j.enc.Clear()
-	return true
-}
-
-// resume lines the encoder up with the response again after a direct write.
-func (j *JSON) resume() {
-	(*ResponseWriter)(j).spill()
-	j.enc.Clear()
-}
-
-// Object starts an object; End closes it.
-func (j *JSON) Object() {
-	if j.enc.Object(); j.full() {
-		j.enc.Object()
-		j.full()
-	}
-}
-
-// Array starts an array; End closes it.
-func (j *JSON) Array() {
-	if j.enc.Array(); j.full() {
-		j.enc.Array()
-		j.full()
-	}
-}
-
-// End closes the innermost object or array.
-func (j *JSON) End() {
-	if j.enc.End(); j.full() {
-		j.enc.End()
-		j.full()
-	}
-}
-
-// Key names the next value inside an object.
-func (j *JSON) Key(name string) {
-	if j.enc.Key(name); j.full() {
-		j.enc.Key(name)
-		j.full()
-	}
-}
-
-// String writes a string value (invalid UTF-8 becomes U+FFFD, as json.AppendString does).
-func (j *JSON) String(s string) {
-	if len(s) >= jsonDirect {
-		if j.direct() {
-			json.WriteString((*ResponseWriter)(j), s)
-			j.resume()
+impl ResponseWriter {
+	// json sets the response's Content-Type to application/json (unless already set) and returns a
+	// JSON writer for its body, which builds the document straight into the response's buffer. Set
+	// the status with write_header first if it isn't 200, and don't write to w directly while the
+	// document is open.
+	pub fn json(&self) -> *JSON in self {
+		if not self.has_type {
+			self.set_header("Content-Type", "application/json")
 		}
-		return
-	}
-	if j.enc.String(s); j.full() {
-		j.enc.String(s)
-		j.full()
+		self.enc = json.new_encoder(self.buf)
+		return (*JSON)(self)
 	}
 }
 
-// Int writes an integer value.
-func (j *JSON) Int(v int) {
-	if j.enc.Int(v); j.full() {
-		j.enc.Int(v)
-		j.full()
-	}
-}
-
-// Float writes a number in its shortest form; NaN and infinities have none (Finish reports it).
-func (j *JSON) Float(v float64) {
-	if j.enc.Float(v); j.full() {
-		j.enc.Float(v)
-		j.full()
-	}
-}
-
-// Bool writes true or false.
-func (j *JSON) Bool(v bool) {
-	if j.enc.Bool(v); j.full() {
-		j.enc.Bool(v)
-		j.full()
-	}
-}
-
-// Null writes null.
-func (j *JSON) Null() {
-	if j.enc.Null(); j.full() {
-		j.enc.Null()
-		j.full()
-	}
-}
-
-// Raw writes b, which must be one complete JSON value (it is checked).
-func (j *JSON) Raw(b []byte) {
-	if len(b) >= jsonDirect {
-		d := json.NewDecoder(b)
-		if !d.Skip() || !d.End() {
-			j.enc.Raw(b) // records the error
-		} else if j.direct() {
-			(*ResponseWriter)(j).Write(b)
-			j.resume()
+impl JSON {
+	// full takes the encoder's output as the response's staged bytes. If the last call didn't fit, it
+	// sends what is staged so the caller can make the call again, and reports true.
+	fn full(&self) -> bool {
+		w := (*ResponseWriter)(self)
+		w.buf = self.enc.bytes()
+		if self.enc.err != json.Full {
+			return false
 		}
-		return
+		w.spill()
+		self.enc.clear()
+		self.enc.err = nil
+		return true
 	}
-	if j.enc.Raw(b); j.full() {
-		j.enc.Raw(b)
-		j.full()
+
+	// direct prepares for writing a value to the response without the encoder: the encoder has
+	// written what precedes it, and everything staged is sent so the encoder can start afresh after.
+	fn direct(&self) -> bool {
+		if not self.enc.raw_start() and not (self.full() and self.enc.raw_start()) {
+			return false
+		}
+		self.full()
+		(*ResponseWriter)(self).spill()
+		self.enc.clear()
+		return true
 	}
+
+	// resume lines the encoder up with the response again after a direct write.
+	fn resume(&self) {
+		(*ResponseWriter)(self).spill()
+		self.enc.clear()
+	}
+
+	// object starts an object; end closes it.
+	pub fn object(&self) {
+		if self.enc.object(); self.full() {
+			self.enc.object()
+			self.full()
+		}
+	}
+
+	// array starts an array; end closes it.
+	pub fn array(&self) {
+		if self.enc.array(); self.full() {
+			self.enc.array()
+			self.full()
+		}
+	}
+
+	// end closes the innermost object or array.
+	pub fn end(&self) {
+		if self.enc.end(); self.full() {
+			self.enc.end()
+			self.full()
+		}
+	}
+
+	// key names the next value inside an object.
+	pub fn key(&self, name str) {
+		if self.enc.key(name); self.full() {
+			self.enc.key(name)
+			self.full()
+		}
+	}
+
+	// string writes a string value (invalid UTF-8 becomes U+FFFD, as json.append_string does).
+	pub fn string(&self, s str) {
+		if len(s) >= json_direct {
+			if self.direct() {
+				json.write_string((*ResponseWriter)(self), s)
+				self.resume()
+			}
+			return
+		}
+		if self.enc.string(s); self.full() {
+			self.enc.string(s)
+			self.full()
+		}
+	}
+
+	// int writes an integer value.
+	pub fn int(&self, v int) {
+		if self.enc.int(v); self.full() {
+			self.enc.int(v)
+			self.full()
+		}
+	}
+
+	// float writes a number in its shortest form; NaN and infinities have none (Finish reports it).
+	pub fn float(&self, v f64) {
+		if self.enc.float(v); self.full() {
+			self.enc.float(v)
+			self.full()
+		}
+	}
+
+	// bool writes true or false.
+	pub fn bool(&self, v bool) {
+		if self.enc.bool(v); self.full() {
+			self.enc.bool(v)
+			self.full()
+		}
+	}
+
+	// null writes null.
+	pub fn null(&self) {
+		if self.enc.null(); self.full() {
+			self.enc.null()
+			self.full()
+		}
+	}
+
+	// raw writes b, which must be one complete JSON value (it is checked).
+	pub fn raw(&self, b u8[]) {
+		if len(b) >= json_direct {
+			d := json.new_decoder(b)
+			if not d.skip() or not d.end() {
+				self.enc.raw(b) // records the error
+			} else if self.direct() {
+				(*ResponseWriter)(self).write(b)
+				self.resume()
+			}
+			return
+		}
+		if self.enc.raw(b); self.full() {
+			self.enc.raw(b)
+			self.full()
+		}
+	}
+
+	// finish reports the first misuse (json.Misuse, ErrDepth, ErrFloat, ...), or an unclosed
+	// document. It writes nothing.
+	pub fn finish(&self) -> ! { return self.enc.finish() }
 }
 
-// Finish reports the first misuse (json.ErrMisuse, ErrDepth, ErrFloat, ...), or an unclosed
-// document. It writes nothing.
-func (j *JSON) Finish() error { return j.enc.Finish() }

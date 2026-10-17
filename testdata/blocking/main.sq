@@ -1,19 +1,19 @@
-package main
+program
 
 // Blocking externs run on helper threads: while one goroutine waits in a 300ms C call, the others
 // on its thread keep running (the ticker ticks), and two slow calls overlap.
 
-import "time"
+use time
 
-extern "slow_ms" func slowMS(ms int) int stack 8K blocking
-extern "slow_fill" func slowFill(p *byte, n int, v int) stack 8K blocking
+extern fn slow_ms(ms int) -> int stack 8K blocking c"slow_ms"
+extern fn slow_fill(p *u8, n int, v int) stack 8K blocking c"slow_fill"
 
-var ticks int
-var done chan int cap 4
+thread ticks int
+thread done int chan[4]
 
 task ticker() pool 1 {
 	for i := 0; i < 1000; i++ {
-		time.Sleep(10 * time.Millisecond)
+		time.sleep(10 * time.millisecond)
 		ticks++
 		if len(done) == 2 {
 			return
@@ -22,20 +22,20 @@ task ticker() pool 1 {
 }
 
 task sleeper(ms int) pool 2 {
-	done <- slowMS(ms)
+	done <- slow_ms(ms)
 }
 
-func main() {
-	var buf [8]byte
-	slowFill(&buf[0], len(buf), 7) // arguments point into the goroutine's stack
+fn main() {
+	var buf u8[8]
+	slow_fill(&buf[0], len(buf), 7) // arguments point into the goroutine's stack
 	println(buf[0], buf[7])
 
-	start := time.Now()
-	go ticker()
-	go sleeper(300)
-	go sleeper(300)
+	start := time.now()
+	start ticker()
+	start sleeper(300)
+	start sleeper(300)
 	sum := <-done + <-done
-	elapsed := time.Since(start).Milliseconds()
+	elapsed := time.since(start).milliseconds()
 	println(sum)
 	if elapsed >= 550 {
 		println("slow calls did not overlap:", elapsed, "ms")

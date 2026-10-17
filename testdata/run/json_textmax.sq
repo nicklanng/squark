@@ -1,59 +1,59 @@
-package main
+program
 
 // json.Decoder.TextMax: a string up to max decoded bytes is kept at its exact size; a longer one
 // is ErrTooLong, uses none of the arena and leaves the decoder at its opening quote; escapes and
 // invalid UTF-8 count as the bytes they decode to; Text has no limit
 
-import "json"
+use json
 
-func main() {
-	var data [128]byte
-	arena a 1K {
+fn main() {
+	var data u8[128]
+	with arena a 1K {
 		k := copy(data[:], `["abcd", "abcde",
   "ééx", "a`+"\xff"+`b", "long"]`)
-		d := json.NewDecoderIn(data[:k], a)
-		d.BeginArray()
-		d.More()
-		s, ok := d.TextMax(4)
-		println("at the limit:", ok, s, a.Used())
-		d.More()
-		used := a.Used()
-		_, ok = d.TextMax(4)
-		println("one over:", ok, d.Err == json.ErrTooLong, d.Err.Error(), a.Used()-used, d.Offset(), d.Line())
+		d := json.new_decoder_in(data[:k], a)
+		d.begin_array()
+		d.more()
+		s, ok := d.text_max(4)
+		println("at the limit:", ok, s, a.used())
+		d.more()
+		used := a.used()
+		_, ok = d.text_max(4)
+		println("one over:", ok, d.err == json.TooLong, d.err.message(), a.used()-used, d.offset(), d.line())
 
 		// escapes count decoded: é is 2 bytes, so 5 in all
-		d = json.NewDecoderIn(data[:k], a)
-		d.BeginArray()
-		d.More()
-		d.Skip()
-		d.More()
-		d.Skip()
-		d.More()
-		s, ok = d.TextMax(5)
+		d = json.new_decoder_in(data[:k], a)
+		d.begin_array()
+		d.more()
+		d.skip()
+		d.more()
+		d.skip()
+		d.more()
+		s, ok = d.text_max(5)
 		println("escapes:", ok, s, len(s))
-		d.More()
-		s, ok = d.TextMax(4) // \xff becomes U+FFFD: 5 bytes
-		println("invalid byte:", ok, d.Err.Error(), d.Line())
+		d.more()
+		s, ok = d.text_max(4) // \xff becomes U+FFFD: 5 bytes
+		println("invalid byte:", ok, d.err.message(), d.line())
 
-		d = json.NewDecoderIn(data[:k], a)
-		d.BeginArray()
-		d.More()
-		d.Skip()
-		d.More()
-		s, ok = d.TextMax(0)
-		println("max 0:", ok, d.Err == json.ErrTooLong)
-		d = json.NewDecoderIn(data[1:3], a) // `"a`: unterminated is still a syntax error
-		_, ok = d.TextMax(100)
-		println("unterminated:", ok, d.Err == json.ErrSyntax)
+		d = json.new_decoder_in(data[:k], a)
+		d.begin_array()
+		d.more()
+		d.skip()
+		d.more()
+		s, ok = d.text_max(0)
+		println("max 0:", ok, d.err == json.TooLong)
+		d = json.new_decoder_in(data[1:3], a) // `"a`: unterminated is still a syntax error
+		_, ok = d.text_max(100)
+		println("unterminated:", ok, d.err == json.Syntax)
 		k = copy(data[:], `""`)
-		d = json.NewDecoderIn(data[:k], a)
-		s, ok = d.TextMax(0)
+		d = json.new_decoder_in(data[:k], a)
+		s, ok = d.text_max(0)
 		println("empty at max 0:", ok, len(s))
 
 		// Text: no limit
 		k = copy(data[:], `"0123456789012345678901234567890123456789"`)
-		d = json.NewDecoderIn(data[:k], a)
-		s, ok = d.Text()
+		d = json.new_decoder_in(data[:k], a)
+		s, ok = d.text()
 		println("text:", ok, len(s))
 	}
 }

@@ -26,120 +26,113 @@ import (
 // header, -timeout ms sets Client.Timeout, -discard sets DiscardBody, -raw sends the following
 // requests through AppendRequest and RoundTrip, -close closes the connection. With -nc as the
 // first flag the client is made with NewClient on a connection from net.Dial.
-const httpClientProg = `package main
+const httpClientProg = `program
 
-import (
-	"http"
-	"net"
-	"os"
-	"strconv"
-	"strings"
-	"time"
-)
+use http, net, os, strconv, strings, time
 
-var buf [8K]byte
-var reqBuf [4K]byte
+thread buf u8[8K]
+thread req_buf u8[4K]
 
-func show(resp http.Response, err error) {
-	var line [512]byte
+fn show(resp http.Response, err error) {
+	var line u8[512]
 	b := line[:0]
 	if err != nil {
 		b = append(b, "error: "...)
-		b = append(b, err.Error()...)
+		b = append(b, err.message()...)
 		b = append(b, ' ')
 	}
-	b = strconv.AppendInt(b, resp.StatusCode)
+	b = strconv.append_int(b, resp.status_code)
 	b = append(b, ' ')
-	b = append(b, resp.Reason...)
+	b = append(b, resp.reason...)
 	b = append(b, " proto="...)
-	b = append(b, resp.Proto...)
+	b = append(b, resp.proto...)
 	b = append(b, " cl="...)
-	b = strconv.AppendInt(b, resp.ContentLength)
+	b = strconv.append_int(b, resp.content_length)
 	b = append(b, " close="...)
-	if resp.Close {
+	if resp.close {
 		b = append(b, "true"...)
 	} else {
 		b = append(b, "false"...)
 	}
 	b = append(b, " x-test="...)
-	b = append(b, resp.HeaderValue("x-TEST")...)
+	b = append(b, resp.header_value("x-TEST")...)
 	b = append(b, " headers="...)
-	b = strconv.AppendInt(b, resp.NumHeaders())
+	b = strconv.append_int(b, resp.num_headers())
 	b = append(b, " len="...)
-	b = strconv.AppendInt(b, len(resp.Body))
+	b = strconv.append_int(b, len(resp.body))
 	sum := 0
-	for i := 0; i < len(resp.Body); i++ {
-		sum = (sum*31 + int(resp.Body[i])) % 1000000007
+	for i := 0; i < len(resp.body); i++ {
+		sum = (sum*31 + int(resp.body[i])) % 1000000007
 	}
 	b = append(b, " sum="...)
-	b = strconv.AppendInt(b, sum)
-	if len(resp.Body) <= 64 {
+	b = strconv.append_int(b, sum)
+	if len(resp.body) <= 64 {
 		b = append(b, " body="...)
-		b = append(b, resp.Body...)
+		b = append(b, resp.body...)
 	}
-	println(string(b))
+	println(str(b))
 }
 
-func main() {
-	addr := os.Arg(1)
+fn main() {
+	addr := os.arg(1)
 	first := 2
 	var c http.Client
-	if os.Arg(2) == "-nc" {
-		conn, err := net.Dial(addr)
+	if os.arg(2) == "-nc" {
+		conn, err := net.dial(addr)
 		if err != nil {
-			println("dial error:", err.Error())
+			println("dial error:", err.message())
 			return
 		}
-		c = http.NewClient(conn, "test.host", buf[:])
+		c = http.new_client(conn, "test.host", buf[:])
 		first = 3
 	} else {
-		cl, err := http.Dial(addr, buf[:])
+		cl, err := http.dial(addr, buf[:])
 		if err != nil {
-			println("dial error:", err.Error())
+			println("dial error:", err.message())
 			return
 		}
 		c = cl
 	}
-	var hdrs [..8]http.Header
+	var hdrs http.Header[..8]
 	raw := false
-	for i := first; i < os.NArgs(); i++ {
-		a := os.Arg(i)
+	for i := first; i < os.n_args(); i++ {
+		a := os.arg(i)
 		switch a {
 		case "-H":
 			i++
-			name, value, _ := strings.Cut(os.Arg(i), ":")
-			hdrs.Push(http.Header{Name: name, Value: value})
+			name, value, _ := strings.cut(os.arg(i), ":")
+			hdrs.push(http.Header{name: name, value: value})
 			continue
 		case "-timeout":
 			i++
-			ms, _ := strconv.Atoi(os.Arg(i))
-			c.Timeout = time.Duration(ms) * time.Millisecond
+			ms, _ := strconv.atoi(os.arg(i))
+			c.timeout = time.Duration(ms) * time.millisecond
 			continue
 		case "-discard":
-			c.DiscardBody = true
+			c.discard_body = true
 			continue
 		case "-raw":
 			raw = true
 			continue
 		case "-close":
-			c.Close()
+			c.close()
 			continue
 		}
-		method, rest, _ := strings.Cut(a, " ")
-		path, body, _ := strings.Cut(rest, " ")
-		var bb [1K]byte
+		method, rest, _ := strings.cut(a, " ")
+		path, body, _ := strings.cut(rest, " ")
+		var bb u8[1K]
 		n := copy(bb[:], body)
 		if raw {
-			req, err := http.AppendRequest(reqBuf[:0], method, "raw.host", path, hdrs[:], bb[:n])
+			req, err := http.append_request(req_buf[:0], method, "raw.host", path, hdrs[:], bb[:n])
 			if err != nil {
-				println("error:", err.Error())
+				println("error:", err.message())
 				continue
 			}
-			resp, err := c.RoundTrip(req)
+			resp, err := c.round_trip(req)
 			show(resp, err)
 			continue
 		}
-		resp, err := c.Do(method, path, hdrs[:], bb[:n])
+		resp, err := c.do(method, path, hdrs[:], bb[:n])
 		show(resp, err)
 	}
 }

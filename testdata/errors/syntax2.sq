@@ -1,24 +1,24 @@
-package main
+program
 
-const ErrBad = error(400, "bad")
+fault Bad 400 "bad"
 
-func plain() {}
+fn plain() {}
 
-func noErr() int { return 1 }
+fn no_err() -> int { return 1 }
 
-func useTry() error {
-	try noErr() // ERROR "last result is an error; noErr() returns int"
+fn use_try() -> ! {
+	no_err()! // ERROR "last result is an error; no_err() returns int"
 	return nil
 }
 
-func noErrorResult() int {
-	try mayFail() // ERROR "try can only be used in a function whose last result is error"
+fn no_error_result() -> int {
+	may_fail()! // ERROR "the ! operator can only be used in a function whose last result is error"
 	return 0
 }
 
-func mayFail() error { return ErrBad }
+fn may_fail() -> ! { return Bad }
 
-func main() {
-	go plain() // ERROR "go needs a task"
-	ErrBad = error("other") // ERROR "cannot assign to ErrBad (it is a constant)"
+fn main() {
+	start plain() // ERROR "start needs a task"
+	Bad = error("other") // ERROR "cannot assign to Bad (it is a constant)"
 }

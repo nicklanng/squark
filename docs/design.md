@@ -3,6 +3,11 @@
 Status: **implemented** (2026-10-14). Where the implementation differs from or adds to the original
 proposal, it is noted in the "As built" section at the end.
 
+> **Syntax since changed.** This document records the design in the Go-shaped syntax it was written
+> in. squark now has its own syntax (postfix types like `u8[64]` and `int[str; 1024]`, `fn` with
+> `->` results, `fault`, `!` instead of `try`, `start` instead of `go`, `pub`, snake_case names);
+> the semantics below are unchanged. See [spec.md](spec.md) for the current syntax.
+
 squark 1 is "Go minus the things that need a heap". squark 2 makes memory something you can see and
 write down: where it lives (static, a task's stack, an arena), how big it is (capacity in types),
 how long references are valid (provenance in signatures), and how much the program can ever use

@@ -1,40 +1,40 @@
-package main
+program
 
-import "json"
+use json
 
-func main() {
-	var src [128]byte
+fn main() {
+	var src u8[128]
 	n := copy(src[:], ` {"name": "squark ❤", "n": -42, "ok": true, "skip": {"a": [1, {"b": "}"}]}, "tail": "x\"y"} `)
-	d := json.NewDecoder(src[:n])
-	var key [16]byte
-	var val [64]byte
-	if !d.BeginObject() {
+	d := json.new_decoder(src[:n])
+	var key u8[16]
+	var val u8[64]
+	if not d.begin_object() {
 		println("bad")
 		return
 	}
-	for {
-		k, ok := d.Field(key[:])
-		if !ok {
+	loop {
+		k, ok := d.field(key[:])
+		if not ok {
 			break
 		}
 		switch k {
 		case "name", "tail":
-			s, _ := d.String(val[:])
+			s, _ := d.string(val[:])
 			println(k, "=", s)
 		case "n":
-			n, _ := d.Int()
+			n, _ := d.int()
 			println(k, "=", n)
 		case "ok":
-			b, _ := d.Bool()
+			b, _ := d.bool()
 			println(k, "=", b)
 		default:
-			d.Skip()
+			d.skip()
 			println("skipped", k)
 		}
 	}
-	println("end", d.End(), d.Err == nil)
+	println("end", d.end(), d.err == nil)
 
-	var out [128]byte
-	enc := json.AppendString(out[:0], "tab\there \"quoted\" \x01")
-	println(string(enc))
+	var out u8[128]
+	enc := json.append_string(out[:0], "tab\there \"quoted\" \x01")
+	println(str(enc))
 }

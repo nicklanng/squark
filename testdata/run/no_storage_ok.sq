@@ -1,19 +1,21 @@
-package main
+program
 
 // Not "no storage" errors: a pointer method can give a map its storage, delete on a nil map does
 // nothing, and a select never picks a nil channel.
-type M map[string]int
+M: int[str]
 
-func (m *M) Init(a arena) { *m = make(map[string]int, 4) in a }
+impl M {
+	fn init(&self, a arena) { *self = make(int[str], 4) in a }
+}
 
 arena pa 1K
 
-var gm M
-var never map[string]int
-var quiet chan int
+thread gm M
+thread never int[str]
+thread quiet int chan
 
-func main() {
-	gm.Init(pa)
+fn main() {
+	gm.init(pa)
 	gm["x"] = 1
 	delete(never, "x")
 	select {

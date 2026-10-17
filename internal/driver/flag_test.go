@@ -74,7 +74,7 @@ func TestFlag(t *testing.T) {
 			dir := t.TempDir()
 			os.WriteFile(filepath.Join(dir, "main.sq"), src, 0o644)
 			if threads > 1 {
-				os.WriteFile(filepath.Join(dir, "threads.sq"), []byte(fmt.Sprintf("package main\n\nthreads %d\n", threads)), 0o644)
+				os.WriteFile(filepath.Join(dir, "threads.sq"), []byte(fmt.Sprintf("program {\n\tthreads %d\n}\n", threads)), 0o644)
 			}
 			bin := filepath.Join(dir, "prog")
 			if _, err := Build(Options{Dir: dir, Output: bin}); err != nil {

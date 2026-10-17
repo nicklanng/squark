@@ -129,6 +129,7 @@ func walkStmt(s Stmt, f func(Node) bool) {
 	case *RangeStmt:
 		we(s.Key)
 		we(s.Value)
+		we(s.Lo)
 		we(s.X)
 		ws(s.Body)
 	case *SelectStmt:

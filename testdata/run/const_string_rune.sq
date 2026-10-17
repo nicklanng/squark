@@ -1,11 +1,11 @@
-package main
+program
 
 // a constant integer outside the rune range converts to U+FFFD, as in Go
-const a = string(rune(66))
-const b = string(int64(1<<40 + 66))
-const c = string(uint64(1<<63 + 66))
-const d = string(int64(-1))
+const a = str(rune(66))
+const b = str(i64(1<<40 + 66))
+const c = str(u64(1<<63 + 66))
+const d = str(i64(-1))
 
-func main() {
+fn main() {
 	println(a, b == "�", c == "�", d == "�")
 }

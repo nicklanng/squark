@@ -1,15 +1,15 @@
-package main
+program
 
-func first(s anytype) int { return s[0] }
+fn first(s anytype) -> int { return s[0] }
 
-func size(v anytype) int {
+fn size(v anytype) -> int {
 	return len(v) // ERROR "invalid argument v (type int) for len (in main.size with v int, called at main.sq:14)"
 }
 
-func main() {
+fn main() {
 	f := first // ERROR "first has anytype parameters: it can only be called"
 	_ = f
-	println(first([]int{1}))
+	println(first(int[]{1}))
 	println(size("abc"))
 	println(size(3))
 	println(first(nil)) // ERROR "cannot use nil as an anytype argument"

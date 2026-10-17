@@ -1,28 +1,24 @@
-package main
+program
 
 // Test program for TestSQLiteSlow (internal/driver): a slow query and a slow write inside a
 // transaction, while a ticker goroutine on the same thread counts 5ms ticks. The slow statements
 // move to a helper thread mid-call, so the ticker keeps ticking.
 
-import (
-	"os"
-	"sqlite"
-	"time"
-)
+use os, sqlite, time
 
-var ticks int
-var done bool
+thread ticks int
+thread done bool
 
 task ticker() pool 1 {
-	for !done {
-		time.Sleep(5 * time.Millisecond)
+	while not done {
+		time.sleep(5 * time.millisecond)
 		ticks++
 	}
 }
 
 // during runs a slow statement and reports whether the ticker kept going meanwhile.
-func report(what string, before int, start time.Time) {
-	ms := time.Since(start).Milliseconds()
+fn report(what str, before int, start time.Time) {
+	ms := time.since(start).milliseconds()
 	n := ticks - before
 	if ms < 50 {
 		println(what, "too fast to tell:", ms, "ms")
@@ -33,42 +29,42 @@ func report(what string, before int, start time.Time) {
 	}
 }
 
-func must(err error) {
+fn must(err error) {
 	if err != nil {
 		panic(err)
 	}
 }
 
-func main() {
-	db, err := sqlite.Open(os.Arg(1))
+fn main() {
+	db, err := sqlite.open(os.arg(1))
 	must(err)
-	go ticker()
-	time.Sleep(10 * time.Millisecond)
+	start ticker()
+	time.sleep(10 * time.millisecond)
 
-	sum, err := db.Prepare("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000) SELECT sum(x) FROM c")
+	sum, err := db.prepare("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000) SELECT sum(x) FROM c")
 	must(err)
-	before, start := ticks, time.Now()
-	_, err = sum.Step()
+	before, start := ticks, time.now()
+	_, err = sum.step()
 	must(err)
-	println(sum.ColumnInt(0))
-	sum.Reset()
+	println(sum.column_int(0))
+	sum.reset()
 	report("slow read", before, start)
 
-	must(db.Exec("CREATE TABLE t(x INTEGER)"))
-	must(db.Exec("BEGIN"))
-	fill, err := db.Prepare("INSERT INTO t WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1000000) SELECT x FROM c")
+	must(db.exec("CREATE TABLE t(x INTEGER)"))
+	must(db.exec("BEGIN"))
+	fill, err := db.prepare("INSERT INTO t WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1000000) SELECT x FROM c")
 	must(err)
-	before, start = ticks, time.Now()
-	_, err = fill.Step()
+	before, start = ticks, time.now()
+	_, err = fill.step()
 	must(err)
-	fill.Reset()
+	fill.reset()
 	report("slow write in a transaction", before, start)
-	must(db.Exec("COMMIT"))
+	must(db.exec("COMMIT"))
 
-	count, err := db.Prepare("SELECT count(*), sum(x) FROM t")
+	count, err := db.prepare("SELECT count(*), sum(x) FROM t")
 	must(err)
-	count.Step()
-	println(count.ColumnInt(0), count.ColumnInt(1))
-	count.Reset()
+	count.step()
+	println(count.column_int(0), count.column_int(1))
+	count.reset()
 	done = true
 }

@@ -5,94 +5,86 @@
 //	squark run examples/jobs
 //
 // It shows:
-//   - threads N: a copy of main per scheduler thread, joined by shared channels
-//   - select over shared channels with an idle timeout (time.After)
+//   - threads n: a copy of main per scheduler thread, joined by shared channels
+//   - select over shared channels with an idle timeout (time.after)
 //   - a preemptible task for CPU-heavy work, so it doesn't hold up its thread
 //   - a blocking C extern (fetch.c) that waits on a helper thread
-//   - lookup tables computed once at startup (shared var), counters per thread (thread var)
-//   - sort.Slice and sort.IsSorted on a vector of structs
-package main
-
-import (
-	"math/rand"
-	"os"
-	"runtime"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
-)
-
-threads 4
-budget 4M // worst case is about 2.9 MiB: see `squark build -v`
-
-const (
-	KindPrimes   = 0
-	KindChecksum = 1
-	KindFetch    = 2
-
-	perKind     = 16
-	numJobs     = 3 * perKind
-	primeSpan   = 500000 // each primes job counts primes in [i*primeSpan, (i+1)*primeSpan)
-	blockSize   = 16K    // bytes per checksum round
-	blockRounds = 128
-	fetchSize   = 4K
-	fetchMillis = 20
-	workers     = 2 // per thread
-)
-
-const kindNames = [3]string{"primes", "checksum", "fetch"}
-
-type Job struct {
-	ID   int
-	Kind int
-	Arg  int
+//   - lookup tables computed once at startup (shared), counters per thread (thread)
+//   - sort.slice and sort.is_sorted on a vector of structs
+program {
+	threads 4
+	budget 4M // worst case is about 2.9 MiB: see `squark build -v`
 }
 
-type Result struct {
-	ID     int
-	Kind   int
-	Value  int
-	Micros int // how long the job took, waiting included
+use math/rand, os, runtime, sort, strconv, strings, time
+
+const (
+	kind_primes   = 0
+	kind_checksum = 1
+	kind_fetch    = 2
+
+	per_kind     = 16
+	num_jobs     = 3 * per_kind
+	prime_span   = 500000 // each primes job counts primes in [i*prime_span, (i+1)*prime_span)
+	block_size   = 16K    // bytes per checksum round
+	block_rounds = 128
+	fetch_size   = 4K
+	fetch_millis = 20
+	workers      = 2 // per thread
+)
+
+const kind_names = str[3]{"primes", "checksum", "fetch"}
+
+struct Job {
+	id   int
+	kind int
+	arg  int
+}
+
+struct Result {
+	id     int
+	kind   int
+	value  int
+	micros int // how long the job took, waiting included
 }
 
 // Tally is what each thread reports when its workers have stopped.
-type Tally struct {
-	Handled int
-	Idle    int
+struct Tally {
+	handled int
+	idle    int
 }
 
 // PrimeTable holds the primes below 3000, enough to trial-divide anything below 9,000,000. (A
-// count and an array: a vector [..500]int can't be a shared var.)
-type PrimeTable struct {
-	N int
-	P [500]int
+// count and an array: a vector int[..500] can't be shared.)
+struct PrimeTable {
+	n int
+	p int[500]
 }
 
 // The tables are computed once, on the first thread before the others start, and are read-only
 // afterwards: every thread reads the same copy, with no locks.
-shared var crcTable = makeCRCTable()
-shared var smallPrimes = makePrimes()
+shared crc_table = make_crc_table()
+shared small_primes = make_primes()
 
 // Shared channels are one channel for all threads. Their elements hold no references (no
 // strings or slices), since a reference could view one thread's own memory.
-shared var jobs chan Job cap 16
-shared var results chan Result cap 16
-shared var quit chan int cap 0
-shared var tallies chan Tally cap 8
+shared jobs Job chan[16]
+shared results Result chan[16]
+shared quit int chan[0]
+shared tallies Tally chan[8]
 
 // Each thread has its own copy of these, on purpose.
-thread var done chan int cap workers
-thread var handled int
-thread var idle int
-thread var collected [..numJobs]Result
+thread done int chan[workers]
+thread handled int
+thread idle int
+thread collected Result[..num_jobs]
 
 // ---- startup tables ----
 
-func makeCRCTable() [256]uint32 {
-	var t [256]uint32
-	for i := range 256 {
-		c := uint32(i)
+fn make_crc_table() -> u32[256] {
+	var t u32[256]
+	for i in 0..256 {
+		c := u32(i)
 		for k := 0; k < 8; k++ {
 			if c&1 == 1 {
 				c = 0xEDB88320 ^ (c >> 1)
@@ -105,13 +97,13 @@ func makeCRCTable() [256]uint32 {
 	return t
 }
 
-func makePrimes() PrimeTable {
-	var sieve [3000]bool
+fn make_primes() -> PrimeTable {
+	var sieve bool[3000]
 	var t PrimeTable
 	for i := 2; i < len(sieve); i++ {
-		if !sieve[i] {
-			t.P[t.N] = i
-			t.N++
+		if not sieve[i] {
+			t.p[t.n] = i
+			t.n++
 			for j := i * i; j < len(sieve); j += i {
 				sieve[j] = true
 			}
@@ -122,20 +114,20 @@ func makePrimes() PrimeTable {
 
 // ---- CPU-heavy jobs ----
 
-func crc32(crc uint32, b []byte) uint32 {
+fn crc32(crc u32, b u8[]) -> u32 {
 	crc = ^crc
-	for _, c := range b {
-		crc = crcTable[byte(crc)^c] ^ (crc >> 8)
+	for c in b {
+		crc = crc_table[u8(crc)^c] ^ (crc >> 8)
 	}
 	return ^crc
 }
 
-func isPrime(n int) bool {
+fn is_prime(n int) -> bool {
 	if n < 2 {
 		return false
 	}
-	for i := 0; i < smallPrimes.N; i++ {
-		p := smallPrimes.P[i]
+	for i := 0; i < small_primes.n; i++ {
+		p := small_primes.p[i]
 		if p*p > n {
 			return true
 		}
@@ -146,23 +138,23 @@ func isPrime(n int) bool {
 	return true
 }
 
-func countPrimes(lo, hi int) int {
+fn count_primes(lo, hi int) -> int {
 	n := 0
 	for i := lo; i < hi; i++ {
-		if isPrime(i) {
+		if is_prime(i) {
 			n++
 		}
 	}
 	return n
 }
 
-// checksum CRCs blockRounds blocks of random bytes, from a generator seeded by seed.
-func checksum(seed int, buf []byte) int {
-	r := rand.New(uint64(seed))
-	crc := uint32(0)
-	for round := 0; round < blockRounds; round++ {
-		for i := range buf {
-			buf[i] = byte(r.Uint64())
+// checksum CRCs block_rounds blocks of random bytes, from a generator seeded by seed.
+fn checksum(seed int, buf u8[]) -> int {
+	r := rand.new(u64(seed))
+	crc := u32(0)
+	for round := 0; round < block_rounds; round++ {
+		for i, _ in buf {
+			buf[i] = u8(r.uint64())
 		}
 		crc = crc32(crc, buf)
 	}
@@ -172,16 +164,16 @@ func checksum(seed int, buf []byte) int {
 // crunch runs one CPU-heavy job. It is preemptible: its loops (and those of the functions it
 // calls) yield after a time slice, so the workers on its thread keep taking jobs.
 task crunch(j Job) pool 4 preemptible {
-	start := time.Now()
-	r := Result{ID: j.ID, Kind: j.Kind}
-	switch j.Kind {
-	case KindPrimes:
-		r.Value = countPrimes(j.Arg*primeSpan, (j.Arg+1)*primeSpan)
-	case KindChecksum:
-		var buf [blockSize]byte
-		r.Value = checksum(j.Arg, buf[:])
+	start := time.now()
+	r := Result{id: j.id, kind: j.kind}
+	switch j.kind {
+	case kind_primes:
+		r.value = count_primes(j.arg*prime_span, (j.arg+1)*prime_span)
+	case kind_checksum:
+		var buf u8[block_size]
+		r.value = checksum(j.arg, buf[:])
 	}
-	r.Micros = time.Since(start).Microseconds()
+	r.micros = time.since(start).microseconds()
 	results <- r
 }
 
@@ -189,32 +181,32 @@ task crunch(j Job) pool 4 preemptible {
 
 // fetch is a slow C call (fetch.c). Declared blocking, each call runs on a helper thread while
 // the calling goroutine waits, so the other goroutines of its thread keep running.
-extern "jobs_fetch" func fetch(id int, buf []byte, ms int) int stack 8K blocking
+extern fn fetch(id int, buf u8[], ms int) -> int stack 8K blocking c"jobs_fetch"
 
-// fetchJob runs an I/O job in the worker itself: the blocking extern parks only this goroutine.
-func fetchJob(j Job) Result {
-	start := time.Now()
-	var buf [fetchSize]byte
-	n := fetch(j.Arg, buf[:], fetchMillis)
-	return Result{j.ID, j.Kind, int(crc32(0, buf[:n])), time.Since(start).Microseconds()}
+// fetch_job runs an I/O job in the worker itself: the blocking extern parks only this goroutine.
+fn fetch_job(j Job) -> Result {
+	start := time.now()
+	var buf u8[fetch_size]
+	n := fetch(j.arg, buf[:], fetch_millis)
+	return Result{j.id, j.kind, int(crc32(0, buf[:n])), time.since(start).microseconds()}
 }
 
 // ---- workers, feeding and collecting ----
 
 task worker() pool workers {
-	for {
+	loop {
 		select {
 		case j := <-jobs:
 			handled++
-			if j.Kind == KindFetch {
-				results <- fetchJob(j)
+			if j.kind == kind_fetch {
+				results <- fetch_job(j)
 			} else {
-				go crunch(j)
+				start crunch(j)
 			}
 		case <-quit:
 			done <- 1
 			return
-		case <-time.After(5 * time.Millisecond):
+		case <-time.after(5 * time.millisecond):
 			idle++
 		}
 	}
@@ -222,22 +214,22 @@ task worker() pool workers {
 
 task producer() pool 1 {
 	// interleave the kinds so every thread gets a mix
-	for i := 0; i < numJobs; i++ {
-		j := Job{ID: i + 1, Kind: i % 3, Arg: i / 3}
+	for i := 0; i < num_jobs; i++ {
+		j := Job{id: i + 1, kind: i % 3, arg: i / 3}
 		select {
 		case jobs <- j:
-		case <-time.After(10 * time.Second):
+		case <-time.after(10 * time.second):
 			panic("jobs channel stuck")
 		}
 	}
 }
 
 task collector() pool 1 {
-	for len(collected) < numJobs {
+	while len(collected) < num_jobs {
 		select {
 		case r := <-results:
-			collected.Push(r)
-		case <-time.After(10 * time.Second):
+			collected.push(r)
+		case <-time.after(10 * time.second):
 			panic("results stuck")
 		}
 	}
@@ -246,106 +238,106 @@ task collector() pool 1 {
 
 // ---- the report ----
 
-func byKindThenID(a, b Result) bool {
-	if a.Kind != b.Kind {
-		return a.Kind < b.Kind
+fn by_kind_then_id(a, b Result) -> bool {
+	if a.kind != b.kind {
+		return a.kind < b.kind
 	}
-	return a.ID < b.ID
+	return a.id < b.id
 }
 
-func byValueDesc(a, b Result) bool {
-	if a.Value != b.Value {
-		return a.Value > b.Value
+fn by_value_desc(a, b Result) -> bool {
+	if a.value != b.value {
+		return a.value > b.value
 	}
-	return a.ID < b.ID
+	return a.id < b.id
 }
 
-func printRow(r Result) {
-	name := kindNames[r.Kind]
-	var buf [80]byte
-	line := strconv.AppendIntPad(append(buf[:0], "  job "...), r.ID, 2, ' ')
-	line = strings.AppendPadRight(append(line, ' '), name, 9, ' ')
-	if r.Kind == KindPrimes {
-		line = strconv.AppendInt(line, r.Value)
+fn print_row(r Result) {
+	name := kind_names[r.kind]
+	var buf u8[80]
+	line := strconv.append_int_pad(append(buf[:0], "  job "...), r.id, 2, ' ')
+	line = strings.append_pad_right(append(line, ' '), name, 9, ' ')
+	if r.kind == kind_primes {
+		line = strconv.append_int(line, r.value)
 	} else {
-		line = strconv.AppendUintPad(append(line, "0x"...), uint64(uint32(r.Value)), 16, 8, '0')
+		line = strconv.append_uint_pad(append(line, "0x"...), u64(u32(r.value)), 16, 8, '0')
 	}
-	os.Stdout.Write(append(line, '\n'))
+	os.stdout.write(append(line, '\n'))
 }
 
 // report prints the results. Timings and which thread ran which job vary from run to run, so it
 // prints only what must hold.
-func report(start time.Time) {
+fn report(start time.Time) {
 	rs := collected[:]
-	sort.Slice(rs, byKindThenID)
-	println("jobs:", len(rs), "sorted:", sort.IsSorted(rs, byKindThenID))
+	sort.slice(rs, by_kind_then_id)
+	println("jobs:", len(rs), "sorted:", sort.is_sorted(rs, by_kind_then_id))
 
-	var perKindCount [3]int
+	var per_kind_count int[3]
 	primes, busy := 0, 0
-	var combined uint32 // a CRC of every value, in job order
-	for _, r := range rs {
-		perKindCount[r.Kind]++
-		if r.Kind == KindPrimes {
-			primes += r.Value
+	var combined u32 // a CRC of every value, in job order
+	for r in rs {
+		per_kind_count[r.kind]++
+		if r.kind == kind_primes {
+			primes += r.value
 		}
-		var w [8]byte
-		for k := range w {
-			w[k] = byte(r.Value >> uint(8*k))
+		var w u8[8]
+		for k, _ in w {
+			w[k] = u8(r.value >> uint(8*k))
 		}
 		combined = crc32(combined, w[:])
-		busy += r.Micros
+		busy += r.micros
 	}
-	println("per kind:", perKindCount[0], perKindCount[1], perKindCount[2])
-	println("primes below", perKind*primeSpan, "=", primes)
-	for _, r := range rs {
-		if r.ID <= 6 || r.ID > numJobs-3 {
-			printRow(r)
+	println("per kind:", per_kind_count[0], per_kind_count[1], per_kind_count[2])
+	println("primes below", per_kind*prime_span, "=", primes)
+	for r in rs {
+		if r.id <= 6 or r.id > num_jobs-3 {
+			print_row(r)
 		}
 	}
 
-	var cs [..perKind]Result
-	for _, r := range rs {
-		if r.Kind == KindChecksum {
-			cs.Push(r)
+	var cs Result[..per_kind]
+	for r in rs {
+		if r.kind == kind_checksum {
+			cs.push(r)
 		}
 	}
-	sort.Slice(cs[:], byValueDesc)
+	sort.slice(cs[:], by_value_desc)
 	println("largest checksums:")
 	for i := 0; i < 3; i++ {
-		printRow(cs[i])
+		print_row(cs[i])
 	}
-	var hex [8]byte
-	println("combined:", string(strconv.AppendUintPad(hex[:0], uint64(combined), 16, 8, '0')))
-	println("jobs overlapped (busy time > wall time):", busy > time.Since(start).Microseconds())
+	var hex u8[8]
+	println("combined:", str(strconv.append_uint_pad(hex[:0], u64(combined), 16, 8, '0')))
+	println("jobs overlapped (busy time > wall time):", busy > time.since(start).microseconds())
 }
 
-func main() {
-	start := time.Now()
+fn main() {
+	start := time.now()
 	for i := 0; i < workers; i++ {
-		go worker()
+		start worker()
 	}
-	if runtime.Shard() == 0 {
-		go collector()
-		go producer()
+	if runtime.shard() == 0 {
+		start collector()
+		start producer()
 	}
 	for i := 0; i < workers; i++ {
 		<-done
 	}
-	tallies <- Tally{Handled: handled, Idle: idle}
-	if runtime.Shard() != 0 {
+	tallies <- Tally{handled: handled, idle: idle}
+	if runtime.shard() != 0 {
 		return
 	}
 
 	// the collector has closed quit, so every result is in
 	report(start)
 	total, used := 0, 0
-	for i := 0; i < runtime.Shards(); i++ {
+	for i := 0; i < runtime.shards(); i++ {
 		t := <-tallies
-		total += t.Handled
-		if t.Handled > 0 {
+		total += t.handled
+		if t.handled > 0 {
 			used++
 		}
 	}
-	println("every job handled once:", total == numJobs)
-	println("threads used > 1:", used > 1 || runtime.Shards() == 1)
+	println("every job handled once:", total == num_jobs)
+	println("threads used > 1:", used > 1 or runtime.shards() == 1)
 }

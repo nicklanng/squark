@@ -1,32 +1,27 @@
-package main
+program
 
 // The idioms from docs/spec.md section 8, kept compiling and running.
-import (
-	"http"
-	"math"
-	"os"
-	"strconv"
-)
+use http, math, os, strconv
 
-type Node struct {
-	Name     string
-	Children []*Node
+struct Node {
+	name     str
+	children *Node[]
 }
 
-type Shape struct{ Kind int; W, H float64 }
+struct Shape { kind int; w, h f64 }
 
-const Circle = 1
-const ErrNoUser = error(404, "user not found")
+const circle = 1
+fault NoUser 404 "user not found"
 
-func Area(s Shape) float64 {
-	switch s.Kind {
-	case Circle:
-		return math.Pi * s.W * s.W
+fn area(s Shape) -> f64 {
+	switch s.kind {
+	case circle:
+		return math.pi * s.w * s.w
 	}
-	return s.W * s.H
+	return s.w * s.h
 }
 
-func Squares(n int, out []int) []int {
+fn squares(n int, out int[]) -> int[] {
 	out = out[:0]
 	for i := 0; i < n; i++ {
 		out = append(out, i*i)
@@ -34,62 +29,62 @@ func Squares(n int, out []int) []int {
 	return out
 }
 
-func readAll(path string, data []byte) (int, error) {
-	f := try os.Open(path)
-	defer f.Close()
-	n, _ := f.ReadFull(data)
+fn read_all(path str, data u8[]) -> int ! {
+	f := os.open(path)!
+	defer f.close()
+	n, _ := f.read_full(data)
 	return n, nil
 }
 
-func lookup(name string, err error) error {
+fn lookup(name str, err error) -> ! {
 	if err != nil {
-		println("lookup failed for", name, ":", err.Error())
-		return ErrNoUser
+		println("lookup failed for", name, ":", err.message())
+		return NoUser
 	}
 	return nil
 }
 
-func handle(w *http.ResponseWriter, r *http.Request) {
-	w.SetHeader("Content-Type", "application/json")
-	w.WriteHeader(201)
-	w.WriteString(`{"ok":true}`)
+fn handle(w *http.ResponseWriter, r *http.Request) {
+	w.set_header("Content-Type", "application/json")
+	w.write_header(201)
+	w.write_string(`{"ok":true}`)
 }
 
-func main() {
+fn main() {
 	id, name := 7, "ada"
-	var buf [64]byte
-	line := strconv.AppendInt(append(buf[:0], "id="...), id)
+	var buf u8[64]
+	line := strconv.append_int(append(buf[:0], "id="...), id)
 	line = append(append(line, " name="...), name...)
 	line = append(line, '\n')
-	os.Stdout.Write(line)
+	os.stdout.write(line)
 
-	var data [64K]byte
-	n, err := readAll(os.Arg(0), data[:])
+	var data u8[64K]
+	n, err := read_all(os.arg(0), data[:])
 	println("read", n > 0, err == nil)
 
-	var out [10]int
-	println(len(Squares(5, out[:])))
+	var out int[10]
+	println(len(squares(5, out[:])))
 
-	arena tree 256K {
+	with arena tree 256K {
 		root := new(Node) in tree
-		root.Children = append(root.Children, new(Node) in tree) in tree
+		root.children = append(root.children, new(Node) in tree) in tree
 		s := "name=" + name in tree
 		println(s)
-		var stack [..64]*Node
-		stack.Push(root)
+		var stack *Node[..64]
+		stack.push(root)
 		count := 0
-		for len(stack) > 0 {
-			nd := stack.Pop()
+		while len(stack) > 0 {
+			nd := stack.pop()
 			count++
-			for _, c := range nd.Children {
-				stack.Push(c)
+			for c in nd.children {
+				stack.push(c)
 			}
 		}
 		println("nodes", count)
 	}
-	println(Area(Shape{Kind: Circle, W: 1}) > 3, lookup("x", ErrNoUser) == ErrNoUser)
+	println(area(Shape{kind: circle, w: 1}) > 3, lookup("x", NoUser) == NoUser)
 	_ = handle
-	for i := range 3 {
+	for i in 0..3 {
 		print(i)
 	}
 	println()

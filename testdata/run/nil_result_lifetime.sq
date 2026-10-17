@@ -1,0 +1,49 @@
+program
+
+// Returning nil constrains none of the result's pointer levels, so a function that passes such a
+// result on accepts a stack arena like the function itself does (BUGS.md Q1).
+
+struct V {
+	s str
+}
+
+fn all(a arena, src str, n int) -> V[] {
+	if n == 0 {
+		return nil
+	}
+	out := make(V[], n) in a
+	out[0] = V{s: str(src) in a}
+	return out
+}
+
+fn wrap(a arena, src str, n int) -> V[] { return all(a, src, n) }
+
+struct Box {
+	vs V[]
+}
+
+impl Box {
+	fn all(&self, a arena, n int) -> V[] {
+		if n == 0 {
+			return nil
+		}
+		out := make(V[], n) in a
+		out[0] = V{s: str(self.vs[0].s) in a}
+		return out
+	}
+}
+
+fn wrap_box(b *Box, a arena, n int) -> V[] { return b.all(a, n) }
+
+fn main() {
+	var buf u8[3]
+	copy(buf[:], "abc")
+	with arena q 1K {
+		var b Box
+		println(all(q, str(buf[:]), 1)[0].s, len(all(q, "x", 0)))
+		println(wrap(q, str(buf[:]), 1)[0].s, len(wrap(q, "x", 0)))
+		b.vs = make(V[], 1) in q
+		b.vs[0] = V{s: "box"}
+		println(wrap_box(&b, q, 1)[0].s, len(wrap_box(&b, q, 0)))
+	}
+}

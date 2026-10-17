@@ -1,5 +1,5 @@
-package counter
+module counter
 
-var Total int // written from package main: listed
+pub thread total int // written from package main: listed
 
-func Add(n int) { Total += n }
+pub fn add(n int) { total += n }

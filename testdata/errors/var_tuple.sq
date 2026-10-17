@@ -1,11 +1,11 @@
-package main
+program
 
-func f() (int, int)     { return 4096, 8192 }
-func g() (*int, string) { return nil, "" }
+fn f() -> (int, int)     { return 4096, 8192 }
+fn g() -> (*int, str) { return nil, "" }
 
-func main() {
+fn main() {
 	var p, q *int = f() // ERROR "cannot assign int to p (type *int)" // ERROR "cannot assign int to q (type *int)"
-	var s, t string = g() // ERROR "cannot assign *int to s (type string)"
+	var s, t str = g() // ERROR "cannot assign *int to s (type str)"
 	var a, b int = f()
 	println(p, q, s, t, a, b)
 }

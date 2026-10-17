@@ -1,222 +1,209 @@
-package main
+program
 
 // Run by TestNoHeapAtRuntime under an allocation counter. It pauses so the startup count can be
 // read, then uses every std package except sqlite (whose C library has its own allocator) and
 // serves HTTP requests to itself, then pauses again for the final count.
 
-import (
-	"bytes"
-	"errors"
-	"flag"
-	"http"
-	"json"
-	"math"
-	"net"
-	"os"
-	"strconv"
-	"strings"
-	"time"
-	"utf8"
-)
+use bytes, errors, flag, http, json, math, net, os, strconv, strings, time, utf8
 
-const ErrMine = error(7, "mine")
+fault Mine 7 "mine"
 
-var sum int
-var page [20000]byte
+thread sum int
+thread page u8[20000]
 
-func handle(w *http.ResponseWriter, r *http.Request) {
-	if r.Path == "/big" {
-		w.Write(page[:]) // larger than the write buffer: chunked
+fn handle(w *http.ResponseWriter, r *http.Request) {
+	if r.path == "/big" {
+		w.write(page[:]) // larger than the write buffer: chunked
 		return
 	}
-	w.WriteString("hello ")
-	w.WriteString(r.QueryValue("name"))
+	w.write_string("hello ")
+	w.write_string(r.query_value("name"))
 }
 
-task serve(addr string) pool 1 {
-	if err := http.ListenAndServe(addr, handle); err != nil {
+task serve(addr str) pool 1 {
+	if err := http.listen_and_serve(addr, handle); err != nil {
 		panic(err)
 	}
 }
 
-var results chan int cap 64
+thread results int chan[64]
 
 task worker(n int) pool 8 {
 	results <- n * 2
 }
 
-// keepAlive sends two requests on one connection with a pause between them, so the server parks
+// keep_alive sends two requests on one connection with a pause between them, so the server parks
 // the connection in the idle set (releasing its goroutine's stack) and resumes it.
-func keepAlive(addr string, buf []byte) int {
-	c, err := net.Dial(addr)
+fn keep_alive(addr str, buf u8[]) -> int {
+	c, err := net.dial(addr)
 	if err != nil {
 		panic(err)
 	}
 	total := 0
 	for i := 0; i < 2; i++ {
-		c.WriteString("GET /?name=idle HTTP/1.1\r\nHost: x\r\n\r\n")
-		n, _ := c.Read(buf)
+		c.write_string("GET /?name=idle HTTP/1.1\r\nHost: x\r\n\r\n")
+		n, _ := c.read(buf)
 		total += n
-		time.Sleep(150 * time.Millisecond) // longer than http.IdleRelease
+		time.sleep(150 * time.millisecond) // longer than http.idle_release
 	}
-	c.Close()
+	c.close()
 	return total
 }
 
 // echo accepts in a loop: with threads N the kernel may route several shards' connections to
 // one shard's listener
 task echo(l net.Listener) pool 1 {
-	for {
-		c, err := l.Accept()
+	loop {
+		c, err := l.accept()
 		if err != nil {
 			return
 		}
-		go echoConn(c)
+		start echo_conn(c)
 	}
 }
 
-task echoConn(c net.Conn) pool 8 {
-	var b [64]byte
-	for {
-		n, err := c.Read(b[:])
-		if err != nil || n == 0 {
+task echo_conn(c net.Conn) pool 8 {
+	var b u8[64]
+	loop {
+		n, err := c.read(b[:])
+		if err != nil or n == 0 {
 			return
 		}
-		c.Write(b[:n])
+		c.write(b[:n])
 	}
 }
 
-func get(addr, req string, buf []byte) int {
-	c, err := net.Dial(addr)
+fn get(addr, req str, buf u8[]) -> int {
+	c, err := net.dial(addr)
 	if err != nil {
 		panic(err)
 	}
-	c.WriteString(req)
+	c.write_string(req)
 	total := 0
-	for {
-		n, err := c.Read(buf)
-		if err != nil || n == 0 {
+	loop {
+		n, err := c.read(buf)
+		if err != nil or n == 0 {
 			break
 		}
 		total += n
 	}
-	c.Close()
+	c.close()
 	return total
 }
 
-func main() {
-	time.Sleep(400 * time.Millisecond) // startup count is read here
-	verbose := flag.Bool("v", false, "verbose")
-	every := flag.Duration("every", time.Second, "how often")
-	flag.Parse() // the four arguments are positional
-	if *verbose || flag.NArg() != 4 || flag.Arg(3) != os.Arg(4) || len(flag.Args()) != 4 {
+fn main() {
+	time.sleep(400 * time.millisecond) // startup count is read here
+	verbose := flag.bool_flag("v", false, "verbose")
+	every := flag.duration_flag("every", time.second, "how often")
+	flag.parse() // the four arguments are positional
+	if *verbose or flag.n_arg() != 4 or flag.arg(3) != os.arg(4) or len(flag.args()) != 4 {
 		panic("flag.Parse")
 	}
 	sum += int(*every)
-	go serve(os.Arg(2))
-	l, err := net.Listen(os.Arg(1))
+	start serve(os.arg(2))
+	l, err := net.listen(os.arg(1))
 	if err != nil {
 		panic(err)
 	}
-	go echo(l)
-	c, err := net.Dial(os.Arg(1))
+	start echo(l)
+	c, err := net.dial(os.arg(1))
 	if err != nil {
 		panic(err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	var buf [512]byte
-	var store [256]byte
+	time.sleep(50 * time.millisecond)
+	var buf u8[512]
+	var store u8[256]
 	for i := 0; i < 500; i++ {
-		if _, err := os.Open("/nonexistent/squark"); err != nil {
-			sum += len(err.Error())
+		if _, err := os.open("/nonexistent/squark"); err != nil {
+			sum += len(err.message())
 		}
-		f, err := os.Create(os.Arg(3))
+		f, err := os.create(os.arg(3))
 		if err == nil {
-			f.WriteString("hello, file\n")
-			f.Close()
+			f.write_string("hello, file\n")
+			f.close()
 		}
-		f, err = os.Open(os.Arg(3))
+		f, err = os.open(os.arg(3))
 		if err == nil {
-			n, _ := f.Read(buf[:])
+			n, _ := f.read(buf[:])
 			sum += n
-			f.Close()
+			f.close()
 		}
-		sum += len(os.Getenv("HOME"))
-		b := strconv.AppendFloat(buf[:0], math.Sqrt(float64(i))+math.Pow(1.5, 3)+math.Sin(1), 6)
-		v, _ := strconv.Atoi("12345")
-		sum += len(b) + v + strings.Count("a,b,c", ",") + utf8.RuneCountInString("héllo")
-		var parts [4]string
-		sum += len(strings.Split("x y z", " ", parts[:]))
-		j := json.AppendString(buf[:0], "q\"uote é")
-		d := json.NewDecoder(j)
-		if s, ok := d.String(store[:]); ok {
+		sum += len(os.getenv("HOME"))
+		b := strconv.append_float(buf[:0], math.sqrt(f64(i))+math.pow(1.5, 3)+math.sin(1), 6)
+		v, _ := strconv.atoi("12345")
+		sum += len(b) + v + strings.count("a,b,c", ",") + utf8.rune_count_in_string("héllo")
+		var parts str[4]
+		sum += len(strings.split("x y z", " ", parts[:]))
+		j := json.append_string(buf[:0], "q\"uote é")
+		d := json.new_decoder(j)
+		if s, ok := d.string(store[:]); ok {
 			sum += len(s)
 		}
-		je := json.NewEncoder(buf[:0])
-		je.Object()
-		je.Key("k")
-		je.String("v é")
-		je.Key("f")
-		je.Float(1.5)
-		je.End()
-		if je.Finish() == nil {
-			sum += len(je.Bytes())
+		je := json.new_encoder(buf[:0])
+		je.object()
+		je.key("k")
+		je.string("v é")
+		je.key("f")
+		je.float(1.5)
+		je.end()
+		if je.finish() == nil {
+			sum += len(je.bytes())
 		}
-		arena ja 1K {
-			jd := json.NewDecoderIn(je.Bytes(), ja)
-			if jd.BeginObject() {
-				if k, ok := jd.Key(); ok {
-					t, _ := jd.Text()
+		with arena ja 1K {
+			jd := json.new_decoder_in(je.bytes(), ja)
+			if jd.begin_object() {
+				if k, ok := jd.key(); ok {
+					t, _ := jd.text()
 					sum += len(k) + len(t)
 				}
 			}
-			ge := json.NewEncoderIn(nil, ja)
-			ge.Array()
+			ge := json.new_encoder_in(nil, ja)
+			ge.array()
 			for j := 0; j < 50; j++ {
-				ge.Int(j)
+				ge.int(j)
 			}
-			ge.End()
-			sum += len(ge.Bytes())
+			ge.end()
+			sum += len(ge.bytes())
 		}
-		bb := bytes.NewBuffer(store[:0])
-		bb.WriteString("buffered")
-		sum += bb.Len()
-		if errors.Is(ErrMine, ErrMine) {
+		bb := bytes.new_buffer(store[:0])
+		bb.write_string("buffered")
+		sum += bb.len()
+		if errors.is(Mine, Mine) {
 			sum++
 		}
-		sum += int(time.Since(time.Now()).Nanoseconds() & 1)
-		if d, err := time.ParseDuration("1h2m3.5s"); err == nil {
-			sum += len(d.String(buf[:]))
+		sum += int(time.since(time.now()).nanoseconds() & 1)
+		if d, err := time.parse_duration("1h2m3.5s"); err == nil {
+			sum += len(d.string(buf[:]))
 		}
-		c.WriteString("ping")
-		n, _ := c.Read(buf[:])
+		c.write_string("ping")
+		n, _ := c.read(buf[:])
 		sum += n
-		sum += get(os.Arg(2), "GET /?name=x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
-		sum += get(os.Arg(2), "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
-		sum += get(os.Arg(2), "HEAD /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
+		sum += get(os.arg(2), "GET /?name=x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
+		sum += get(os.arg(2), "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
+		sum += get(os.arg(2), "HEAD /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", buf[:])
 	}
 	// paths outside the loop: idle parking, error paths, stdin, many short tasks, channels
 	for i := 0; i < 3; i++ {
-		sum += keepAlive(os.Arg(2), buf[:])
+		sum += keep_alive(os.arg(2), buf[:])
 	}
-	if _, err := net.Dial(os.Arg(4)); err != nil { // nothing listens there: connection refused
-		sum += len(err.Error())
+	if _, err := net.dial(os.arg(4)); err != nil { // nothing listens there: connection refused
+		sum += len(err.message())
 	}
-	if _, err := net.Listen(os.Arg(2)); err != nil { // already in use
-		sum += len(err.Error())
+	if _, err := net.listen(os.arg(2)); err != nil { // already in use
+		sum += len(err.message())
 	}
-	dead, err := net.Dial(os.Arg(1))
+	dead, err := net.dial(os.arg(1))
 	if err == nil {
-		dead.Close()
-		if _, err := dead.WriteString("x"); err != nil { // closed descriptor
-			sum += len(err.Error())
+		dead.close()
+		if _, err := dead.write_string("x"); err != nil { // closed descriptor
+			sum += len(err.message())
 		}
 	}
-	sum += len(os.Errno(9999).Error()) + len(os.Errno(-3).Error())
-	n, _ := os.Stdin.Read(buf[:]) // a pipe: waits through the poller
+	sum += len(os.errno(9999).message()) + len(os.errno(-3).message())
+	n, _ := os.stdin.read(buf[:]) // a pipe: waits through the poller
 	sum += n
 	for i := 0; i < 200; i++ {
-		go worker(i)
+		start worker(i)
 		if i >= 32 {
 			sum += <-results // stay below the channel's capacity
 		}
@@ -225,5 +212,5 @@ func main() {
 		sum += <-results
 	}
 	println(sum > 0)
-	time.Sleep(400 * time.Millisecond) // final count is read here
+	time.sleep(400 * time.millisecond) // final count is read here
 }

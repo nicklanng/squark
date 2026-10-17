@@ -6,48 +6,44 @@
 //   - a goroutine per connection, from a task pool of fixed size
 //   - a read buffer on each goroutine's stack, whose size the compiler proves
 //   - blocking reads and writes that park only the goroutine that makes them
-package main
+program
 
-import (
-	"net"
-	"os"
-	"time"
-)
+use net, os, time
 
 // handle echoes one connection. At most 1000 run at once (pool 1000): each has its own stack,
 // sized at compile time to hold buf and every call below.
 task handle(c net.Conn) pool 1000 {
-	defer c.Close()
-	var buf [4096]byte
-	start := time.Now()
+	defer c.close()
+	var buf u8[4096]
+	start := time.now()
 	total := 0
-	for {
-		n, err := c.Read(buf[:])
+	loop {
+		n, err := c.read(buf[:])
 		if err != nil {
 			break
 		}
-		if _, err := c.Write(buf[:n]); err != nil {
+		if _, err := c.write(buf[:n]); err != nil {
 			break
 		}
 		total += n
 	}
-	ms := time.Since(start).Milliseconds()
+	ms := time.since(start).milliseconds()
 	println("connection closed after", ms, "ms,", total, "bytes echoed")
 }
 
-func main() {
-	l, err := net.Listen(":7007")
+fn main() {
+	l, err := net.listen(":7007")
 	if err != nil {
-		println("listen:", err.Error())
-		os.Exit(1)
+		println("listen:", err.message())
+		os.exit(1)
 	}
 	println("echo server on :7007")
-	for {
-		c, err := l.Accept()
+	loop {
+		c, err := l.accept()
 		if err != nil {
-			println("accept:", err.Error())
+			println("accept:", err.message())
 			continue
 		}
-		go handle(c) // waits for a free slot when 1000 connections are open
+		start handle(c) // waits for a free slot when 1000 connections are open
 	}
 }

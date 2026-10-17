@@ -1,14 +1,18 @@
-package main
+program
 
 // receivers may be unnamed, as in Go
 
-type P struct{ n int }
+struct P {
+	n int
+}
 
-func (P) Name() string  { return "P" }
-func (*P) Kind() string { return "ptr" }
-func (p P) N() int      { return p.n }
+impl P {
+	fn name(self) -> str  { return "P" }
+	fn kind(&self) -> str { return "ptr" }
+	fn num(self) -> int   { return self.n }
+}
 
-func main() {
+fn main() {
 	p := P{n: 3}
-	println(p.Name(), p.Kind(), p.N())
+	println(p.name(), p.kind(), p.num())
 }

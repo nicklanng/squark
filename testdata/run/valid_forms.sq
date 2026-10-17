@@ -1,30 +1,32 @@
-package main
+program
 
 // Valid programs that used to be rejected: an untyped range bound takes the iteration variable's
 // type, a const spec may mix error and ordinary constants, a constant composite may hold a nil
-// error, and `cap` after a func type belongs to the enclosing channel or map type.
-const ErrA, X = error(1, "a"), 5
-const T, Y = [2]int{1, 2}, 3
-const errs = [2]error{ErrA, nil}
+// error, and a func-typed element in a channel or map type.
+const err_a, x = error(1, "a"), 5
+const t, y = int[2]{1, 2}, 3
+const errs = error[2]{err_a, nil}
 
-func f() { println("f") }
+fn f() { println("f") }
 
-var c chan func() cap 1
-var m map[int]func() cap 1
+thread c (fn()) chan[1]
+thread m (fn())[int; 1]
 
-func main() {
-	var i int8
-	for i = range 10 {
+fn main() {
+	var i i8
+	for k in 0..i8(10) {
+		i = k
 	}
-	var b byte
+	var b u8
 	n := 0
-	for b = range 3 {
+	for k in 0..u8(3) {
+		b = k
 		n += int(b)
 	}
 	println(i, b, n)
-	var x int8 = X
-	var y int8 = Y
-	println(ErrA.Error(), x, T[1], y, errs[0] == ErrA, errs[1] == nil)
+	var x i8 = x
+	var y i8 = y
+	println(err_a.message(), x, t[1], y, errs[0] == err_a, errs[1] == nil)
 	c <- f
 	(<-c)()
 	m[1] = f

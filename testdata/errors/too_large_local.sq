@@ -1,8 +1,8 @@
-package main
+program
 
 // local sizes are bounded too (see too_large.sq)
-func main() {
-	var v [..(1 << 62)]byte // ERROR "vector capacity 4611686018427387904 is too large"
-	x := []int{1 << 62: 1} // ERROR "index 4611686018427387904 is too large"
+fn main() {
+	var v u8[..(1 << 62)] // ERROR "vector capacity 4611686018427387904 is too large"
+	x := int[]{1 << 62: 1} // ERROR "index 4611686018427387904 is too large"
 	_, _ = v, x
 }

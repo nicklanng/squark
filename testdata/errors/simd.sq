@@ -1,13 +1,13 @@
-package main
+program
 
-func vec() float32x4 { return float32x4{} }
+fn vec() -> f32x4 { return f32x4{} }
 
-func main() {
-	a := float32x4{1, 2, 3, 4}
-	i := int32x4{1, 2, 3, 4}
-	var f float32 = 2
-	_ = a * f // ERROR "broadcast a scalar with float32x4(f)"
-	_ = a + i // ERROR "mismatched types float32x4 and int32x4"
+fn main() {
+	a := f32x4{1, 2, 3, 4}
+	i := i32x4{1, 2, 3, 4}
+	var f f32 = 2
+	_ = a * f // ERROR "broadcast a scalar with f32x4(f)"
+	_ = a + i // ERROR "mismatched types f32x4 and i32x4"
 	_ = i / i // ERROR "integer vectors have no division"
 	_ = i % i // ERROR "operator % not defined"
 	_ = a & a // ERROR "operator & not defined"
@@ -17,36 +17,36 @@ func main() {
 	}
 	_ = a + 1.5
 	_ = i + 1.5 // ERROR "truncated to integer"
-	_ = int8x16{} + 300 // ERROR "overflows int8"
+	_ = i8x16{} + 300 // ERROR "overflows i8"
 	a[0] = 1
-	vec().Sum()
+	vec().sum()
 	vec()[0] = 1 // ERROR "cannot assign"
 	_ = &a[0] // ERROR "a SIMD lane"
 	_ = a[4] // ERROR "out of bounds"
-	_ = float32x4{1, 2, 3, 4, 5} // ERROR "out of bounds"
-	_ = float32x8(a) // ERROR "needs the same number of lanes"
-	_ = float32x4(i[0]) // ERROR "it takes a float32 (broadcast)"
-	_ = a.Any() // ERROR "Any is defined on integer vectors"
-	_ = (a > a).Select(i, i)
-	_ = (a > a).Select(int16x8{}, int16x8{}) // ERROR "the mask has 4 lanes of 32 bits"
+	_ = f32x4{1, 2, 3, 4, 5} // ERROR "out of bounds"
+	_ = f32x8(a) // ERROR "needs the same number of lanes"
+	_ = f32x4(i[0]) // ERROR "it takes a f32 (broadcast)"
+	_ = a.any() // ERROR "any is defined on integer vectors"
+	_ = (a > a).select(i, i)
+	_ = (a > a).select(i16x8{}, i16x8{}) // ERROR "the mask has 4 lanes of 32 bits"
 	_ = cap(a) // ERROR "invalid argument"
 	k := 1
-	_ = a.Swizzle(0, 1, 2, k) // ERROR "must be an integer constant"
-	_ = a.Swizzle(0, 1, 2) // ERROR "takes 4 lane indexes"
-	_ = a.Swizzle(0, 1, 2, 4) // ERROR "out of range [0:4]"
-	_ = a.Shuffle(a, 0, 1, 2, 8) // ERROR "out of range [0:8]"
-	_ = a.Shuffle(i, 0, 1, 2, 3) // ERROR "cannot use i"
-	t := uint8x16("0123456789abcdef")
-	_ = uint8x16("0123") // ERROR "it has 4 bytes, uint8x16 needs 16"
-	var w uint8x32 = t.Lookup(uint8x32{})
+	_ = a.swizzle(0, 1, 2, k) // ERROR "must be an integer constant"
+	_ = a.swizzle(0, 1, 2) // ERROR "takes 4 lane indexes"
+	_ = a.swizzle(0, 1, 2, 4) // ERROR "out of range [0:4]"
+	_ = a.shuffle(a, 0, 1, 2, 8) // ERROR "out of range [0:8]"
+	_ = a.shuffle(i, 0, 1, 2, 3) // ERROR "cannot use i"
+	t := u8x16("0123456789abcdef")
+	_ = u8x16("0123") // ERROR "it has 4 bytes, u8x16 needs 16"
+	var w u8x32 = t.lookup(u8x32{})
 	_ = w
-	_ = t.Lookup(i) // ERROR "the indexes of Lookup"
-	_ = t.Lookup(t, t) // ERROR "wrong number of arguments for Lookup"
-	_ = uint8x32{}.Lookup(t) // ERROR "Lookup is defined on 16-lane byte vectors"
-	_ = a.Lookup(t) // ERROR "Lookup is defined on 16-lane byte vectors"
-	var m map[float32x4]int cap 4 // ERROR "float32x4"
+	_ = t.lookup(i) // ERROR "the indexes of lookup"
+	_ = t.lookup(t, t) // ERROR "wrong number of arguments for lookup"
+	_ = u8x32{}.lookup(t) // ERROR "lookup is defined on 16-lane byte vectors"
+	_ = a.lookup(t) // ERROR "lookup is defined on 16-lane byte vectors"
+	var m int[f32x4; 4] // ERROR "f32x4"
 	_ = m
 	const n = len(a)
-	var arr [n]int
+	var arr int[n]
 	_ = arr
 }

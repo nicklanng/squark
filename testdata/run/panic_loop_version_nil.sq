@@ -1,18 +1,22 @@
-package main
+program
 
-type T struct{ data []int }
-
-// a nil t with a loop that runs: the checked copy panics on the first read of t.data
-func (t *T) sum(n int) int {
-	s := 0
-	for i := 0; i < n; i++ {
-		println(i)
-		s += t.data[i]
-	}
-	return s
+struct T {
+	data int[]
 }
 
-func main() {
+impl T {
+	// a nil t with a loop that runs: the checked copy panics on the first read of t.data
+	fn sum(&self, n int) -> int {
+		s := 0
+		for i := 0; i < n; i++ {
+			println(i)
+			s += self.data[i]
+		}
+		return s
+	}
+}
+
+fn main() {
 	var t *T
 	println(t.sum(0))
 	println(t.sum(2))

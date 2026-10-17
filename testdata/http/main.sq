@@ -1,52 +1,48 @@
-package main
+program
 
 // Test server for TestHTTP (internal/driver): /n?n=N writes N bytes in one Write, /p?n=N writes
 // them 1000 bytes at a time. Byte i is 'a'+i%26, so the client can check every byte. /who answers
 // "one". With a second address argument, a second server answers "two" to everything.
 
-import (
-	"http"
-	"os"
-	"strconv"
-)
+use http, os, strconv
 
-var body [100000]byte
+thread body u8[100000]
 
-func handle(w *http.ResponseWriter, r *http.Request) {
-	if r.Path == "/who" {
-		w.WriteString("one")
+fn handle(w *http.ResponseWriter, r *http.Request) {
+	if r.path == "/who" {
+		w.write_string("one")
 		return
 	}
-	n, err := strconv.Atoi(r.QueryValue("n"))
-	if err != nil || n < 0 || n > len(body) {
-		w.WriteHeader(400)
+	n, err := strconv.atoi(r.query_value("n"))
+	if err != nil or n < 0 or n > len(body) {
+		w.write_header(400)
 		return
 	}
-	if r.Path == "/p" {
+	if r.path == "/p" {
 		for i := 0; i < n; i += 1000 {
-			w.Write(body[i:min(i+1000, n)])
+			w.write(body[i:min(i+1000, n)])
 		}
 		return
 	}
-	w.Write(body[:n])
+	w.write(body[:n])
 }
 
-func handle2(w *http.ResponseWriter, r *http.Request) { w.WriteString("two") }
+fn handle2(w *http.ResponseWriter, r *http.Request) { w.write_string("two") }
 
-task serve2(addr string) pool 1 {
-	if err := http.ListenAndServe(addr, handle2); err != nil {
+task serve2(addr str) pool 1 {
+	if err := http.listen_and_serve(addr, handle2); err != nil {
 		panic(err)
 	}
 }
 
-func main() {
-	for i := range len(body) {
-		body[i] = byte('a' + i%26)
+fn main() {
+	for i in 0..len(body) {
+		body[i] = u8('a' + i%26)
 	}
-	if os.NArgs() > 2 {
-		go serve2(os.Arg(2))
+	if os.n_args() > 2 {
+		start serve2(os.arg(2))
 	}
-	if err := http.ListenAndServe(os.Arg(1), handle); err != nil {
+	if err := http.listen_and_serve(os.arg(1), handle); err != nil {
 		panic(err)
 	}
 }

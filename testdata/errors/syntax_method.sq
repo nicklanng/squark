@@ -1,0 +1,7 @@
+program
+
+struct Point { x int }
+
+fn Point.len(p Point) -> int { return p.x } // ERROR "methods go in an impl block: impl Point { fn len(...) { ... } }"
+
+fn main() {}

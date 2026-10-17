@@ -1,19 +1,17 @@
-package main
+program
 
-// net.AppendHostPort joins a host and a port as Go's net.JoinHostPort does: an IPv6 literal (a
+// net.append_host_port joins a host and a port as Go's net.JoinHostPort does: an IPv6 literal (a
 // host with a ':') goes in brackets, and an empty host gives ":port", Listen's form for every
 // interface. The result is usable with Listen and Dial.
 
-import (
-	"net"
-)
+use net
 
-func show(host string, port int) {
-	var b [64]byte
-	print("[", host, "] ", port, " -> ", string(net.AppendHostPort(b[:0], host, port)), "\n")
+fn show(host str, port int) {
+	var b u8[64]
+	print("[", host, "] ", port, " -> ", str(net.append_host_port(b[:0], host, port)), "\n")
 }
 
-func main() {
+fn main() {
 	show("127.0.0.1", 8080)
 	show("localhost", 80)
 	show("", 7070)
@@ -21,16 +19,16 @@ func main() {
 	show("fe80::1%lo0", 0)
 	show("example.com", 65535)
 
-	var b [64]byte
+	var b u8[64]
 	dst := append(b[:0], "addr="...) // appends to what dst holds
-	println(string(net.AppendHostPort(dst, "10.0.0.1", 22)))
+	println(str(net.append_host_port(dst, "10.0.0.1", 22)))
 
-	l, err := net.Listen(string(net.AppendHostPort(b[:0], "127.0.0.1", 0)))
+	l, err := net.listen(str(net.append_host_port(b[:0], "127.0.0.1", 0)))
 	if err != nil {
 		panic(err)
 	}
-	c, err := net.Dial(string(net.AppendHostPort(b[:0], "127.0.0.1", l.Port())))
+	c, err := net.dial(str(net.append_host_port(b[:0], "127.0.0.1", l.port())))
 	println("dial:", err == nil)
-	c.Close()
-	l.Close()
+	c.close()
+	l.close()
 }

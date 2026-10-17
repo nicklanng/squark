@@ -24,7 +24,7 @@ func docText(doc []string) string {
 
 // DocLine renders a function signature with its provenance (declared or inferred), e.g.
 //
-//	func Cut(s, sep string) (string, string, bool) from s, sep
+//	fn cut(s str, sep str) -> (str, str, bool) in s, sep
 func DocLine(fn *Func) string {
 	d := fn.Decl
 	var b strings.Builder
@@ -32,9 +32,9 @@ func DocLine(fn *Func) string {
 	case KindTask:
 		b.WriteString("task ")
 	case KindExtern:
-		b.WriteString("extern func ")
+		b.WriteString("extern fn ")
 	default:
-		b.WriteString("func ")
+		b.WriteString("fn ")
 	}
 	slots := slotVars(fn)
 	into := map[int][]string{}
@@ -67,42 +67,45 @@ func DocLine(fn *Func) string {
 		}
 	}
 	base := 0
+	params := fn.Sig.Params
 	if fn.Sig.Recv != nil {
-		fmt.Fprintf(&b, "(%s %s) ", fn.Sig.Recv.Name, fn.Sig.Recv.Type)
+		params = append([]*Var{fn.Sig.Recv}, params...)
 		base = 1
 	}
 	b.WriteString(fn.Name + "(")
-	for i, p := range fn.Sig.Params {
+	for i, p := range params {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		slot := base + i
-		b.WriteString(p.Name + " ")
-		if static[slot] {
-			b.WriteString("static ")
+		slot := i
+		if i == 0 && fn.Sig.Recv != nil {
+			if _, ptr := p.Type.(*Pointer); ptr {
+				b.WriteString("&self")
+			} else {
+				b.WriteString("self")
+			}
+			if static[slot] {
+				b.WriteString(" in static")
+			}
+			continue
 		}
+		b.WriteString(p.Name + " ")
 		t := p.Type.String()
-		if fn.Sig.Variadic && i == len(fn.Sig.Params)-1 {
+		if fn.Sig.Variadic && i == len(params)-1 {
 			t = "..." + p.Type.(*Slice).Elem.String()
 		}
 		b.WriteString(t)
+		if static[slot] {
+			b.WriteString(" in static")
+		}
 		if dst := into[slot]; len(dst) > 0 {
 			sort.Strings(dst)
-			b.WriteString(" into " + strings.Join(dst, ", "))
+			b.WriteString(" in " + strings.Join(dst, ", "))
 		}
 	}
+	_ = base
 	b.WriteString(")")
-	switch len(fn.Sig.Results) {
-	case 0:
-	case 1:
-		b.WriteString(" " + fn.Sig.Results[0].Type.String())
-	default:
-		var rs []string
-		for _, r := range fn.Sig.Results {
-			rs = append(rs, r.Type.String())
-		}
-		b.WriteString(" (" + strings.Join(rs, ", ") + ")")
-	}
+	b.WriteString(resultsText(fn.Sig.Results))
 	if fn.Summary == nil && fn.Sig.HasContract && len(from) == 0 {
 		// a generic function's template is never analyzed: show its declared contract
 		for _, i := range fn.Sig.From {
@@ -118,9 +121,9 @@ func DocLine(fn *Func) string {
 		}
 	}
 	if len(from) > 0 {
-		b.WriteString(" from " + strings.Join(from, ", "))
+		b.WriteString(" in " + strings.Join(from, ", "))
 	} else if hasRefResult {
-		b.WriteString(" static")
+		b.WriteString(" in static")
 	}
 	if fn.Pool > 0 {
 		fmt.Fprintf(&b, " pool %d", fn.Pool)
@@ -134,20 +137,52 @@ func DocLine(fn *Func) string {
 	if fn.Preemptible {
 		b.WriteString(" preemptible")
 	}
+	if fn.Extern != "" && fn.Extern != fn.Name {
+		fmt.Fprintf(&b, " c%q", fn.Extern)
+	}
 	return b.String()
 }
 
+// resultsText prints a signature's results after ->, with ! for a last error result.
+func resultsText(results []*Var) string {
+	rs := results
+	bang := len(rs) > 0 && rs[len(rs)-1].Type == tError
+	if bang {
+		rs = rs[:len(rs)-1]
+	}
+	var ts []string
+	for _, r := range rs {
+		ts = append(ts, r.Type.String())
+	}
+	s := ""
+	switch len(ts) {
+	case 0:
+		if bang {
+			return " -> !"
+		}
+		return ""
+	case 1:
+		s = " -> " + ts[0]
+	default:
+		s = " -> (" + strings.Join(ts, ", ") + ")"
+	}
+	if bang {
+		s += " !"
+	}
+	return s
+}
+
 // DocPackage renders a package's API: constants, variables, types and functions with provenance.
-// Unexported names are included only when all is set.
+// Names that aren't pub are included only when all is set.
 func DocPackage(p *Package, all bool) string {
-	show := func(name string) bool { return all || isExported(name) }
+	show := func(pub bool) bool { return all || pub || p.Name == "main" }
 	type entry struct {
 		pos  Pos
 		text string
 	}
 	var consts, vars, types []entry
 	for name, o := range p.Scope.names {
-		if !show(name) {
+		if !show(o.Pub) {
 			continue
 		}
 		switch o.Kind {
@@ -197,15 +232,13 @@ func DocPackage(p *Package, all bool) string {
 			case v.ArenaSize > 0:
 				vars = append(vars, entry{o.Pos, fmt.Sprintf("arena %s %d", name, v.ArenaSize)})
 			case v.Shared:
-				vars = append(vars, entry{o.Pos, fmt.Sprintf("shared var %s %s", name, v.Type)})
-			case v.Thread:
-				vars = append(vars, entry{o.Pos, fmt.Sprintf("thread var %s %s", name, v.Type)})
+				vars = append(vars, entry{o.Pos, fmt.Sprintf("shared %s %s", name, v.Type)})
 			case v.ConstData:
 				vars = append(vars, entry{o.Pos, fmt.Sprintf("const %s %s", name, v.Type)})
 			case v.ReadOnly:
-				vars = append(vars, entry{o.Pos, fmt.Sprintf("const %s = %s", name, errorInit(p, v))})
+				vars = append(vars, entry{o.Pos, fmt.Sprintf("fault %s %s", name, faultInit(p, v))})
 			default:
-				vars = append(vars, entry{o.Pos, fmt.Sprintf("var %s %s", name, v.Type)})
+				vars = append(vars, entry{o.Pos, fmt.Sprintf("thread %s %s", name, v.Type)})
 			}
 			if v.Spec != nil && len(vars) > n {
 				vars[n].text = docText(v.Spec.Doc) + vars[n].text
@@ -219,6 +252,24 @@ func DocPackage(p *Package, all bool) string {
 			if o.TypeDecl != nil {
 				b.WriteString(docText(o.TypeDecl.Doc))
 			}
+			// the methods, inside the type's block after a blank line
+			// the methods, for an impl block after the type: a blank line before each documented one
+			methods := func(after bool) string {
+				var mb strings.Builder
+				first := true
+				for _, m := range n.Methods {
+					if !show(m.Pub) {
+						continue
+					}
+					if first && after || !first && len(m.Decl.Doc) > 0 {
+						mb.WriteString("\n")
+					}
+					first = false
+					text := docText(m.Decl.Doc) + DocLine(m)
+					mb.WriteString("\n\t" + strings.ReplaceAll(text, "\n", "\n\t"))
+				}
+				return mb.String()
+			}
 			if st, ok := n.Underlying().(*Struct); ok {
 				fieldDoc := map[string][]string{} // a field's doc comment, on the first name it declares
 				if o.TypeDecl != nil {
@@ -230,10 +281,10 @@ func DocPackage(p *Package, all bool) string {
 						}
 					}
 				}
-				fmt.Fprintf(&b, "type %s struct {", name)
+				fmt.Fprintf(&b, "struct %s {", name)
 				hidden, shown := false, 0
 				for _, f := range st.Fields {
-					if !show(f.Name) {
+					if !show(f.Pub) {
 						hidden = true
 						continue
 					}
@@ -247,23 +298,32 @@ func DocPackage(p *Package, all bool) string {
 					shown++
 				}
 				if hidden {
-					b.WriteString("\n\t// unexported fields")
+					b.WriteString("\n\t// fields that aren't pub")
+				}
+				b.WriteString("\n}")
+			} else if len(n.Enum) > 0 {
+				t := ""
+				if n.Underlying() != tInt {
+					t = " " + n.Underlying().String()
+				}
+				fmt.Fprintf(&b, "enum %s%s {", name, t)
+				for _, m := range n.Enum {
+					fmt.Fprintf(&b, "\n\t%s = %s", m.Name, m.Const)
 				}
 				b.WriteString("\n}")
 			} else {
-				fmt.Fprintf(&b, "type %s %s", name, n.Underlying())
+				fmt.Fprintf(&b, "%s: %s", name, n.Underlying())
+
 			}
-			for _, m := range n.Methods {
-				if show(m.Name) {
-					b.WriteString("\n" + docText(m.Decl.Doc) + DocLine(m))
-				}
+			if ms := methods(false); ms != "" {
+				fmt.Fprintf(&b, "\n\nimpl %s {%s\n}", name, ms)
 			}
 			types = append(types, entry{o.Pos, b.String()})
 		}
 	}
 	var funcs []entry
 	for _, f := range append(p.Funcs, p.Generics...) {
-		if f.RecvType != nil || !show(f.Name) || f.Sig == nil || f.GenericOf != nil {
+		if f.RecvType != nil || !show(f.Pub) || f.Sig == nil || f.GenericOf != nil {
 			continue // instances are documented by their template
 		}
 		funcs = append(funcs, entry{f.Decl.P, docText(f.Decl.Doc) + DocLine(f)})
@@ -289,10 +349,12 @@ func DocPackage(p *Package, all bool) string {
 		}
 	}
 	b.WriteString(docText(pkgDoc))
-	if p.Std && p.Path != p.Name {
-		fmt.Fprintf(&b, "package %s // import %q\n", p.Name, p.Path) // a nested path: math/rand
+	if p.Name == "main" {
+		b.WriteString("program\n")
+	} else if p.Std && p.Path != p.Name {
+		fmt.Fprintf(&b, "module %s // use %s\n", p.Name, p.Path) // a nested path: math/rand
 	} else {
-		fmt.Fprintf(&b, "package %s\n", p.Name)
+		fmt.Fprintf(&b, "module %s\n", p.Name)
 	}
 	for _, group := range [][]entry{consts, vars, types, funcs} {
 		if len(group) == 0 {
@@ -307,13 +369,21 @@ func DocPackage(p *Package, all bool) string {
 	return b.String()
 }
 
-func errorInit(p *Package, v *Var) string {
+// faultInit prints an error constant's code and message: 404 "not found".
+func faultInit(p *Package, v *Var) string {
 	for _, vs := range p.GlobalInits {
 		for i, n := range vs.Names {
 			if n.Obj != nil && n.Obj.Var == v && i < len(vs.Values) {
-				return exprString(vs.Values[i])
+				if call, ok := vs.Values[i].(*CallExpr); ok && isErrorValue(call) {
+					var args []string
+					for _, a := range call.Args {
+						args = append(args, exprString(a))
+					}
+					return strings.Join(args, " ")
+				}
+				return "= " + exprString(vs.Values[i])
 			}
 		}
 	}
-	return "error(...)"
+	return "..."
 }

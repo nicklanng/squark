@@ -1,0 +1,5 @@
+program
+
+budget 4M // ERROR "budget is a directive: it goes in the file's header, program { budget ... }"
+
+fn main() {}

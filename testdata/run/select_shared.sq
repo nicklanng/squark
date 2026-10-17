@@ -1,37 +1,34 @@
-package main
+program {
+	threads 4
+}
 
 // select across scheduler threads: 4 threads × 2 workers select over shared channels and a
 // timeout; shard 0 produces jobs and sums the results, then closes quit, which ends every worker
 // on every thread.
 
-import (
-	"runtime"
-	"time"
-)
+use runtime, time
 
-threads 4
+shared jobs int chan[8]
+shared results int chan[8]
+shared quit int chan[0]
 
-shared var jobs chan int cap 8
-shared var results chan int cap 8
-shared var quit chan int cap 0
-
-thread var done chan int cap 2
-thread var total chan int cap 1
+thread done int chan[2]
+thread total int chan[1]
 
 task worker() pool 2 {
 	idle := 0
-	for {
+	loop {
 		select {
 		case j := <-jobs:
 			select {
 			case results <- j * 2:
-			case <-time.After(5 * time.Second):
+			case <-time.after(5 * time.second):
 				panic("results stuck")
 			}
 		case <-quit:
 			done <- idle
 			return
-		case <-time.After(2 * time.Millisecond):
+		case <-time.after(2 * time.millisecond):
 			idle++
 		}
 	}
@@ -41,7 +38,7 @@ task producer() pool 1 {
 	for i := 1; i <= 2000; i++ {
 		select {
 		case jobs <- i:
-		case <-time.After(5 * time.Second):
+		case <-time.after(5 * time.second):
 			panic("jobs stuck")
 		}
 	}
@@ -56,12 +53,12 @@ task collector() pool 1 {
 	total <- sum
 }
 
-func main() {
-	go worker()
-	go worker()
-	if runtime.Shard() == 0 {
-		go producer()
-		go collector()
+fn main() {
+	start worker()
+	start worker()
+	if runtime.shard() == 0 {
+		start producer()
+		start collector()
 		println(<-total)
 	}
 	<-done

@@ -1,37 +1,37 @@
-package main
+program
 
-import "strings"
+use strings
 
 // A call without a result, a builtin or a package used as a value: these have no type but had
 // no error either, so they used to reach C (or pass 0).
 
-type P struct{ a int }
+struct P { a int }
 
 task t(x int) pool 1 {}
 
-func f() {}
-func g(x int) {}
-func r() int { return f() } // ERROR "f() (no value) used as value"
+fn f() {}
+fn g(x int) {}
+fn r() -> int { return f() } // ERROR "f() (no value) used as value"
 
-func main() {
-	var c chan int cap 1
-	var v [..2]int
-	var s [2]int
+fn main() {
+	var c int chan[1]
+	var v int[..2]
+	var s int[2]
 	g(f()) // ERROR "f() (no value) used as value"
 	c <- f() // ERROR "f() (no value) used as value"
-	_ = []int{f()} // ERROR "f() (no value) used as value"
+	_ = int[]{f()} // ERROR "f() (no value) used as value"
 	_ = P{f()} // ERROR "f() (no value) used as value"
 	_ = &P{a: f()} // ERROR "f() (no value) used as value"
-	v.Push(f()) // ERROR "f() (no value) used as value"
-	_ = v.TryPush(f()) // ERROR "f() (no value) used as value"
+	v.push(f()) // ERROR "f() (no value) used as value"
+	_ = v.try_push(f()) // ERROR "f() (no value) used as value"
 	_ = append(s[:0], f()) // ERROR "f() (no value) used as value"
-	go t(f()) // ERROR "f() (no value) used as value"
+	start t(f()) // ERROR "f() (no value) used as value"
 	defer g(f()) // ERROR "f() (no value) used as value"
 	select {
 	case c <- f(): // ERROR "f() (no value) used as value"
 	default:
 	}
-	s = [2]int{f(), 1} // ERROR "f() (no value) used as value"
+	s = int[2]{f(), 1} // ERROR "f() (no value) used as value"
 	x := f() // ERROR "f() (no value) used as value"
 	var y int = f() // ERROR "f() (no value) used as value"
 	_, _ = x, y

@@ -1,0 +1,44 @@
+program
+
+// A declared vector starts empty however often its declaration runs, even though only its
+// length is set (BUGS.md Q3): storage past the length is never read.
+
+struct P {
+	x, y int
+}
+
+//squark:noinline
+fn scribble() -> int {
+	var junk int[512]
+	for i in 0..512 {
+		junk[i] = -1 - i
+	}
+	return junk[511]
+}
+
+//squark:noinline
+fn fill(n int) -> int {
+	var v P[..64]
+	sum := len(v)
+	for i in 0..n {
+		v.push(P{i, i * i})
+	}
+	for p in v {
+		sum += p.y
+	}
+	return sum + len(v[:])*1000
+}
+
+fn main() {
+	for round in 0..3 {
+		var v int[..8]
+		println(round, len(v), cap(v), len(v[:]))
+		for i in 0..round+2 {
+			v.push(i * 10)
+		}
+		println(v[len(v)-1], v.pop(), len(v))
+		w := v
+		println(len(w), w[0])
+	}
+	println(scribble(), fill(4), scribble(), fill(2))
+}

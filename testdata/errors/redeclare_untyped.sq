@@ -1,7 +1,7 @@
-package main
+program
 
-func main() {
-	var a int8
+fn main() {
+	var a i8
 	a, b := 300, 2 // ERROR "constant 300 overflows"
 	println(a, b)
 }

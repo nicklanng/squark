@@ -1,21 +1,21 @@
-package main
+program
 
-type Msg struct {
-	ID   int
-	Body string
+struct Msg {
+	id   int
+	body str
 }
 
-type Job struct {
-	ID    int
-	Sizes [4]int
+struct Job {
+	id    int
+	sizes int[4]
 }
 
-shared var names chan string cap 4 // ERROR "shared var names: a shared channel's elements can't hold references (string)"
-shared var msgs chan Msg cap 4 // ERROR "a shared channel's elements can't hold references"
-shared var jobs chan Job cap 4 // fine: no references
-shared var errs chan error cap 1 // fine: error messages are constants
+shared names str chan[4] // ERROR "shared names: a shared channel's elements can't hold references (str)"
+shared msgs Msg chan[4] // ERROR "a shared channel's elements can't hold references"
+shared jobs Job chan[4] // fine: no references
+shared errs error chan[1] // fine: error messages are constants
 
-func main() {
-	jobs <- Job{ID: 1}
-	println((<-jobs).ID, len(errs))
+fn main() {
+	jobs <- Job{id: 1}
+	println((<-jobs).id, len(errs))
 }

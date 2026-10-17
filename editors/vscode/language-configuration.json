@@ -12,7 +12,7 @@
   ],
   "surroundingPairs": [["{", "}"], ["[", "]"], ["(", ")"], ["\"", "\""], ["'", "'"], ["`", "`"]],
   "indentationRules": {
-    "increaseIndentPattern": "^.*(\\bcase\\b.*:|\\bdefault\\b:|(\\b(func|if|else|switch|select|for|struct|task|arena)\\b.*)?(\\{[^}\"'`]*|\\([^)\"'`]*))$",
+    "increaseIndentPattern": "^.*(\\bcase\\b.*:|\\bdefault\\b:|(\\b(fn|if|else|switch|select|for|while|loop|struct|task|with|program|module|use|fault|const)\\b.*)?(\\{[^}\"'`]*|\\([^)\"'`]*))$",
     "decreaseIndentPattern": "^\\s*(\\bcase\\b.*:|\\bdefault\\b:|}[)}]*[),]?|\\)[,]?)$"
   },
   "folding": { "markers": { "start": "^\\s*//\\s*#?region\\b", "end": "^\\s*//\\s*#?endregion\\b" } },

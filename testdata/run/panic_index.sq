@@ -1,9 +1,9 @@
-package main
+program
 
-func get(s []int, i int) int { return s[i] }
+fn get(s int[], i int) -> int { return s[i] }
 
-func main() {
-	var a [3]int
+fn main() {
+	var a int[3]
 	println("before")
 	println(get(a[:], 5))
 }

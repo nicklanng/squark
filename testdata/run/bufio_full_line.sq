@@ -1,41 +1,37 @@
-package main
+program
 
 // bufio.Reader's longest line is the buffer's capacity (not counting "\n" or "\r\n"), and a last
 // line ending in "\r" at EOF loses the "\r", as with Go's bufio.Scanner.
 
-import (
-	"bufio"
-	"io"
-	"os"
-)
+use bufio, io, os
 
-func readAll(path string, text string) {
-	f, _ := os.Create(path)
-	f.WriteString(text)
-	f.Close()
-	var store [8]byte
-	r := bufio.NewReader(store[:])
-	g, _ := os.Open(path)
-	for {
-		line, err := r.ReadLine(g)
+fn read_all(path str, text str) {
+	f, _ := os.create(path)
+	f.write_string(text)
+	f.close()
+	var store u8[8]
+	r := bufio.new_reader(store[:])
+	g, _ := os.open(path)
+	loop {
+		line, err := r.read_line(g)
 		if err == io.EOF {
 			println("<eof>")
 			break
 		}
 		if err != nil {
-			print("<", err.Error(), ">\n")
+			print("<", err.message(), ">\n")
 			continue
 		}
 		print("[", line, "]\n")
 	}
-	g.Close()
+	g.close()
 }
 
-func main() {
+fn main() {
 	path := "/tmp/squark_bufio_full_line.txt"
-	readAll(path, "12345678\n1234567\r\n12345678\r\n123456789\nab\n12345678\rx\nlast\r")
-	readAll(path, "abcdefgh")
-	readAll(path, "abcdefgh\r")
-	readAll(path, "abcdefg\r")
-	readAll(path, "abcdefgh\nabcdefgh\n")
+	read_all(path, "12345678\n1234567\r\n12345678\r\n123456789\nab\n12345678\rx\nlast\r")
+	read_all(path, "abcdefgh")
+	read_all(path, "abcdefgh\r")
+	read_all(path, "abcdefg\r")
+	read_all(path, "abcdefgh\nabcdefgh\n")
 }

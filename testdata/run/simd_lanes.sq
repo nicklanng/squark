@@ -1,12 +1,12 @@
-package main
+program
 
 // SIMD lanes can be assigned (v[i] = x, op=, ++, parallel assignment), and Shuffle and Swizzle
 // rearrange lanes.
 
-type P struct{ v [2]int32x4 }
+struct P { v i32x4[2] }
 
-func main() {
-	var a float32x4
+fn main() {
+	var a f32x4
 	a[1] = 5
 	a[2] += 1.5
 	a[3]++
@@ -21,28 +21,28 @@ func main() {
 	q := &p
 	q.v[1][2] -= 2
 	println(p.v[0], p.v[1])
-	var m uint8x16
-	for k := range 16 {
-		m[k] = byte(k * 3)
+	var m u8x16
+	for k in 0..16 {
+		m[k] = u8(k * 3)
 	}
 	m[15] <<= 1
 	println(m)
-	b := int32x4{10, 11, 12, 13}
-	c := int32x4{20, 21, 22, 23}
-	println(b.Swizzle(3, 2, 1, 0), b.Swizzle(0, 0, 0, 0))
-	println(b.Shuffle(c, 0, 4, 1, 5), b.Shuffle(c, 2, 3, 4, 5))
-	f := float32x8{1, 2, 3, 4, 5, 6, 7, 8}
-	println(f.Swizzle(7, 6, 5, 4, 3, 2, 1, 0).Sum())
+	b := i32x4{10, 11, 12, 13}
+	c := i32x4{20, 21, 22, 23}
+	println(b.swizzle(3, 2, 1, 0), b.swizzle(0, 0, 0, 0))
+	println(b.shuffle(c, 0, 4, 1, 5), b.shuffle(c, 2, 3, 4, 5))
+	f := f32x8{1, 2, 3, 4, 5, 6, 7, 8}
+	println(f.swizzle(7, 6, 5, 4, 3, 2, 1, 0).sum())
 	b[0], b[1] = b[1], b[0]
 	println(b)
-	viaPointer()
+	via_pointer()
 }
 
-func viaPointer() {
-	v := float32x4{1, 2, 3, 4}
+fn via_pointer() {
+	v := f32x4{1, 2, 3, 4}
 	p := &v
 	p[0] = 7
 	p[1] += 1
-	println(p[0], p[1], len(p), p.Sum(), *p)
+	println(p[0], p[1], len(p), p.sum(), *p)
 }
 

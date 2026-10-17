@@ -1,4 +1,6 @@
-package main
+program {
+	threads 4
+}
 
 // Test program for TestSQLiteThreads (internal/driver): four scheduler threads, each with its own
 // connection to one database and eight goroutines sharing it. Every goroutine inserts rows and reads
@@ -6,49 +8,43 @@ package main
 // wait on helper threads while other goroutines queue for the connection; if two goroutines ever
 // interleaved on a connection, a rowid or value would come back wrong.
 
-import (
-	"os"
-	"runtime"
-	"sqlite"
-)
+use os, runtime, sqlite
 
-threads 4
+thread db sqlite.DB
+thread ins sqlite.Stmt
+thread get sqlite.Stmt
 
-thread var db sqlite.DB
-thread var ins sqlite.Stmt
-thread var get sqlite.Stmt
+thread done int chan[8]  // per thread: each writer's count of wrong reads
+shared results int chan[64] // each thread's total, to shard 0
 
-thread var done chan int cap 8  // per thread: each writer's count of wrong reads
-shared var results chan int cap 64 // each thread's total, to shard 0
-
-func insert(v int) int {
-	defer ins.Reset()
-	if err := ins.BindInt(1, v); err != nil {
+fn insert(v int) -> int {
+	defer ins.reset()
+	if err := ins.bind_int(1, v); err != nil {
 		panic(err)
 	}
-	if _, err := ins.Step(); err != nil {
+	if _, err := ins.step(); err != nil {
 		panic(err)
 	}
-	return db.LastInsertRowID()
+	return db.last_insert_row_id()
 }
 
-func read(id int) int {
-	defer get.Reset()
-	get.BindInt(1, id)
-	row, err := get.Step()
+fn read(id int) -> int {
+	defer get.reset()
+	get.bind_int(1, id)
+	row, err := get.step()
 	if err != nil {
 		panic(err)
 	}
-	if !row {
+	if not row {
 		return -1
 	}
-	return get.ColumnInt(0)
+	return get.column_int(0)
 }
 
 task writer(id int) pool 8 {
 	bad := 0
 	for i := 0; i < 100; i++ {
-		v := runtime.Shard()*1000000 + id*1000 + i
+		v := runtime.shard()*1000000 + id*1000 + i
 		if read(insert(v)) != v {
 			bad++
 		}
@@ -56,31 +52,31 @@ task writer(id int) pool 8 {
 	done <- bad
 }
 
-func main() {
+fn main() {
 	var err error
-	if db, err = sqlite.Open(os.Arg(1)); err != nil {
+	if db, err = sqlite.open(os.arg(1)); err != nil {
 		panic(err)
 	}
-	if err := db.Exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, v INTEGER)"); err != nil {
+	if err := db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, v INTEGER)"); err != nil {
 		panic(err)
 	}
-	if ins, err = db.Prepare("INSERT INTO t(v) VALUES(?)"); err != nil {
+	if ins, err = db.prepare("INSERT INTO t(v) VALUES(?)"); err != nil {
 		panic(err)
 	}
-	if get, err = db.Prepare("SELECT v FROM t WHERE id = ?"); err != nil {
+	if get, err = db.prepare("SELECT v FROM t WHERE id = ?"); err != nil {
 		panic(err)
 	}
 	for g := 0; g < 8; g++ {
-		go writer(g)
+		start writer(g)
 	}
 	bad := 0
 	for g := 0; g < 8; g++ {
 		bad += <-done
 	}
 	results <- bad
-	if runtime.Shard() == 0 {
+	if runtime.shard() == 0 {
 		total := 0
-		for s := 0; s < runtime.Shards(); s++ {
+		for s := 0; s < runtime.shards(); s++ {
 			total += <-results
 		}
 		println("wrong reads:", total)

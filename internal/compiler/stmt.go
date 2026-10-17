@@ -373,28 +373,28 @@ func (c *Checker) goStmt(s *GoStmt) {
 		return
 	}
 	if call.Builtin != "" || call.Conversion {
-		c.errorf(s.P, "go requires a function or method call")
+		c.errorf(s.P, "start requires a function or method call")
 		return
 	}
 	if call.Callee == nil {
-		c.errorf(s.P, "go requires a direct call to a named function or method (the goroutine's stack is sized from its entry function)")
+		c.errorf(s.P, "start requires a direct call to a named function or method (the goroutine's stack is sized from its entry function)")
 		return
 	}
 	if !call.Callee.IsTask {
-		c.errorf(s.P, "go needs a task: declare %s with `task %s(...) pool N` (tasks have a pool size and a proven stack)", call.Callee.Name, call.Callee.Name)
+		c.errorf(s.P, "start needs a task: declare %s with `task %s(...) pool N` (tasks have a pool size and a proven stack)", call.Callee.Name, call.Callee.Name)
 		return
 	}
 	if len(call.Callee.Sig.Results) > 0 {
 		// results are discarded, like Go
 	}
 	if call.Ellipsis || call.Variadic >= 0 && call.Callee.Sig.Variadic {
-		c.errorf(s.P, "go with a variadic call is not supported")
+		c.errorf(s.P, "start with a variadic call is not supported")
 	}
 	call.Callee.GoTarget = true
 	s.ID = len(c.prog.GoSites)
 	c.prog.GoSites = append(c.prog.GoSites, s)
 	if c.fn == nil {
-		c.errorf(s.P, "go statement outside function")
+		c.errorf(s.P, "start statement outside function")
 		return
 	}
 	c.fn.GoSites = append(c.fn.GoSites, s)
@@ -417,7 +417,7 @@ func (c *Checker) deferStmt(s *DeferStmt) {
 	if call.Builtin != "" {
 		switch call.Builtin {
 		case "close", "print", "println", "panic":
-		case "len", "cap", "append", "min", "max", "new", "make", "error.Error", "error.Code", "arena.Used", "arena.Left", "arena.Cap", "vec.TryPush", "vec.TryAppend", "vec.Pop":
+		case "len", "cap", "append", "min", "max", "new", "make", "error.message", "error.code", "arena.used", "arena.left", "arena.cap", "vec.try_push", "vec.try_append", "vec.pop":
 			c.errorf(s.P, "defer discards result of %s", exprString(call))
 			return
 		default:
@@ -539,7 +539,7 @@ func (c *Checker) branch(s *BranchStmt) {
 }
 
 func isTimeAfter(f *Func) bool {
-	return f != nil && f.Pkg != nil && f.Pkg.Path == "time" && f.Name == "After"
+	return f != nil && f.Pkg != nil && f.Pkg.Path == "time" && f.Name == "after"
 }
 
 // recvOf returns the receive x is, if it is one.
@@ -586,10 +586,10 @@ func (c *Checker) selectStmt(s *SelectStmt) {
 			c.afterCall = nil
 			if after != nil && isTimeAfter(after.Callee) {
 				if _, ok := cc.Comm.(*ExprStmt); !ok {
-					c.errorf(cc.Comm.Pos(), "time.After's case has no value to receive: write case <-time.After(d): (time.Now() gives the time)")
+					c.errorf(cc.Comm.Pos(), "time.after's case has no value to receive: write case <-time.after(d): (time.now() gives the time)")
 				}
 				if timeout != nil {
-					c.errorf(cc.P, "multiple time.After cases in select (previous at %s:%d)", shortFile(timeout.P.File), timeout.P.Line)
+					c.errorf(cc.P, "multiple time.after cases in select (previous at %s:%d)", shortFile(timeout.P.File), timeout.P.Line)
 				}
 				timeout = cc
 				if len(after.Args) == 1 {
@@ -674,6 +674,45 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 	s.X = c.derefVec(s.X)
 	c.toViewRead(s.X)
 	xt := s.X.info().T
+	if s.Single {
+		// for x in X: x is the element, except over a channel (its values) or integers
+		s.Single = false
+		switch u := xt.Underlying().(type) {
+		case *Chan:
+		case *Basic:
+			if !isInteger(u) {
+				s.Key, s.Value = &Ident{P: s.Key.Pos(), Name: "_"}, s.Key
+			}
+		default:
+			s.Key, s.Value = &Ident{P: s.Key.Pos(), Name: "_"}, s.Key
+		}
+	}
+	if s.Lo != nil {
+		// for i in lo..hi: integers of one type
+		if !c.valueExpr(s.Lo, nil) {
+			c.stmt(s.Body)
+			return
+		}
+		lt := s.Lo.info().T
+		if !isInteger(lt) || !isInteger(xt) {
+			c.errorf(s.Lo.Pos(), "a range lo..hi needs integers, not %s and %s", lt, xt)
+			c.stmt(s.Body)
+			return
+		}
+		switch {
+		case isUntyped(lt) && !isUntyped(xt):
+			c.convertUntyped(s.Lo, xt, "range")
+		case !isUntyped(lt) && isUntyped(xt):
+			c.convertUntyped(s.X, lt, "range")
+			xt = s.X.info().T
+		case isUntyped(lt) && isUntyped(xt):
+			c.defaultUntyped(s.Lo)
+			c.defaultUntyped(s.X)
+			xt = s.X.info().T
+		case !Identical(lt, xt):
+			c.errorf(s.Lo.Pos(), "mismatched types in range %s..%s: %s and %s", exprString(s.Lo), exprString(s.X), lt, xt)
+		}
+	}
 	var kt, vt Type
 	keyChecked := false
 	switch u := xt.Underlying().(type) {
@@ -709,16 +748,16 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 	case *Chan:
 		kt = u.Elem
 		if s.Value != nil {
-			c.errorf(s.Value.Pos(), "range over %s permits only one iteration variable", exprString(s.X))
+			c.errorf(s.Value.Pos(), "for ... in %s permits only one loop variable", exprString(s.X))
 		}
 	}
 	if kt == nil {
-		c.errorf(s.X.Pos(), "cannot range over %s (type %s)", exprString(s.X), xt)
+		c.errorf(s.X.Pos(), "cannot loop over %s (type %s)", exprString(s.X), xt)
 		c.stmt(s.Body)
 		return
 	}
 	if isInteger(xt) && s.Value != nil {
-		c.errorf(s.Value.Pos(), "range over %s permits only one iteration variable", exprString(s.X))
+		c.errorf(s.Value.Pos(), "for ... in %s permits only one loop variable", exprString(s.X))
 	}
 	vars := []Expr{s.Key, s.Value}
 	types := []Type{kt, vt}
@@ -727,7 +766,7 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 			continue
 		}
 		if st := storageIn(types[i]); st != nil && !isBlank(v) {
-			c.errorf(v.Pos(), "cannot copy elements of %s into %s: %s contains %s storage; range over the index and use &%s[i]", exprString(s.X), exprString(v), types[i], st, exprString(s.X))
+			c.errorf(v.Pos(), "cannot copy elements of %s into %s: %s contains %s storage; loop over the indexes and use &%s[i]", exprString(s.X), exprString(v), types[i], st, exprString(s.X))
 		}
 		if s.Define {
 			id, ok := v.(*Ident)
@@ -746,7 +785,7 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 			c.expr(v)
 		}
 		if c.checkAssignTarget(v) && !assignableType(types[i], v.info().T) {
-			c.errorf(v.Pos(), "cannot assign %s to %s (type %s) in range", types[i], exprString(v), v.info().T)
+			c.errorf(v.Pos(), "cannot assign %s to %s (type %s) in for ... in", types[i], exprString(v), v.info().T)
 		}
 	}
 	c.breakable = append(c.breakable, s)
@@ -870,7 +909,7 @@ func (c *Checker) isTerminating(s Stmt) bool {
 		if call, ok := unparen(s.X).(*CallExpr); ok && call.Builtin == "panic" {
 			return true
 		}
-		if call, ok := unparen(s.X).(*CallExpr); ok && call.Callee != nil && call.Callee.Pkg != nil && call.Callee.Pkg.Path == "os" && call.Callee.Name == "Exit" {
+		if call, ok := unparen(s.X).(*CallExpr); ok && call.Callee != nil && call.Callee.Pkg != nil && call.Callee.Pkg.Path == "os" && call.Callee.Name == "exit" {
 			return true
 		}
 	case *BlockStmt:

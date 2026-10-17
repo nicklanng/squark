@@ -1,18 +1,18 @@
-package main
+program
 
 // Loops whose indexes are the counter (times a constant) plus a fixed offset run a copy without bounds checks when
 // a test before the loop shows every index is in range (cgen_loop.go). These check that both
 // copies compute the same thing.
 
-var g [8]int
+thread g int[8]
 
-func neighbours(a []int, b []int) {
+fn neighbours(a int[], b int[]) {
 	for i := 1; i < len(a); i++ {
 		b[i-1] = a[i] + a[i-1]
 	}
 }
 
-func inclusive(a []int, n int) int {
+fn inclusive(a int[], n int) -> int {
 	s := 0
 	for i := 0; i <= n-1; i++ {
 		s += a[i]
@@ -20,7 +20,7 @@ func inclusive(a []int, n int) int {
 	return s
 }
 
-func flipped(a []int) int {
+fn flipped(a int[]) -> int {
 	s := 0
 	for i := 0; len(a) > i; i++ {
 		s += a[i] * i
@@ -29,9 +29,9 @@ func flipped(a []int) int {
 }
 
 // the test fails (b is shorter), so the checked copy runs, and the if keeps it in range
-func guarded(a []int, b []int) int {
+fn guarded(a int[], b int[]) -> int {
 	n := 0
-	for i := range a {
+	for i, _ in a {
 		if i < len(b) {
 			b[i] = a[i]
 			n++
@@ -41,9 +41,9 @@ func guarded(a []int, b []int) int {
 }
 
 // s changes after the loop: the copy read before the loop must not leak out
-func later(s []int) int {
+fn later(s int[]) -> int {
 	t := 0
-	for i := range s {
+	for i, _ in s {
 		t += s[i]
 	}
 	s = s[1:]
@@ -51,7 +51,7 @@ func later(s []int) int {
 }
 
 // s changes in the loop, so its indexes stay checked
-func shrinking(s []int) int {
+fn shrinking(s int[]) -> int {
 	t := 0
 	for i := 0; i < 3; i++ {
 		t += s[i]
@@ -60,7 +60,7 @@ func shrinking(s []int) int {
 	return t
 }
 
-func branches(a []int) int {
+fn branches(a int[]) -> int {
 	s := 0
 	for i := 0; i < len(a); i++ {
 		if a[i] == 3 {
@@ -74,7 +74,7 @@ func branches(a []int) int {
 	return s
 }
 
-func rows(dst []int, a []int, w int) {
+fn rows(dst int[], a int[], w int) {
 	for r := 0; r < len(dst)/w; r++ {
 		base := r * w
 		for j := 0; j < w; j++ {
@@ -83,25 +83,25 @@ func rows(dst []int, a []int, w int) {
 	}
 }
 
-func viaPointer(p *[8]int) int {
+fn via_pointer(p *(int[8])) -> int {
 	s := 0
-	for i := range 8 {
+	for i in 0..8 {
 		s += p[i] + g[i]
 	}
 	return s
 }
 
-func bytesOf(s string, n int) int {
+fn bytes_of(s str, n int) -> int {
 	t := 0
-	for i := range n {
+	for i in 0..n {
 		t += int(s[i])
 	}
 	return t
 }
 
 // indexes that are the counter times a constant, plus an offset
-func interleave(dst []int, a []int, b []int) {
-	for i := range a {
+fn interleave(dst int[], a int[], b int[]) {
+	for i, _ in a {
 		dst[2*i] = a[i]
 		dst[i*2+1] = b[i]
 	}
@@ -109,7 +109,7 @@ func interleave(dst []int, a []int, b []int) {
 
 const stride = 3
 
-func strided(a []int, n int) int {
+fn strided(a int[], n int) -> int {
 	s := 0
 	for i := 0; i < n; i++ {
 		s += a[stride*i+1]
@@ -117,7 +117,7 @@ func strided(a []int, n int) int {
 	return s
 }
 
-func evensDown(a []int) int {
+fn evens_down(a int[]) -> int {
 	s := 0
 	for i := len(a)/2 - 1; i >= 0; i-- {
 		s = s*10 + a[2*i]
@@ -125,7 +125,7 @@ func evensDown(a []int) int {
 	return s
 }
 
-func oddsBack(a []int, n int) int {
+fn odds_back(a int[], n int) -> int {
 	s := 0
 	for i := 1; i <= n; i++ {
 		s += a[2*i-1]
@@ -135,7 +135,7 @@ func oddsBack(a []int, n int) int {
 
 // k*i wraps around to 0 at i = 4: the range test must reject the loop (the product overflows),
 // and the checked copy reads a[0] as the index wraps
-func wrapped(a []int) int {
+fn wrapped(a int[]) -> int {
 	s := 0
 	for i := 4; i < 5; i++ {
 		s += a[(1<<62)*i]
@@ -143,36 +143,36 @@ func wrapped(a []int) int {
 	return s
 }
 
-func main() {
-	x := []int{1, 2, 3}
-	y := []int{10, 20, 30}
-	var z [6]int
+fn main() {
+	x := int[]{1, 2, 3}
+	y := int[]{10, 20, 30}
+	var z int[6]
 	interleave(z[:], x, y)
 	println(z[0], z[1], z[2], z[3], z[4], z[5])
-	println(strided([]int{0, 1, 0, 0, 2, 0, 0, 3}, 3), strided(x, 0))
-	println(evensDown([]int{1, 0, 2, 0, 3, 0}))
-	println(oddsBack([]int{0, 1, 0, 2, 0, 3}, 3))
+	println(strided(int[]{0, 1, 0, 0, 2, 0, 0, 3}, 3), strided(x, 0))
+	println(evens_down(int[]{1, 0, 2, 0, 3, 0}))
+	println(odds_back(int[]{0, 1, 0, 2, 0, 3}, 3))
 	println(wrapped(y))
 
-	a := []int{1, 2, 3, 4, 5, 6, 7, 8}
-	var b [8]int
+	a := int[]{1, 2, 3, 4, 5, 6, 7, 8}
+	var b int[8]
 	neighbours(a, b[:])
 	println(b[0], b[6], b[7])
 	println(inclusive(a, 8), inclusive(a, 0))
 	println(flipped(a))
-	var c [3]int
+	var c int[3]
 	println(guarded(a, c[:]), c[0], c[2])
 	println(later(a))
 	println(shrinking(a))
 	println(branches(a))
-	var d [8]int
+	var d int[8]
 	rows(d[:], a, 4)
 	println(d[0], d[3], d[4], d[7])
-	for i := range g {
+	for i, _ in g {
 		g[i] = i
 	}
-	var e [8]int
+	var e int[8]
 	copy(e[:], a)
-	println(viaPointer(&e))
-	println(bytesOf("abc", 3), bytesOf("abc", 0))
+	println(via_pointer(&e))
+	println(bytes_of("abc", 3), bytes_of("abc", 0))
 }

@@ -1,10 +1,10 @@
-package main
+program
 
 // loading a vector from a slice shorter than its lanes panics
-func load(s []float32) float32x4 { return float32x4(s) }
+fn load(s f32[]) -> f32x4 { return f32x4(s) }
 
-func main() {
-	xs := []float32{1, 2, 3}
+fn main() {
+	xs := f32[]{1, 2, 3}
 	println("before")
 	println(load(xs))
 }

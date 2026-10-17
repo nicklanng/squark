@@ -1,15 +1,15 @@
-package main
+program
 
-import "strings"
+use strings
 
 // One mistake, one error: what follows from an expression that already failed isn't reported.
 
-func main() {
-	x, ok := strings.NoSuchFunction("ab", "a") // ERROR "undefined: strings.NoSuchFunction"
-	if ok && x == "" {
+fn main() {
+	x, ok := strings.no_such_function("ab", "a") // ERROR "undefined: strings.no_such_function"
+	if ok and x == "" {
 		println(x + "!")
 	}
-	for i, b := range []byte("hello") { // ERROR "converting \"hello\" to []byte copies it"
+	for i, b in u8[]("hello") { // ERROR "converting \"hello\" to u8[] copies it"
 		println(i, b)
 	}
 	switch x {

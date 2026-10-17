@@ -1,75 +1,75 @@
-package main
+program {
+	threads 4
+}
 
 // Arrays and structs of shared channels: each scheduler thread serves requests from its own slot
 // of inbox, and each client gets answers on its own slot of replies (request/reply routing across
 // threads). A struct can hold channels too.
 
-import "runtime"
+use runtime
 
-threads 4
-
-type Req struct {
-	Key  int
-	From int // which reply channel to answer on
+struct Req {
+	key  int
+	from int // which reply channel to answer on
 }
 
-type Bus struct {
-	Done  chan int cap 8
-	Count chan int cap 8
-	Tag   int // plain data in a shared struct is read-only (zero here)
+struct Bus {
+	done  int chan[8]
+	count int chan[8]
+	tag   int // plain data in a shared struct is read-only (zero here)
 }
 
-shared var inbox [4]chan Req cap 8
-shared var replies [8]chan int cap 1
-shared var bus Bus
+shared inbox Req chan[8][4]
+shared replies int chan[1][8]
+shared bus Bus
 
 // owner is the thread that serves key
-func owner(key int) int { return key % 4 }
+fn owner(key int) -> int { return key % 4 }
 
 task serve() pool 1 {
-	me := runtime.Shard()
+	me := runtime.shard()
 	served := 0
-	for r := range inbox[me] {
-		replies[r.From] <- r.Key * 10 + me // only the owner of a key can answer for it
+	for r in inbox[me] {
+		replies[r.from] <- r.key * 10 + me // only the owner of a key can answer for it
 		served++
 	}
-	bus.Count <- served
+	bus.count <- served
 }
 
 task client(id int) pool 2 {
 	sum := 0
 	for k := 0; k < 20; k++ {
 		key := id*100 + k
-		inbox[owner(key)] <- Req{Key: key, From: id}
+		inbox[owner(key)] <- Req{key: key, from: id}
 		v := <-replies[id]
-		if v%10 != owner(key) || v/10 != key {
+		if v%10 != owner(key) or v/10 != key {
 			panic("answered by the wrong thread")
 		}
 		sum += v / 10
 	}
-	bus.Done <- sum
+	bus.done <- sum
 }
 
-func main() {
-	if runtime.Shard() >= 4 {
+fn main() {
+	if runtime.shard() >= 4 {
 		return // SQUARK_THREADS above 4: no slot to serve
 	}
-	go serve()
-	if runtime.Shard() == 0 {
+	start serve()
+	if runtime.shard() == 0 {
 		for id := 0; id < 8; id++ {
-			go client(id)
+			start client(id)
 		}
 		total := 0
 		for id := 0; id < 8; id++ {
-			total += <-bus.Done
+			total += <-bus.done
 		}
 		for i := 0; i < 4; i++ {
 			close(inbox[i])
 		}
 		served := 0
 		for i := 0; i < 4; i++ {
-			served += <-bus.Count
+			served += <-bus.count
 		}
-		println(total, served, bus.Tag, len(inbox), cap(replies[0]))
+		println(total, served, bus.tag, len(inbox), cap(replies[0]))
 	}
 }

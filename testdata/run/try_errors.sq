@@ -1,65 +1,65 @@
-package main
+program
 
-import "strconv"
+use strconv
 
-const ErrNegative = error(22, "negative input")
-const ErrTooBig = error(34, "too big")
+fault Negative 22 "negative input"
+fault TooBig 34 "too big"
 
-var cleanups = 0
+thread cleanups = 0
 
-func cleanup() { cleanups++ }
+fn cleanup() { cleanups++ }
 
-func parsePositive(s string) (int, error) {
-	n := try strconv.Atoi(s)
+fn parse_positive(s str) -> int ! {
+	n := strconv.atoi(s)!
 	if n < 0 {
-		return 0, ErrNegative
+		return 0, Negative
 	}
 	return n, nil
 }
 
-func sum3(a, b, c string) (int, error) {
+fn sum3(a, b, c str) -> int ! {
 	defer cleanup()
-	x := try parsePositive(a)
-	y := try parsePositive(b)
-	z := try parsePositive(c)
+	x := parse_positive(a)!
+	y := parse_positive(b)!
+	z := parse_positive(c)!
 	if x+y+z > 1000 {
-		return 0, ErrTooBig
+		return 0, TooBig
 	}
 	return x + y + z, nil
 }
 
-func check(n int) error {
+fn check(n int) -> ! {
 	if n > 5 {
-		return ErrTooBig
+		return TooBig
 	}
 	return nil
 }
 
-func checkAll() error {
-	try check(1)
-	try check(9)
+fn check_all() -> ! {
+	check(1)!
+	check(9)!
 	println("not reached")
 	return nil
 }
 
-func pair() (int, string, error) { return 7, "seven", nil }
+fn pair() -> (int, str) ! { return 7, "seven", nil }
 
-func usePair() (string, error) {
-	n, s := try pair()
+fn use_pair() -> str ! {
+	n, s := pair()!
 	_ = n
 	return s, nil
 }
 
-func main() {
+fn main() {
 	v, err := sum3("1", "2", "3")
 	println(v, err == nil)
 	_, err = sum3("1", "-2", "3")
-	println(err.Error(), err.Code(), err == ErrNegative)
+	println(err.message(), err.code(), err == Negative)
 	_, err = sum3("1", "x", "3")
-	println(err.Error(), err == strconv.ErrSyntax)
+	println(err.message(), err == strconv.Syntax)
 	_, err = sum3("900", "200", "1")
-	println(err == ErrTooBig, cleanups)
-	println(checkAll().Error())
-	s, _ := usePair()
+	println(err == TooBig, cleanups)
+	println(check_all().message())
+	s, _ := use_pair()
 	println(s, 64K, 2M/1K)
 }

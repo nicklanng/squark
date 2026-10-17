@@ -5,60 +5,55 @@
 //
 // The kernels take slices, not the package arrays, so the compiler can't see their lengths.
 // Each repetition changes one input element, so a repetition can't be skipped.
-package main
+program
 
-import (
-	"json"
-	"os"
-	"strconv"
-	"strings"
-)
+use json, os, strconv, strings
 
 const n = 16384
 
-var (
-	f32a [n]float32
-	f32b [n]float32
-	f64a [n]float64
-	i32a [n]int32
-	i32b [n]int32
-	u8a  [n]byte
-	u8b  [n]byte
-	u8c  [n]byte
+thread (
+	f32a f32[n]
+	f32b f32[n]
+	f64a f64[n]
+	i32a i32[n]
+	i32b i32[n]
+	u8a  u8[n]
+	u8b  u8[n]
+	u8c  u8[n]
 )
 
 //squark:noinline
-func saxpy(a float32, x []float32, y []float32) {
-	for i := range x {
+fn saxpy(a f32, x f32[], y f32[]) {
+	for i, _ in x {
 		y[i] += a * x[i]
 	}
 }
 
 //squark:noinline
-func dotInt32(a []int32, b []int32) int32 {
-	var s int32
+fn dot_int32(a i32[], b i32[]) -> i32 {
+	var s i32
 	for i := 0; i < len(a); i++ {
 		s += a[i] * b[i]
 	}
 	return s
 }
 
-// sumFloat64 adds in order: a vectorized sum would round differently, so it stays scalar
+// sum_float64 adds in order: a vectorized sum would round differently, so it stays scalar
 // until it is written with SIMD types.
 //
 //squark:noinline
-func sumFloat64(x []float64) float64 {
-	var s float64
-	for _, v := range x {
+fn sum_float64(x f64[]) -> f64 {
+	var s f64
+	for v in x {
 		s += v
 	}
 	return s
 }
 
 //squark:noinline
-func countByte(b []byte, c byte) int {
+fn count_byte(b u8[], c u8) -> int {
 	k := 0
-	for i := range b {
+	for i, _ in b {
 		if b[i] == c {
 			k++
 		}
@@ -66,20 +61,20 @@ func countByte(b []byte, c byte) int {
 	return k
 }
 
-const hexDigits = "0123456789abcdef"
+const hex_digits = "0123456789abcdef"
 
-var hexOut [2 * n]byte
+thread hex_out u8[2 * n]
 
 //squark:noinline
-func hexEncode(dst []byte, src []byte) {
-	for i, c := range src {
-		dst[2*i] = hexDigits[c>>4]
-		dst[2*i+1] = hexDigits[c&15]
+fn hex_encode(dst u8[], src u8[]) {
+	for i, c in src {
+		dst[2*i] = hex_digits[c>>4]
+		dst[2*i+1] = hex_digits[c&15]
 	}
 }
 
 //squark:noinline
-func maxInt32(x []int32) int32 {
+fn max_int32(x i32[]) -> i32 {
 	m := x[0]
 	for i := 1; i < len(x); i++ {
 		if x[i] > m {
@@ -90,16 +85,16 @@ func maxInt32(x []int32) int32 {
 }
 
 //squark:noinline
-func xorBytes(dst []byte, a []byte, b []byte) {
-	for i := range dst {
+fn xor_bytes(dst u8[], a u8[], b u8[]) {
+	for i, _ in dst {
 		dst[i] = a[i] ^ b[i]
 	}
 }
 
-// addRows adds two w-wide row-major matrices row by row, the index offset by the row start.
+// add_rows adds two w-wide row-major matrices row by row, the index offset by the row start.
 //
 //squark:noinline
-func addRows(dst []int32, a []int32, b []int32, w int) {
+fn add_rows(dst i32[], a i32[], b i32[], w int) {
 	rows := len(dst) / w
 	for r := 0; r < rows; r++ {
 		base := r * w
@@ -110,31 +105,31 @@ func addRows(dst []int32, a []int32, b []int32, w int) {
 }
 
 //squark:noinline
-func brighten(dst []byte, src []byte) {
-	for i := range src {
+fn brighten(dst u8[], src u8[]) {
+	for i, _ in src {
 		v := int(src[i]) * 3 / 2
 		if v > 255 {
 			v = 255
 		}
-		dst[i] = byte(v)
+		dst[i] = u8(v)
 	}
 }
 
 //squark:noinline
-func dotFloat32(a []float32, b []float32) float32 {
-	var s float32
-	for i := range a {
+fn dot_float32(a f32[], b f32[]) -> f32 {
+	var s f32
+	for i, _ in a {
 		s += a[i] * b[i]
 	}
 	return s
 }
 
-// indexByte returns the index of the first c in b, or -1. The loop can exit early, which
+// index_byte returns the index of the first c in b, or -1. The loop can exit early, which
 // stops clang vectorizing it.
 //
 //squark:noinline
-func indexByte(b []byte, c byte) int {
-	for i := range b {
+fn index_byte(b u8[], c u8) -> int {
+	for i, _ in b {
 		if b[i] == c {
 			return i
 		}
@@ -143,165 +138,167 @@ func indexByte(b []byte, c byte) int {
 }
 
 // Vec is a vector of numbers held in a struct: the loops index a field through a pointer.
-type Vec struct {
-	data []float32
+struct Vec {
+	data f32[]
 }
 
-//squark:noinline
-func (v *Vec) axpy(a float32, x *Vec) {
-	for i := range v.data {
-		v.data[i] += a * x.data[i]
+impl Vec {
+	//squark:noinline
+	fn axpy(&self, a f32, x *Vec) {
+		for i, _ in self.data {
+			self.data[i] += a * x.data[i]
+		}
 	}
 }
 
-func setupDot() {
-	for i := range f32b {
-		f32b[i] = float32(i % 7)
+fn setup_dot() {
+	for i, _ in f32b {
+		f32b[i] = f32(i % 7)
 	}
 }
 
 // one 255 near the end: the search reads almost all of u8c
-func setupIndex() { u8c[n-5] = 255 }
+fn setup_index() { u8c[n-5] = 255 }
 
 // letters, with "needle" near the end
-func setupText() {
-	for i := range u8c {
-		u8c[i] = 'a' + byte(i%23)
+fn setup_text() {
+	for i, _ in u8c {
+		u8c[i] = 'a' + u8(i%23)
 	}
 	copy(u8c[n-40:], "needle")
 }
 
-func main() {
-	if os.NArgs() != 3 {
+fn main() {
+	if os.n_args() != 3 {
 		println("usage: kernels NAME REPS")
-		os.Exit(2)
+		os.exit(2)
 	}
-	name := os.Arg(1)
-	reps, err := strconv.Atoi(os.Arg(2))
-	if err != nil || reps < 1 {
+	name := os.arg(1)
+	reps, err := strconv.atoi(os.arg(2))
+	if err != nil or reps < 1 {
 		println("REPS must be a positive integer")
-		os.Exit(2)
+		os.exit(2)
 	}
 	for i := 0; i < n; i++ {
-		f32a[i] = float32(i % 64)
-		f64a[i] = float64(i % 64)
-		i32a[i] = int32(i%1000 - 500)
-		i32b[i] = int32(i%7 + 1)
-		u8a[i] = byte(i * 7)
-		u8b[i] = byte(i * 13)
+		f32a[i] = f32(i % 64)
+		f64a[i] = f64(i % 64)
+		i32a[i] = i32(i%1000 - 500)
+		i32b[i] = i32(i%7 + 1)
+		u8a[i] = u8(i * 7)
+		u8b[i] = u8(i * 13)
 	}
-	var check int64
+	var check i64
 	switch name {
 	case "saxpy":
 		for r := 0; r < reps; r++ {
 			// a alternates between 1 and -1, so y stays small and every result is exact
-			saxpy(float32(1-2*(r&1)), f32a[:], f32b[:])
-			check += int64(f32b[r%n])
-			f32a[r%n] = float32(r % 64)
+			saxpy(f32(1-2*(r&1)), f32a[:], f32b[:])
+			check += i64(f32b[r%n])
+			f32a[r%n] = f32(r % 64)
 		}
 	case "dot-int32":
 		for r := 0; r < reps; r++ {
-			check += int64(dotInt32(i32a[:], i32b[:]))
-			i32a[r%n] = int32(r%1000 - 500)
+			check += i64(dot_int32(i32a[:], i32b[:]))
+			i32a[r%n] = i32(r%1000 - 500)
 		}
 	case "sum-float64":
 		for r := 0; r < reps; r++ {
-			check += int64(sumFloat64(f64a[:]))
-			f64a[r%n] = float64(r % 64)
+			check += i64(sum_float64(f64a[:]))
+			f64a[r%n] = f64(r % 64)
 		}
 	case "count-byte":
 		for r := 0; r < reps; r++ {
-			check += int64(countByte(u8a[:], 7))
-			u8a[r%n] = byte(r)
+			check += i64(count_byte(u8a[:], 7))
+			u8a[r%n] = u8(r)
 		}
 	case "max-int32":
 		for r := 0; r < reps; r++ {
-			check += int64(maxInt32(i32a[:]))
-			i32a[r%n] = int32(r % 1001)
+			check += i64(max_int32(i32a[:]))
+			i32a[r%n] = i32(r % 1001)
 		}
 	case "xor-bytes":
 		for r := 0; r < reps; r++ {
-			xorBytes(u8c[:], u8a[:], u8b[:])
-			check += int64(u8c[r%n])
-			u8a[r%n] = byte(r)
+			xor_bytes(u8c[:], u8a[:], u8b[:])
+			check += i64(u8c[r%n])
+			u8a[r%n] = u8(r)
 		}
 	case "add-rows":
 		for r := 0; r < reps; r++ {
-			addRows(i32b[:], i32a[:], i32b[:], 128)
-			check += int64(i32b[r%n])
-			i32b[r%n] = int32(r % 7)
+			add_rows(i32b[:], i32a[:], i32b[:], 128)
+			check += i64(i32b[r%n])
+			i32b[r%n] = i32(r % 7)
 		}
 	case "brighten":
 		for r := 0; r < reps; r++ {
 			brighten(u8c[:], u8a[:])
-			check += int64(u8c[r%n])
-			u8a[r%n] = byte(r)
+			check += i64(u8c[r%n])
+			u8a[r%n] = u8(r)
 		}
 	case "dot-float32":
-		setupDot()
+		setup_dot()
 		for r := 0; r < reps; r++ {
-			check += int64(dotFloat32(f32a[:], f32b[:]))
-			f32a[r%n] = float32(r % 8)
+			check += i64(dot_float32(f32a[:], f32b[:]))
+			f32a[r%n] = f32(r % 8)
 		}
 	case "method-axpy":
 		// saxpy as a method: v.data and x.data are fields reached through pointers
 		v := Vec{f32b[:]}
 		x := Vec{f32a[:]}
 		for r := 0; r < reps; r++ {
-			v.axpy(float32(1-2*(r&1)), &x)
-			check += int64(f32b[r%n])
-			f32a[r%n] = float32(r % 64)
+			v.axpy(f32(1-2*(r&1)), &x)
+			check += i64(f32b[r%n])
+			f32a[r%n] = f32(r % 64)
 		}
 	case "strings-index":
-		// standard library code: strings.Index finds "needle" near the end of 16 KiB of text
-		setupText()
+		// standard library code: strings.index finds "needle" near the end of 16 KiB of text
+		setup_text()
 		for r := 0; r < reps; r++ {
-			check += int64(strings.Index(string(u8c[:]), "needle"))
-			u8c[r%(n-64)] = 'a' + byte(r%26)
+			check += i64(strings.index(str(u8c[:]), "needle"))
+			u8c[r%(n-64)] = 'a' + u8(r%26)
 		}
 	case "json-string":
-		// json.AppendString of 16 KiB of text with an escape every 64 bytes
-		setupText()
+		// json.append_string of 16 KiB of text with an escape every 64 bytes
+		setup_text()
 		for i := 63; i < n; i += 64 {
 			u8c[i] = '"'
 		}
-		var out [2 * n]byte
+		var out u8[2 * n]
 		for r := 0; r < reps; r++ {
-			check += int64(len(json.AppendString(out[:0], string(u8c[:]))))
-			u8c[r%(n-64)] = 'a' + byte(r%26)
+			check += i64(len(json.append_string(out[:0], str(u8c[:]))))
+			u8c[r%(n-64)] = 'a' + u8(r%26)
 		}
 	case "json-decode":
 		// json.Decoder.String of a 16 KiB JSON string with an escape every 64 bytes
-		setupText()
+		setup_text()
 		u8c[0] = '"'
 		for i := 63; i < n-1; i += 64 {
 			u8c[i-1], u8c[i] = '\\', 'n'
 		}
 		u8c[n-1] = '"'
-		var out [n]byte
+		var out u8[n]
 		for r := 0; r < reps; r++ {
-			d := json.NewDecoder(u8c[:])
-			s, _ := d.String(out[:])
-			check += int64(len(s))
-			u8c[1+r%(n-80)] = 'a' + byte(r%26)
+			d := json.new_decoder(u8c[:])
+			s, _ := d.string(out[:])
+			check += i64(len(s))
+			u8c[1+r%(n-80)] = 'a' + u8(r%26)
 		}
 	case "hex":
 		for r := 0; r < reps; r++ {
-			hexEncode(hexOut[:], u8a[:])
-			check += int64(hexOut[(r*7)%(2*n)])
-			u8a[r%n] = byte(r)
+			hex_encode(hex_out[:], u8a[:])
+			check += i64(hex_out[(r*7)%(2*n)])
+			u8a[r%n] = u8(r)
 		}
 	case "index-byte":
-		setupIndex()
+		setup_index()
 		for r := 0; r < reps; r++ {
-			check += int64(indexByte(u8c[:], 255))
-			u8c[r%(n-5)] = byte(r % 200)
+			check += i64(index_byte(u8c[:], 255))
+			u8c[r%(n-5)] = u8(r % 200)
 		}
 	default:
-		c, ok := simdKernel(name, reps)
-		if !ok {
+		c, ok := simd_kernel(name, reps)
+		if not ok {
 			println("unknown kernel", name)
-			os.Exit(2)
+			os.exit(2)
 		}
 		check = c
 	}

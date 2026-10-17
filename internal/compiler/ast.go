@@ -153,6 +153,16 @@ type BinaryExpr struct {
 	InArena Expr // string concatenation allocates here
 }
 
+// ImplicitMember is .name: a member of the enum the context expects (Who.alice where a Who is
+// expected).
+type ImplicitMember struct {
+	ExprInfo
+	P    Pos
+	Name *Ident
+}
+
+func (x *ImplicitMember) Pos() Pos { return x.P }
+
 // ---- type expressions ----
 
 type ArrayType struct {
@@ -160,6 +170,9 @@ type ArrayType struct {
 	P    Pos
 	Len  Expr // nil for slices
 	Elem Expr
+	// MaybeMap: Elem[Len] with Len a name, which is an array length or a map's key type
+	// (int[n], int[str]); the checker decides
+	MaybeMap bool
 }
 
 type MapType struct {
@@ -211,6 +224,7 @@ type Field struct {
 	Names    []*Ident
 	Type     Expr
 	Variadic bool
+	Pub      bool // a struct field visible outside its package
 
 	// provenance (parameters): `name static T`, `name T into other`
 	Static bool
@@ -349,6 +363,8 @@ type RangeStmt struct {
 	Key, Value Expr // may be nil
 	Define     bool
 	X          Expr
+	Lo         Expr // for i in Lo..X: the first value (nil: 0)
+	Single     bool // for x in X: one variable, the element (the checker moves it to Value)
 	Body       *BlockStmt
 	P          Pos
 	Label      string
@@ -441,19 +457,30 @@ type ImportSpec struct {
 }
 
 type ValueSpec struct {
+	Pub    bool
 	Doc    []string // the comment lines above it (or above its declaration)
 	Names  []*Ident
 	Type   Expr
 	Values []Expr
-	Iota   int
 	P      Pos
 }
 
 type TypeSpec struct {
+	Pub  bool
 	Doc  []string
 	Name *Ident
 	Type Expr
 	P    Pos
+	Enum []*EnumMember // enum Name T { ... }: the members, in order (Type is T, int by default)
+	// Form is how it was declared: "struct" (struct Name { ... }), "enum" or "named" (Name: T).
+	Form string
+}
+
+// EnumMember is one name of an enum, with its value if written (otherwise the previous one + 1,
+// or 0 for the first).
+type EnumMember struct {
+	Name  *Ident
+	Value Expr
 }
 
 type GenDecl struct {
@@ -475,6 +502,7 @@ const (
 )
 
 type FuncDecl struct {
+	Pub     bool
 	Doc     []string
 	Recv    *Field
 	Name    *Ident
@@ -503,6 +531,7 @@ type Directive struct {
 
 // ArenaDecl is a package-level `arena NAME SIZE`.
 type ArenaDecl struct {
+	Pub  bool
 	Name *Ident
 	Size Expr
 	P    Pos

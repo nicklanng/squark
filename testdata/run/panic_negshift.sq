@@ -1,8 +1,8 @@
-package main
+program
 
 // a negative shift count panics, as in Go
 
-func main() {
+fn main() {
 	x := 1
 	sh := 2
 	println(x << sh)

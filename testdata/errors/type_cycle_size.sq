@@ -1,12 +1,12 @@
-package main
+program
 
 // sizing a type that contains itself by value (found by TestFuzzSoundness: the size bound recursed
 // until the compiler's own stack overflowed)
-type V struct { // ERROR "invalid recursive type V"
+struct V { // ERROR "invalid recursive type V"
 	x int
-	v [..2]V
+	v V[..2]
 }
 
-var g [..2]V
+thread g V[..2]
 
-func main() {}
+fn main() {}

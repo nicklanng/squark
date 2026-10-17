@@ -1,37 +1,37 @@
-package main
+program
 
-// try and `in a` around a call with several results: every result is checked, not just the first
-var g *int
+// ! and `in a` around a call with several results: every result is checked, not just the first
+thread g *int
 
-func two(a *int) (*int, *int, error) { return a, a, nil }
+fn two(a *int) -> (*int, *int) ! { return a, a, nil }
 
-func pair(a *int) (int, *int) { return 1, a }
+fn pair(a *int) -> (int, *int) { return 1, a }
 
-func three(a *int) (int, *int, error, error) { return 1, a, nil, nil }
+fn three(a *int) -> (int, *int, error) ! { return 1, a, nil, nil }
 
 arena pa 1K
 
-func viaTryDecl() error {
+fn via_try_decl() -> ! {
 	x := 1
-	var p, q = try two(&x)
+	var p, q = two(&x)!
 	_ = p
 	g = q // ERROR "cannot escape into static memory"
 	return nil
 }
 
-func viaIn() {
+fn via_in() {
 	x := 1
 	_, q := pair(&x) in pa
 	g = q // ERROR "cannot escape into static memory"
 }
 
-func viaTryReturn() (int, *int, error) {
+fn via_try_return() -> (int, *int) ! {
 	x := 1
-	return try three(&x) // ERROR "cannot return reference to variable x"
+	return three(&x)! // ERROR "cannot return reference to variable x"
 }
 
-func main() {
-	_ = viaTryDecl()
-	viaIn()
-	_, _, _ = viaTryReturn()
+fn main() {
+	_ = via_try_decl()
+	via_in()
+	_, _, _ = via_try_return()
 }

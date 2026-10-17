@@ -1,18 +1,18 @@
-package main
+program
 
 // a temporary created by the for post statement is read by the next condition, so it must
 // outlive the iteration that created it
 
-type T struct {
+struct T {
 	n   int
-	pad [8]int
+	pad int[8]
 }
 
-func main() {
+fn main() {
 	start := T{n: 0}
 	for p := &start; p.n < 3; p = &(T{n: p.n + 1}) {
-		var junk [16]int
-		for i := range 16 {
+		var junk int[16]
+		for i in 0..16 {
 			junk[i] = 777
 		}
 		println(p.n, junk[3])

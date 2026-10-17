@@ -1,11 +1,11 @@
-package main
+program
 
-import "math/rand"
+use math/rand
 
 // Intn panics on n <= 0, as in Go
-func main() {
-	r := rand.New(1)
-	println(r.Intn(1))
-	r.Intn(0)
+fn main() {
+	r := rand.new(1)
+	println(r.intn(1))
+	r.intn(0)
 	println("not reached")
 }

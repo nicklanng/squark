@@ -1,18 +1,18 @@
-package main
+program
 
 // A local declared with &x skips its nil checks only while it can't have changed: reassigned (or
 // changed through its address), it is checked again.
-type P struct{ v int }
+struct P { v int }
 
 //squark:noinline
-func viaAddr(pp **P) { *pp = nil }
+fn via_addr(pp **P) { *pp = nil }
 
-func main() {
+fn main() {
 	x := P{1}
 	p := &x
 	println(p.v)
 	q := &x
-	viaAddr(&q)
+	via_addr(&q)
 	r := &x
 	r = nil
 	println("before")

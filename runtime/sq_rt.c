@@ -1444,7 +1444,7 @@ void *sq_map_get(sq_map *m, const void *key) {
 }
 
 void *sq_map_put(sq_map *m, const void *key, const char *file, int line) {
-	if (!m) sq_panic_cstr("assignment to entry in nil map (a map needs storage: declare it map[K]V cap N, or make it in an arena)", file, line);
+	if (!m) sq_panic_cstr("assignment to entry in nil map (a map needs storage: declare it V[K; N], or make it in an arena)", file, line);
 	int64_t i = map_find(m, key);
 	if (i >= 0) return m->vals + i * m->valsize;
 	if (m->len >= m->maxlen) sq_panic_cstr("map capacity exceeded (squark maps have a fixed capacity set by make)", file, line);
@@ -2710,7 +2710,7 @@ static void watch_warn(const char *task, int64_t ms) {
 	do num[k++] = (char)('0' + ms % 10); while ((ms /= 10) > 0 && k < 23);
 	while (k > 0 && n < sizeof buf - 1) buf[n++] = num[--k];
 	const char *tail = "ms of CPU without yielding while other goroutines wait on its thread: mark the "
-	                   "task preemptible, or call runtime.Gosched() in its loop\n";
+	                   "task preemptible, or call runtime.gosched() in its loop\n";
 	size_t t = strlen(tail);
 	if (n + t >= sizeof buf) t = sizeof buf - n - 1;
 	memcpy(buf + n, tail, t);

@@ -1,10 +1,10 @@
-package main
+program
 
 // writing a lane past the end panics
-func set(v *float32x4, i int) { v[i] = 1 }
+fn set(v *f32x4, i int) { v[i] = 1 }
 
-func main() {
-	var v float32x4
+fn main() {
+	var v f32x4
 	set(&v, 3)
 	println(v[3])
 	set(&v, 4)

@@ -1,10 +1,10 @@
-package main
+program
 
-import "time"
+use time
 
-var c chan int cap 1
+thread c int chan[1]
 
-func main() {
+fn main() {
 	x := 1
 	select {
 	case x + 1: // ERROR "select case must be a send or a receive"
@@ -13,15 +13,15 @@ func main() {
 	default:
 	default: // ERROR "multiple defaults in select"
 	}
-	t := time.After(time.Second) // ERROR "time.After can only be used as a select case"
+	t := time.after(time.second) // ERROR "time.after can only be used as a select case"
 	_ = t
 	select {
-	case v := <-time.After(time.Second): // ERROR "time.After's case has no value to receive"
+	case v := <-time.after(time.second): // ERROR "time.after's case has no value to receive"
 		_ = v
 	}
 	select {
-	case <-time.After(time.Second):
-	case <-time.After(time.Minute): // ERROR "multiple time.After cases in select"
+	case <-time.after(time.second):
+	case <-time.after(time.minute): // ERROR "multiple time.after cases in select"
 	}
 	select {
 	case v := <-c:

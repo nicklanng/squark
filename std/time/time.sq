@@ -1,127 +1,131 @@
 // Package time measures and waits.
-package time
+module time
 
-type Duration int
+pub Duration: int
 
 const (
-	Nanosecond  Duration = 1
-	Microsecond          = 1000 * Nanosecond
-	Millisecond          = 1000 * Microsecond
-	Second               = 1000 * Millisecond
-	Minute               = 60 * Second
-	Hour                 = 60 * Minute
+	pub nanosecond  Duration = 1
+	pub microsecond = 1000 * nanosecond
+	pub millisecond = 1000 * microsecond
+	pub second      = 1000 * millisecond
+	pub minute      = 60 * second
+	pub hour        = 60 * minute
 )
 
-extern "sq_nanotime" func nanotime() int stack 8K
+extern fn nanotime() -> int stack 8K c"sq_nanotime"
 
-extern "sq_unixnano" func unixnano() int stack 8K
+extern fn unixnano() -> int stack 8K c"sq_unixnano"
 
-extern "sq_sleep" func sleep(ns int) stack 8K
+extern fn sys_sleep(ns int) stack 8K c"sq_sleep"
 
 // Time is a monotonic instant plus the wall clock reading when it was taken.
-type Time struct {
+pub struct Time {
 	mono int
 	wall int
 }
 
-func Now() Time { return Time{mono: nanotime(), wall: unixnano()} }
+pub fn now() -> Time { return Time{mono: nanotime(), wall: unixnano()} }
 
-func (t Time) Sub(u Time) Duration   { return Duration(t.mono - u.mono) }
-func (t Time) Unix() int             { return t.wall / 1000000000 }
-func (t Time) UnixNano() int         { return t.wall }
-func (t Time) Add(d Duration) Time   { return Time{mono: t.mono + int(d), wall: t.wall + int(d)} }
-func (t Time) Before(u Time) bool    { return t.mono < u.mono }
+impl Time {
+	pub fn sub(self, u Time) -> Duration { return Duration(self.mono - u.mono) }
+	pub fn unix(self) -> int             { return self.wall / 1000000000 }
+	pub fn unix_nano(self) -> int        { return self.wall }
+	pub fn add(self, d Duration) -> Time { return Time{mono: self.mono + int(d), wall: self.wall + int(d)} }
+	pub fn before(self, u Time) -> bool  { return self.mono < u.mono }
+}
 
-func Since(t Time) Duration { return Duration(nanotime() - t.mono) }
+pub fn since(t Time) -> Duration { return Duration(nanotime() - t.mono) }
 
-// Sleep parks the calling goroutine for at least d.
-func Sleep(d Duration) { sleep(int(d)) }
+// sleep parks the calling goroutine for at least d.
+pub fn sleep(d Duration) { sys_sleep(int(d)) }
 
-// After is for select only: `case <-time.After(d):` runs if no other case is ready within d.
+// after is for select only: `case <-time.after(d):` runs if no other case is ready within d.
 // (squark has no heap to make a channel per call, so the compiler turns the case into a timer;
-// anywhere else, After is an error.)
-func After(d Duration) chan Time {
-	var c chan Time
+// anywhere else, after is an error.)
+pub fn after(d Duration) -> Time chan {
+	var c Time chan
 	return c
 }
 
-func (d Duration) Nanoseconds() int    { return int(d) }
-func (d Duration) Microseconds() int   { return int(d) / 1000 }
-func (d Duration) Milliseconds() int   { return int(d) / 1000000 }
-func (d Duration) Seconds() float64    { return float64(d) / 1e9 }
+impl Duration {
+	pub fn nanoseconds(self) -> int  { return int(self) }
+	pub fn microseconds(self) -> int { return int(self) / 1000 }
+	pub fn milliseconds(self) -> int { return int(self) / 1000000 }
+	pub fn seconds(self) -> f64      { return f64(self) / 1e9 }
 
-// ErrDuration is ParseDuration's error for any string that isn't a duration (Go's messages name
-// the string; a squark error's message is constant).
-const ErrDuration = error(22, "time: invalid duration")
-
-// String writes d as Go's Duration.String does ("1h2m3.5s", "1.5ms", "0s") into buf and returns
-// it as a view of buf. 32 bytes hold any duration; a shorter buf gets the beginning.
-func (d Duration) String(buf []byte) string from buf {
-	var arr [32]byte
-	w := len(arr)
-	u := uint64(d)
-	neg := d < 0
-	if neg {
-		u = 0 - u
-	}
-	if u < uint64(Second) {
-		// under a second: a smaller unit, so 1.5ms rather than 0.0015s
-		prec := 0
-		w--
-		arr[w] = 's'
-		w--
-		switch {
-		case u == 0:
-			arr[w] = '0'
-			return string(buf[:copy(buf, arr[w:])])
-		case u < uint64(Microsecond):
-			arr[w] = 'n'
-		case u < uint64(Millisecond):
-			prec = 3
-			w-- // the micro sign is two bytes
-			copy(arr[w:], "µ")
-		default:
-			prec = 6
-			arr[w] = 'm'
+	// string writes d as Go's Duration.string does ("1h2m3.5s", "1.5ms", "0s") into buf and returns
+	// it as a view of buf. 32 bytes hold any duration; a shorter buf gets the beginning.
+	pub fn string(self, buf u8[]) -> str in buf {
+		var arr u8[32]
+		w := len(arr)
+		u := u64(self)
+		neg := self < 0
+		if neg {
+			u = 0 - u
 		}
-		w, u = fmtFrac(arr[:w], u, prec)
-		w = fmtInt(arr[:w], u)
-	} else {
-		w--
-		arr[w] = 's'
-		w, u = fmtFrac(arr[:w], u, 9)
-		w = fmtInt(arr[:w], u%60)
-		u /= 60
-		if u > 0 {
+		if u < u64(second) {
+			// under a second: a smaller unit, so 1.5ms rather than 0.0015s
+			prec := 0
 			w--
-			arr[w] = 'm'
-			w = fmtInt(arr[:w], u%60)
+			arr[w] = 's'
+			w--
+			switch {
+			case u == 0:
+				arr[w] = '0'
+				return str(buf[:copy(buf, arr[w:])])
+			case u < u64(microsecond):
+				arr[w] = 'n'
+			case u < u64(millisecond):
+				prec = 3
+				w-- // the micro sign is two bytes
+				copy(arr[w:], "µ")
+			default:
+				prec = 6
+				arr[w] = 'm'
+			}
+			w, u = fmt_frac(arr[:w], u, prec)
+			w = fmt_int(arr[:w], u)
+		} else {
+			w--
+			arr[w] = 's'
+			w, u = fmt_frac(arr[:w], u, 9)
+			w = fmt_int(arr[:w], u%60)
 			u /= 60
 			if u > 0 {
 				w--
-				arr[w] = 'h'
-				w = fmtInt(arr[:w], u)
+				arr[w] = 'm'
+				w = fmt_int(arr[:w], u%60)
+				u /= 60
+				if u > 0 {
+					w--
+					arr[w] = 'h'
+					w = fmt_int(arr[:w], u)
+				}
 			}
 		}
+		if neg {
+			w--
+			arr[w] = '-'
+		}
+		return str(buf[:copy(buf, arr[w:])])
 	}
-	if neg {
-		w--
-		arr[w] = '-'
-	}
-	return string(buf[:copy(buf, arr[w:])])
 }
 
-// fmtFrac writes the fraction of v/10^prec, without trailing zeros, at the end of buf, and returns
+// InvalidDuration is parse_duration's error for any string that isn't a duration (Go's messages name
+// the string; a squark error's message is constant).
+pub fault InvalidDuration 22 "time: invalid duration"
+
+// fmt_frac writes the fraction of v/10^prec, without trailing zeros, at the end of buf, and returns
 // where it starts and v/10^prec.
-func fmtFrac(buf []byte, v uint64, prec int) (int, uint64) {
+fn fmt_frac(buf u8[], v u64, prec int) -> (int, u64) {
 	w := len(buf)
 	print := false
 	for i := 0; i < prec; i++ {
 		digit := v % 10
-		print = print || digit != 0
+		print = print or digit != 0
 		if print {
 			w--
-			buf[w] = byte(digit) + '0'
+			buf[w] = u8(digit) + '0'
 		}
 		v /= 10
 	}
@@ -132,30 +136,30 @@ func fmtFrac(buf []byte, v uint64, prec int) (int, uint64) {
 	return w, v
 }
 
-// fmtInt writes v at the end of buf and returns where it starts.
-func fmtInt(buf []byte, v uint64) int {
+// fmt_int writes v at the end of buf and returns where it starts.
+fn fmt_int(buf u8[], v u64) -> int {
 	w := len(buf)
 	if v == 0 {
 		w--
 		buf[w] = '0'
 		return w
 	}
-	for v > 0 {
+	while v > 0 {
 		w--
-		buf[w] = byte(v%10) + '0'
+		buf[w] = u8(v%10) + '0'
 		v /= 10
 	}
 	return w
 }
 
-// ParseDuration parses a duration as Go's time.ParseDuration does: a signed sequence of decimal
+// parse_duration parses a duration as Go's time.parse_duration does: a signed sequence of decimal
 // numbers, each with an optional fraction and a unit ("300ms", "-1.5h", "2h45m"). The units are
 // "ns", "us" (or "µs"), "ms", "s", "m" and "h". A malformed, unitless (except "0") or
-// out-of-range string is ErrDuration.
-func ParseDuration(s string) (Duration, error) {
-	var d uint64
+// out-of-range string is InvalidDuration.
+pub fn parse_duration(s str) -> Duration ! {
+	var d u64
 	neg := false
-	if s != "" && (s[0] == '-' || s[0] == '+') {
+	if s != "" and (s[0] == '-' or s[0] == '+') {
 		neg = s[0] == '-'
 		s = s[1:]
 	}
@@ -163,35 +167,35 @@ func ParseDuration(s string) (Duration, error) {
 		return 0, nil
 	}
 	if s == "" {
-		return 0, ErrDuration
+		return 0, InvalidDuration
 	}
-	for s != "" {
-		if !(s[0] == '.' || '0' <= s[0] && s[0] <= '9') {
-			return 0, ErrDuration
+	while s != "" {
+		if not (s[0] == '.' or '0' <= s[0] and s[0] <= '9') {
+			return 0, InvalidDuration
 		}
 		// [0-9]*
-		var v uint64
+		var v u64
 		i := 0
-		for ; i < len(s) && '0' <= s[i] && s[i] <= '9'; i++ {
+		for ; i < len(s) and '0' <= s[i] and s[i] <= '9'; i++ {
 			if v > 1<<63/10 {
-				return 0, ErrDuration
+				return 0, InvalidDuration
 			}
-			v = v*10 + uint64(s[i]-'0')
+			v = v*10 + u64(s[i]-'0')
 			if v > 1<<63 {
-				return 0, ErrDuration
+				return 0, InvalidDuration
 			}
 		}
 		pre := i > 0
 		s = s[i:]
 		// (\.[0-9]*)?
-		var f uint64
+		var f u64
 		scale := 1.0
 		post := false
-		if s != "" && s[0] == '.' {
+		if s != "" and s[0] == '.' {
 			s = s[1:]
 			overflow := false
 			i = 0
-			for ; i < len(s) && '0' <= s[i] && s[i] <= '9'; i++ {
+			for ; i < len(s) and '0' <= s[i] and s[i] <= '9'; i++ {
 				if overflow {
 					continue
 				}
@@ -199,7 +203,7 @@ func ParseDuration(s string) (Duration, error) {
 					overflow = true // stop gaining precision
 					continue
 				}
-				y := f*10 + uint64(s[i]-'0')
+				y := f*10 + u64(s[i]-'0')
 				if y > 1<<63 {
 					overflow = true
 					continue
@@ -210,53 +214,53 @@ func ParseDuration(s string) (Duration, error) {
 			post = i > 0
 			s = s[i:]
 		}
-		if !pre && !post {
-			return 0, ErrDuration // no digits (".s")
+		if not pre and not post {
+			return 0, InvalidDuration // no digits (".s")
 		}
 		// the unit
 		i = 0
-		for i < len(s) && s[i] != '.' && !('0' <= s[i] && s[i] <= '9') {
+		while i < len(s) and s[i] != '.' and not ('0' <= s[i] and s[i] <= '9') {
 			i++
 		}
-		var unit uint64
+		var unit u64
 		switch s[:i] {
 		case "ns":
-			unit = uint64(Nanosecond)
+			unit = u64(nanosecond)
 		case "us", "µs", "μs": // the micro sign U+00B5, or the Greek mu U+03BC
-			unit = uint64(Microsecond)
+			unit = u64(microsecond)
 		case "ms":
-			unit = uint64(Millisecond)
+			unit = u64(millisecond)
 		case "s":
-			unit = uint64(Second)
+			unit = u64(second)
 		case "m":
-			unit = uint64(Minute)
+			unit = u64(minute)
 		case "h":
-			unit = uint64(Hour)
+			unit = u64(hour)
 		default:
-			return 0, ErrDuration // a missing or unknown unit
+			return 0, InvalidDuration // a missing or unknown unit
 		}
 		s = s[i:]
 		if v > 1<<63/unit {
-			return 0, ErrDuration
+			return 0, InvalidDuration
 		}
 		v *= unit
 		if f > 0 {
 			// float64 keeps fractions of hours accurate to the nanosecond
-			v += uint64(float64(f) * (float64(unit) / scale))
+			v += u64(f64(f) * (f64(unit) / scale))
 			if v > 1<<63 {
-				return 0, ErrDuration
+				return 0, InvalidDuration
 			}
 		}
 		d += v
 		if d > 1<<63 {
-			return 0, ErrDuration
+			return 0, InvalidDuration
 		}
 	}
 	if neg {
 		return Duration(0 - d), nil
 	}
 	if d > 1<<63-1 {
-		return 0, ErrDuration
+		return 0, InvalidDuration
 	}
 	return Duration(d), nil
 }

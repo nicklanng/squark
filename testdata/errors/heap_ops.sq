@@ -1,19 +1,23 @@
-package main
+program
 
-type T struct{ a int }
+struct T {
+	a int
+}
 
-func (t *T) M() {}
+impl T {
+	fn m(&self) {}
+}
 
-func f(s string, n int) {
+fn f(s str, n int) {
 	_ = s + "!" // ERROR "string concatenation needs memory: allocate it in an arena"
-	_ = make([]int, n) // ERROR "make needs an arena (make(...) in a); otherwise declare an array"
+	_ = make(int[], n) // ERROR "make needs an arena (make(...) in a); otherwise declare an array"
 	_ = new(T) // ERROR "new(T) needs memory: allocate it in an arena"
-	_ = []byte(s) // ERROR "converting s to []byte copies it: allocate the copy in an arena"
+	_ = u8[](s) // ERROR "converting s to u8[] copies it"
 	var t T
-	m := t.M // ERROR "method values are not supported"
+	m := t.m // ERROR "method values are not supported"
 	_ = m
 }
 
-func main() {
+fn main() {
 	f("x", 1)
 }

@@ -1,20 +1,17 @@
-package main
+program
 
 // Test program for TestPreempt (internal/driver). A preemptible task spinning in a loop (inside a
 // function it calls) lets a ticker on the same thread keep ticking; the same loop in an ordinary
 // task can't be interrupted, so the ticker doesn't tick at all while it runs (rule 10).
 
-import (
-	"runtime"
-	"time"
-)
+use runtime, time
 
-var ticks int
-var done chan int cap 4
+thread ticks int
+thread done int chan[4]
 
 task ticker() pool 1 {
-	for {
-		time.Sleep(2 * time.Millisecond)
+	loop {
+		time.sleep(2 * time.millisecond)
 		ticks++
 		if len(done) > 0 {
 			return
@@ -23,10 +20,10 @@ task ticker() pool 1 {
 }
 
 // spin runs for ms milliseconds without blocking; a counter keeps the loop from being optimized
-func spin(ms int) int {
-	start := time.Now()
+fn spin(ms int) -> int {
+	start := time.now()
 	n := 0
-	for time.Since(start).Milliseconds() < ms {
+	while time.since(start).milliseconds() < ms {
 		n++
 	}
 	return n
@@ -45,26 +42,26 @@ task hog() pool 1 {
 
 task yielder() pool 1 {
 	before := ticks
-	start := time.Now()
-	for time.Since(start).Milliseconds() < 100 {
-		runtime.Gosched()
+	start := time.now()
+	while time.since(start).milliseconds() < 100 {
+		runtime.gosched()
 	}
 	done <- ticks - before
 }
 
-func main() {
-	go ticker()
-	time.Sleep(10 * time.Millisecond)
+fn main() {
+	start ticker()
+	time.sleep(10 * time.millisecond)
 
 	before := ticks
-	go cruncher()
+	start cruncher()
 	<-done
 	println("preemptible: ticker kept running", ticks-before >= 5)
 
-	go hog()
+	start hog()
 	println("ordinary task: ticks while it ran", <-done)
 
-	go yielder()
+	start yielder()
 	println("Gosched: ticker kept running", <-done >= 10)
 	done <- 0 // stop the ticker
 }

@@ -1,26 +1,26 @@
-package main
+program
 
 // zero-size types compile and behave
 
-type E struct{}
+struct E {}
 
-type W struct {
+struct W {
 	e E
 	n int
-	z [0]int
+	z int[0]
 }
 
-var ge E
-var gz [0]int
+thread ge E
+thread gz int[0]
 
-func mk() E { return E{} }
+fn mk() -> E { return E{} }
 
-func main() {
+fn main() {
 	var e E
-	var z [0]int
+	var z int[0]
 	var w W
 	w.n = 3
 	println(e == mk(), e == ge, len(z), len(gz), w.n, len(w.z))
-	var es [3]E
+	var es E[3]
 	println(len(es), es[1] == e)
 }

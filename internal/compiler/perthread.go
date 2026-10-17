@@ -7,53 +7,11 @@ import (
 	"strings"
 )
 
-// PerThreadVar is a package variable that, with threads N, every scheduler thread has its own copy
-// of, and that the program changes after start-up: its value can differ from thread to thread (a
-// counter counts one thread's requests, a channel is one thread's queue). Listing them keeps that
-// from going unnoticed.
-type PerThreadVar struct {
-	Var    *Var
-	Reason string // e.g. "written in handle", "a channel: each thread has its own queue"
-}
-
-// PerThreadVars lists those variables in the program's own packages, except those declared with
-// thread var (per thread on purpose). The standard library isn't
-// included: it is written for threads (its per-thread state, like the HTTP server's handler table,
-// is per thread on purpose).
-func PerThreadVars(prog *Program) []PerThreadVar {
-	found := map[*Var]string{}
-	for _, p := range prog.Packages {
-		if p.Std {
-			continue
-		}
-		for _, fn := range p.Funcs {
-			if fn.Decl == nil || fn.Decl.Body == nil {
-				continue
-			}
-			w := &ptWalker{fn: fn, found: found}
-			w.stmt(fn.Decl.Body)
-		}
-	}
-	var out []PerThreadVar
-	for v, why := range found {
-		if v.Pkg != nil && !v.Pkg.Std {
-			out = append(out, PerThreadVar{Var: v, Reason: why})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i].Var.Pos, out[j].Var.Pos
-		if a.File != b.File {
-			return a.File < b.File
-		}
-		return a.Line < b.Line
-	})
-	return out
-}
-
+// ptWalker walks function bodies for NoStorageErrors.
 type ptWalker struct {
 	fn    *Func
 	found map[*Var]string
-	uses  map[*Var]*storageUse // for NoStorageErrors (nil otherwise)
+	uses  map[*Var]*storageUse
 	// inComm: in a select case's send or receive, where a nil channel is never ready (not a use)
 	inComm bool
 }
@@ -65,8 +23,6 @@ type storageUse struct {
 	used  *Pos
 }
 
-// perThread reports whether v is a package variable with one copy per scheduler thread that
-// wasn't declared so on purpose (thread var).
 func perThread(v *Var) bool {
 	return v != nil && v.Global && !v.Shared && !v.Thread && !v.ReadOnly
 }
@@ -150,7 +106,7 @@ func storage(t Type) string {
 	case *MapStore:
 		return " (a map: each thread has its own entries)"
 	case *ChanStore:
-		return " (a channel: each thread has its own queue; a shared var channel connects threads)"
+		return " (a channel: each thread has its own queue; a shared channel connects threads)"
 	case *VecType:
 		return " (a vector: each thread has its own elements)"
 	}
@@ -287,11 +243,11 @@ func (w *ptWalker) expr(x Expr) {
 			if len(e.Args) > 0 {
 				w.written(e.Args[0], "copied into")
 			}
-		case "simd.Store":
+		case "simd.store":
 			if len(e.Args) > 0 {
 				w.written(e.Args[0], "stored into")
 			}
-		case "vec.Push", "vec.TryPush", "vec.Append", "vec.TryAppend", "vec.Pop", "vec.Clear":
+		case "vec.push", "vec.try_push", "vec.append", "vec.try_append", "vec.pop", "vec.clear":
 			if se, ok := unparen(e.Fun).(*SelectorExpr); ok {
 				w.written(se.X, "changed by "+se.Sel.Name)
 			}
@@ -370,9 +326,9 @@ func NoStorageErrors(prog *Program) ErrorList {
 			}
 			switch t := v.Type.Underlying().(type) {
 			case *Map:
-				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a map with no storage: nothing assigns it, so writing to it (%s) would panic; declare it %s map[%s]%s cap N", v.Name, useAt(v.Pos, *u.used), v.Name, t.Key, t.Value)})
+				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a map with no storage: nothing assigns it, so writing to it (%s) would panic; declare it %s %s[%s; N]", v.Name, useAt(v.Pos, *u.used), v.Name, elemString(t.Value), t.Key)})
 			case *Chan:
-				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a channel with no storage: nothing assigns it, so using it (%s) would block forever; declare it %s chan %s cap N", v.Name, useAt(v.Pos, *u.used), v.Name, t.Elem)})
+				errs = append(errs, &Error{v.Pos, fmt.Sprintf("%s is a channel with no storage: nothing assigns it, so using it (%s) would block forever; declare it %s %s chan[N]", v.Name, useAt(v.Pos, *u.used), v.Name, elemString(t.Elem))})
 			}
 		}
 	}

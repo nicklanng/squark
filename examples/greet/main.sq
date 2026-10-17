@@ -6,21 +6,21 @@
 // It shows:
 //   - a memory budget, checked at build time against the proven worst case
 //   - a string built in the request's arena, which is freed when the response is done
-package main
-
-import "http"
-
-budget 128M             // the build fails if the worst case can exceed this
-pool http.serveConn 512 // at most 512 connections served at once
-
-// GET /hello?name=world
-func hello(w *http.ResponseWriter, r *http.Request) {
-	w.Text(200, "hello, " + r.QueryParam("name") + "\n" in r.Arena) // per-request arena
+program {
+	budget 128M             // the build fails if the worst case can exceed this
+	pool http.serve_conn 512 // at most 512 connections served at once
 }
 
-func main() {
-	http.HandleFunc("GET /hello", hello)
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+use http
+
+// GET /hello?name=world
+fn hello(w *http.ResponseWriter, r *http.Request) {
+	w.text(200, "hello, " + r.query_param("name") + "\n" in r.arena) // per-request arena
+}
+
+fn main() {
+	http.handle_func("GET /hello", hello)
+	if err := http.listen_and_serve(":8080", nil); err != nil {
 		panic(err)
 	}
 }

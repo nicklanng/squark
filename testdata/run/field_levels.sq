@@ -1,0 +1,37 @@
+program
+
+// Storing a value in one field of a struct constrains only the levels its type has, not the
+// deeper levels the struct's other fields share (BUGS.md Q4): xs, a package arena's int[], must
+// not make what node points to static.
+
+struct Node {
+	ns int[]
+}
+
+struct S {
+	mem  arena
+	node *Node
+	xs   int[]
+}
+
+arena pkg 1K
+
+fn new_node(a arena) -> *Node {
+	n := new(Node) in a
+	n.ns = make(int[], 0, 4) in a
+	return n
+}
+
+fn fill(s *S) {
+	s.node = new_node(s.mem)
+	s.xs = make(int[], 0, 4) in pkg
+}
+
+fn main() {
+	with arena a 1K {
+		var s S
+		s.mem = a
+		fill(&s)
+		println(len(s.xs), cap(s.node.ns))
+	}
+}

@@ -1,85 +1,81 @@
 // nbody is the Computer Language Benchmarks Game n-body simulation.
-package main
+program
 
-import (
-	"math"
-	"os"
-	"strconv"
-)
+use math, os, strconv
 
 const (
-	solarMass   = 4 * math.Pi * math.Pi
-	daysPerYear = 365.24
+	solar_mass    = 4 * math.pi * math.pi
+	days_per_year = 365.24
 )
 
-type Body struct {
-	x, y, z, vx, vy, vz, mass float64
+struct Body {
+	x, y, z, vx, vy, vz, mass f64
 }
 
-func newSystem() [5]Body {
-	return [5]Body{
-		{mass: solarMass},
+fn new_system() -> Body[5] {
+	return Body[5]{
+		{mass: solar_mass},
 		{
 			x: 4.84143144246472090e+00, y: -1.16032004402742839e+00, z: -1.03622044471123109e-01,
-			vx: 1.66007664274403694e-03 * daysPerYear, vy: 7.69901118419740425e-03 * daysPerYear, vz: -6.90460016972063023e-05 * daysPerYear,
-			mass: 9.54791938424326609e-04 * solarMass,
+			vx: 1.66007664274403694e-03 * days_per_year, vy: 7.69901118419740425e-03 * days_per_year, vz: -6.90460016972063023e-05 * days_per_year,
+			mass: 9.54791938424326609e-04 * solar_mass,
 		},
 		{
 			x: 8.34336671824457987e+00, y: 4.12479856412430479e+00, z: -4.03523417114321381e-01,
-			vx: -2.76742510726862411e-03 * daysPerYear, vy: 4.99852801234917238e-03 * daysPerYear, vz: 2.30417297573763929e-05 * daysPerYear,
-			mass: 2.85885980666130812e-04 * solarMass,
+			vx: -2.76742510726862411e-03 * days_per_year, vy: 4.99852801234917238e-03 * days_per_year, vz: 2.30417297573763929e-05 * days_per_year,
+			mass: 2.85885980666130812e-04 * solar_mass,
 		},
 		{
 			x: 1.28943695621391310e+01, y: -1.51111514016986312e+01, z: -2.23307578892655734e-01,
-			vx: 2.96460137564761618e-03 * daysPerYear, vy: 2.37847173959480950e-03 * daysPerYear, vz: -2.96589568540237556e-05 * daysPerYear,
-			mass: 4.36624404335156298e-05 * solarMass,
+			vx: 2.96460137564761618e-03 * days_per_year, vy: 2.37847173959480950e-03 * days_per_year, vz: -2.96589568540237556e-05 * days_per_year,
+			mass: 4.36624404335156298e-05 * solar_mass,
 		},
 		{
 			x: 1.53796971148509165e+01, y: -2.59193146099879641e+01, z: 1.79258772950371181e-01,
-			vx: 2.68067772490389322e-03 * daysPerYear, vy: 1.62824170038242295e-03 * daysPerYear, vz: -9.51592254519715870e-05 * daysPerYear,
-			mass: 5.15138902046611451e-05 * solarMass,
+			vx: 2.68067772490389322e-03 * days_per_year, vy: 1.62824170038242295e-03 * days_per_year, vz: -9.51592254519715870e-05 * days_per_year,
+			mass: 5.15138902046611451e-05 * solar_mass,
 		},
 	}
 }
 
-func offsetMomentum(bodies []Body) {
-	var px, py, pz float64
-	for _, b := range bodies {
+fn offset_momentum(bodies Body[]) {
+	var px, py, pz f64
+	for b in bodies {
 		px += b.vx * b.mass
 		py += b.vy * b.mass
 		pz += b.vz * b.mass
 	}
-	bodies[0].vx = -px / solarMass
-	bodies[0].vy = -py / solarMass
-	bodies[0].vz = -pz / solarMass
+	bodies[0].vx = -px / solar_mass
+	bodies[0].vy = -py / solar_mass
+	bodies[0].vz = -pz / solar_mass
 }
 
-func energy(bodies []Body) float64 {
-	var e float64
-	for i, b := range bodies {
+fn energy(bodies Body[]) -> f64 {
+	var e f64
+	for i, b in bodies {
 		e += 0.5 * b.mass * (b.vx*b.vx + b.vy*b.vy + b.vz*b.vz)
 		for j := i + 1; j < len(bodies); j++ {
 			b2 := bodies[j]
 			dx := b.x - b2.x
 			dy := b.y - b2.y
 			dz := b.z - b2.z
-			e -= (b.mass * b2.mass) / math.Sqrt(dx*dx+dy*dy+dz*dz)
+			e -= (b.mass * b2.mass) / math.sqrt(dx*dx+dy*dy+dz*dz)
 		}
 	}
 	return e
 }
 
-func advance(bodies []Body, dt float64) {
-	for i := range bodies {
+fn advance(bodies Body[], dt f64) {
+	for i, _ in bodies {
 		bi := &bodies[i]
 		for j := i + 1; j < len(bodies); j++ {
 			bj := &bodies[j]
 			dx := bi.x - bj.x
 			dy := bi.y - bj.y
 			dz := bi.z - bj.z
-			dSquared := dx*dx + dy*dy + dz*dz
-			distance := math.Sqrt(dSquared)
-			mag := dt / (dSquared * distance)
+			d_squared := dx*dx + dy*dy + dz*dz
+			distance := math.sqrt(d_squared)
+			mag := dt / (d_squared * distance)
 			bi.vx -= dx * bj.mass * mag
 			bi.vy -= dy * bj.mass * mag
 			bi.vz -= dz * bj.mass * mag
@@ -88,7 +84,7 @@ func advance(bodies []Body, dt float64) {
 			bj.vz += dz * bi.mass * mag
 		}
 	}
-	for i := range bodies {
+	for i, _ in bodies {
 		b := &bodies[i]
 		b.x += dt * b.vx
 		b.y += dt * b.vy
@@ -96,24 +92,24 @@ func advance(bodies []Body, dt float64) {
 	}
 }
 
-func printEnergy(e float64) {
-	var buf [64]byte
-	out := strconv.AppendFloat(buf[:0], e, 9)
+fn print_energy(e f64) {
+	var buf u8[64]
+	out := strconv.append_float(buf[:0], e, 9)
 	out = append(out, '\n')
-	os.Stdout.Write(out)
+	os.stdout.write(out)
 }
 
-func main() {
+fn main() {
 	n := 50000000
-	if os.NArgs() > 1 {
-		n, _ = strconv.Atoi(os.Arg(1))
+	if os.n_args() > 1 {
+		n, _ = strconv.atoi(os.arg(1))
 	}
-	system := newSystem()
+	system := new_system()
 	bodies := system[:]
-	offsetMomentum(bodies)
-	printEnergy(energy(bodies))
+	offset_momentum(bodies)
+	print_energy(energy(bodies))
 	for i := 0; i < n; i++ {
 		advance(bodies, 0.01)
 	}
-	printEnergy(energy(bodies))
+	print_energy(energy(bodies))
 }

@@ -1,38 +1,38 @@
-package main
+program
 
-type V struct { // ERROR "invalid recursive type V"
+struct V { // ERROR "invalid recursive type V"
 	x int
-	v [..2]V
+	v V[..2]
 }
 
-type M struct { // ERROR "invalid recursive type M"
-	m map[int]M cap 4
+struct M { // ERROR "invalid recursive type M"
+	m M[int; 4]
 }
 
-type C struct { // ERROR "invalid recursive type C"
-	c chan C cap 4
+struct C { // ERROR "invalid recursive type C"
+	c C chan[4]
 }
 
-type A B
-type B A // ERROR "invalid recursive type B"
+A: B
+B: A // ERROR "invalid recursive type B"
 
-type State func() State // ERROR "invalid recursive type State: it refers to itself without a struct"
+State: fn() -> State // ERROR "invalid recursive type State: it refers to itself without a struct"
 
-type Sl []Sl // ERROR "invalid recursive type Sl"
+Sl: Sl[] // ERROR "invalid recursive type Sl"
 
-type P *P // ERROR "invalid recursive type P"
+P: *P // ERROR "invalid recursive type P"
 
-type F1 func(F2) // ERROR "invalid recursive type F1"
-type F2 func(*F1) // ERROR "invalid recursive type F2"
+F1: fn(F2) // ERROR "invalid recursive type F1"
+F2: fn(*F1) // ERROR "invalid recursive type F2"
 
 // fine: a struct in between
-type St struct{ next func() St }
+struct St { next fn() -> St }
 
 // fine: through a pointer or a view
-type L struct {
+struct L {
 	next *L
-	m    map[int]*L
-	kids []L
+	m    *L[int]
+	kids L[]
 }
 
-func main() {}
+fn main() {}

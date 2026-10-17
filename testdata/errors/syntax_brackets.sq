@@ -1,0 +1,5 @@
+program
+
+fn main() {
+	var xs []int // ERROR "the brackets go after the element type"
+}

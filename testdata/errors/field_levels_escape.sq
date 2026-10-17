@@ -1,0 +1,24 @@
+program
+
+// Storing into one field still checks the levels its type has (BUGS.md Q4).
+
+struct Node {
+	name str
+}
+
+struct S {
+	node  *Node
+	names str[]
+}
+
+arena pkg 1K
+
+thread keep S
+
+fn main() {
+	keep.names = make(str[], 1) in pkg
+	var buf u8[4]
+	keep.names[0] = str(buf[:]) // ERROR "cannot escape into static memory"
+	var n Node
+	keep.node = &n // ERROR "cannot escape into static memory"
+}

@@ -1,9 +1,9 @@
-package main
+program
 
 // storing a vector into a slice shorter than its lanes panics, writing nothing
-func main() {
-	var buf [3]int32
+fn main() {
+	var buf i32[3]
 	println("before")
-	int32x4{1, 2, 3, 4}.Store(buf[:])
+	i32x4{1, 2, 3, 4}.store(buf[:])
 	println(buf[0])
 }

@@ -1,27 +1,27 @@
-package main
+program
 
 // s[f()] where f reassigns s: the pointer and the length must come from the same slice (they
 // used to be read on either side of the call, so the bounds check used the wrong length).
-var small [1]int
-var big [100]int
-var s []int
+thread small int[1]
+thread big int[100]
+thread s int[]
 
-func f() int {
+fn f() -> int {
 	s = big[:]
 	return 50
 }
 
-var str string
+thread str_ str
 
-func g() int {
-	str = "0123456789abcdef"
+fn g() -> int {
+	str_ = "0123456789abcdef"
 	return 12
 }
 
-func main() {
+fn main() {
 	s = small[:]
 	s[f()] = 7
 	println(big[50], big[49])
-	str = "x"
-	println(str[g()])
+	str_ = "x"
+	println(str_[g()])
 }

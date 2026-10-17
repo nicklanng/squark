@@ -1,61 +1,58 @@
-package main
+program
 
 // ParseFloat (and json.Decoder.Float) with more digits than the 800 the decimal keeps: the digits
 // dropped before the point still count toward the exponent.
 
-import (
-	"json"
-	"strconv"
-)
+use json, strconv
 
-func show(s string) {
-	f, err := strconv.ParseFloat(s)
-	var b [64]byte
-	println(len(s), string(strconv.AppendFloat(b[:0], f, -1)), err == nil)
+fn show(s str) {
+	f, err := strconv.parse_float(s)
+	var b u8[64]
+	println(len(s), str(strconv.append_float(b[:0], f, -1)), err == nil)
 }
 
-func main() {
-	var buf [2048]byte
+fn main() {
+	var buf u8[2048]
 	// "1" + 800 zeros + "e-800" = 1
 	s := append(buf[:0], '1')
-	for range 800 {
+	for _ in 0..800 {
 		s = append(s, '0')
 	}
-	show(string(append(s, "e-800"...)))
+	show(str(append(s, "e-800"...)))
 	// "1" + 1000 zeros + "e-1000" = 1
 	s = append(buf[:0], '1')
-	for range 1000 {
+	for _ in 0..1000 {
 		s = append(s, '0')
 	}
-	show(string(append(s, "e-1000"...)))
+	show(str(append(s, "e-1000"...)))
 	// "2" + 900 zeros + ".5e-900" = 2
 	s = append(buf[:0], '2')
-	for range 900 {
+	for _ in 0..900 {
 		s = append(s, '0')
 	}
-	show(string(append(s, ".5e-900"...)))
+	show(str(append(s, ".5e-900"...)))
 	// 900 nines + "e-900" rounds to 1
 	s = buf[:0]
-	for range 900 {
+	for _ in 0..900 {
 		s = append(s, '9')
 	}
-	show(string(append(s, "e-900"...)))
+	show(str(append(s, "e-900"...)))
 	// leading zeros don't count: "0000.1" + 900 zeros + "1"
 	s = append(buf[:0], "0000.1"...)
-	for range 900 {
+	for _ in 0..900 {
 		s = append(s, '0')
 	}
-	show(string(append(s, '1')))
+	show(str(append(s, '1')))
 	// through json.Decoder.Float
 	s = append(buf[:0], '[', '3')
-	for range 850 {
+	for _ in 0..850 {
 		s = append(s, '0')
 	}
 	s = append(s, "e-850]"...)
-	d := json.NewDecoder(s)
-	d.BeginArray()
-	d.More()
-	f, ok := d.Float()
-	var b [64]byte
-	println(string(strconv.AppendFloat(b[:0], f, -1)), ok)
+	d := json.new_decoder(s)
+	d.begin_array()
+	d.more()
+	f, ok := d.float()
+	var b u8[64]
+	println(str(strconv.append_float(b[:0], f, -1)), ok)
 }

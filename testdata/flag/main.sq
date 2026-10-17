@@ -1,28 +1,25 @@
-package main
+program
 
 // Run by TestFlag with several command lines: it prints the parsed flags and the arguments left.
 
-import (
-	"flag"
-	"time"
-)
+use flag, time
 
-func main() {
-	port := flag.Int("port", 8080, "port to listen on")
-	db := flag.String("db", "notes.db", "a `file` to keep the notes in")
-	verbose := flag.Bool("v", false, "verbose")
-	idle := flag.Duration("idle", 30*time.Second, "close a connection idle\nfor this long")
-	name := flag.String("name", "", "who to greet")
-	count := flag.Int("count", 0, "how many")
-	color := flag.Bool("color", true, "color the output")
-	before := flag.Parsed()
-	flag.Parse()
-	var buf [32]byte
-	println("port", *port, "db", *db, "v", *verbose, "idle", idle.String(buf[:]))
+fn main() {
+	port := flag.int_flag("port", 8080, "port to listen on")
+	db := flag.str_flag("db", "notes.db", "a `file` to keep the notes in")
+	verbose := flag.bool_flag("v", false, "verbose")
+	idle := flag.duration_flag("idle", 30*time.second, "close a connection idle\nfor this long")
+	name := flag.str_flag("name", "", "who to greet")
+	count := flag.int_flag("count", 0, "how many")
+	color := flag.bool_flag("color", true, "color the output")
+	before := flag.parsed()
+	flag.parse()
+	var buf u8[32]
+	println("port", *port, "db", *db, "v", *verbose, "idle", idle.string(buf[:]))
 	println("name", *name, "count", *count, "color", *color)
-	println("parsed", before, flag.Parsed(), "nflag", flag.NFlag(), "narg", flag.NArg())
-	for i, a := range flag.Args() {
-		println("arg", i, a, flag.Arg(i))
+	println("parsed", before, flag.parsed(), "nflag", flag.n_flag(), "narg", flag.n_arg())
+	for i, a in flag.args() {
+		println("arg", i, a, flag.arg(i))
 	}
-	println("out of range:", flag.Arg(-1) == "", flag.Arg(flag.NArg()) == "")
+	println("out of range:", flag.arg(-1) == "", flag.arg(flag.n_arg()) == "")
 }

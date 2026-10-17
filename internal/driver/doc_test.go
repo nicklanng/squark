@@ -16,28 +16,28 @@ func TestDocValuesAndComments(t *testing.T) {
 	src := `// Package main is documented here.
 //
 // A second paragraph.
-package main
+program
 
-const Long = ` + "`" + long + "`" + `
-const F32 float32 = 0.1
-const F64 = 0.1
-const R = 'x'
-const R2 rune = 'é'
-const R3 = '\n'
-const N int32 = 120
+const long = ` + "`" + long + "`" + `
+const single f32 = 0.1
+const double = 0.1
+const r = 'x'
+const r2 rune = 'é'
+const r3 = '\n'
+const n i32 = 120
 
 // Point is a point.
-type Point struct {
-	// X is across.
-	X int
-	Y int // trailing comments aren't doc comments
+struct Point {
+	// x is across.
+	x int
+	y int // trailing comments aren't doc comments
 
-	// Z is up, and has
+	// z is up, and has
 	// two lines.
-	Z, W int
+	z, w int
 }
 
-func main() {}
+fn main() {}
 `
 	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
 	out, err := Doc(dir, "")
@@ -45,15 +45,15 @@ func main() {}
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"// Package main is documented here.\n//\n// A second paragraph.\npackage main\n",
-		"const Long = \"" + strings.Repeat("abcdefghij", 10) + `\"\\"` + "\n",
-		"const F32 float32 = 0.1\n",
-		"const F64 = 0.1\n",
-		"const R = 'x'\n",
-		"const R2 int32 = 'é'\n",
-		`const R3 = '\n'` + "\n",
-		"const N int32 = 120\n",
-		"type Point struct {\n\t// X is across.\n\tX int\n\tY int\n\n\t// Z is up, and has\n\t// two lines.\n\tZ int\n\tW int\n}",
+		"// Package main is documented here.\n//\n// A second paragraph.\nprogram\n",
+		"const long = \"" + strings.Repeat("abcdefghij", 10) + `\"\\"` + "\n",
+		"const single f32 = 0.1\n",
+		"const double = 0.1\n",
+		"const r = 'x'\n",
+		"const r2 i32 = 'é'\n",
+		`const r3 = '\n'` + "\n",
+		"const n i32 = 120\n",
+		"struct Point {\n\t// x is across.\n\tx int\n\ty int\n\n\t// z is up, and has\n\t// two lines.\n\tz int\n\tw int\n}",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doc lacks %q:\n%s", want, out)
@@ -67,7 +67,7 @@ func TestDocStdPackageComments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "// Package json writes and reads JSON") || !strings.Contains(out, "\npackage json\n") {
+	if !strings.Contains(out, "// Package json writes and reads JSON") || !strings.Contains(out, "\nmodule json\n") {
 		t.Errorf("json's package comment is missing:\n%s", out[:min(len(out), 400)])
 	}
 }

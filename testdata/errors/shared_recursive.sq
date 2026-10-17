@@ -1,0 +1,23 @@
+program
+
+// A struct that contains itself by value is reported once, and checking a shared variable of it
+// doesn't go round it for ever (BUGS.md Q7), whichever field comes first.
+
+struct Pair { // ERROR "invalid recursive type Pair"
+	in Msg chan[4]
+	id Pair
+}
+
+struct Loop { // ERROR "invalid recursive type Loop"
+	id Loop
+	in Msg chan[4]
+}
+
+struct Msg {
+	n int
+}
+
+shared pairs Pair[2]
+shared loops Loop[2]
+
+fn main() {}

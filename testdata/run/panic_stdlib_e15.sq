@@ -1,68 +1,63 @@
-package main
+program
 
 // net.Conn.CloseWrite (the peer reads EOF and the connection still reads), json.Decoder
 // Offset/Line, and a zero bytes.Buffer refusing writes.
 
-import (
-	"bytes"
-	"json"
-	"net"
-	"strconv"
-)
+use bytes, json, net, strconv
 
-arena str 64
+arena str_ 64
 
 task peer(l net.Listener) pool 1 {
-	c, _ := l.Accept()
-	var buf [64]byte
+	c, _ := l.accept()
+	var buf u8[64]
 	total := 0
-	for {
-		n, err := c.Read(buf[total:])
+	loop {
+		n, err := c.read(buf[total:])
 		total += n
-		if err != nil || n == 0 {
+		if err != nil or n == 0 {
 			break // EOF: the other side closed its sending half
 		}
 	}
-	c.WriteString("got:" + string(buf[:total]) in str)
-	c.Close()
+	c.write_string("got:" + str(buf[:total]) in str_)
+	c.close()
 }
 
-func main() {
-	l, _ := net.Listen("127.0.0.1:0")
-	go peer(l)
-	var b [32]byte
-	c, _ := net.Dial(string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), l.Port())))
-	c.WriteString("hello")
-	c.CloseWrite()
-	var reply [64]byte
+fn main() {
+	l, _ := net.listen("127.0.0.1:0")
+	start peer(l)
+	var b u8[32]
+	c, _ := net.dial(str(strconv.append_int(append(b[:0], "127.0.0.1:"...), l.port())))
+	c.write_string("hello")
+	c.close_write()
+	var reply u8[64]
 	n := 0
-	for {
-		m, err := c.Read(reply[n:])
+	loop {
+		m, err := c.read(reply[n:])
 		n += m
-		if err != nil || m == 0 {
+		if err != nil or m == 0 {
 			break
 		}
 	}
-	println(string(reply[:n]))
+	println(str(reply[:n]))
 
-	var doc [64]byte
+	var doc u8[64]
 	n = copy(doc[:], "{\n  \"a\": 1,\n  \"b\": oops\n}")
-	d := json.NewDecoder(doc[:n])
-	var key [8]byte
-	d.BeginObject()
-	for {
-		k, ok := d.Field(key[:])
-		if !ok {
+	d := json.new_decoder(doc[:n])
+	var key u8[8]
+	d.begin_object()
+	loop {
+		k, ok := d.field(key[:])
+		if not ok {
 			break
 		}
 		if k == "a" {
-			d.Int()
+			d.int()
 		} else {
-			d.Skip()
+			d.skip()
 		}
 	}
-	println(d.Err != nil, d.Line(), d.Offset())
+	println(d.err != nil, d.line(), d.offset())
 
 	var zero bytes.Buffer
-	zero.WriteString("lost?") // panics: no storage
+	zero.write_string("lost?") // panics: no storage
 }

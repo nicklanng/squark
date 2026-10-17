@@ -1,24 +1,24 @@
-package main
+program
 
 // An error whose message is an empty string (a zero string has a NULL pointer) is still not
 // nil: nil-ness must not depend on the message.
-func mk(msg string) error { return error(400, msg) }
+fn mk(msg str) -> ! { return error(400, msg) }
 
-func check(fail bool) error {
-	var reason string
+fn check(fail bool) -> ! {
+	var reason str
 	if fail {
 		return error(400, reason)
 	}
 	return nil
 }
 
-func run() error {
-	try check(true)
+fn run() -> ! {
+	check(true)!
 	return error(1, "not reached")
 }
 
-func main() {
+fn main() {
 	err := check(true)
-	println(err == nil, err.Code(), len(err.Error()))
-	println(mk("") == nil, run().Code())
+	println(err == nil, err.code(), len(err.message()))
+	println(mk("") == nil, run().code())
 }

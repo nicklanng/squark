@@ -17,46 +17,41 @@ import (
 
 // httpProtoServer is the server for TestHTTPProtocol. Its pool of 4 connection goroutines lets the
 // slowloris test fill it; the read deadlines are lowered to keep the test fast.
-const httpProtoServer = `package main
+const httpProtoServer = `program {
+	pool http.serve_conn 4
+}
 
-import (
-	"http"
-	"os"
-	"strconv"
-	"time"
-)
+use http, os, strconv, time
 
-pool http.serveConn 4
-
-func handle(w *http.ResponseWriter, r *http.Request) {
-	switch r.Path {
+fn handle(w *http.ResponseWriter, r *http.Request) {
+	switch r.path {
 	case "/echo-id":
-		w.SetHeader("X-Request-Id", r.HeaderValue("X-Request-Id"))
-		w.WriteString("ok")
+		w.set_header("X-Request-Id", r.header_value("X-Request-Id"))
+		w.write_string("ok")
 	case "/split":
-		w.SetHeader("X-A", "1\r\nSet-Cookie: evil=1")
-		w.SetHeader("X-B", "2\nSet-Cookie: evil=2")
-		w.SetHeader("Bad Name", "x")
-		w.SetHeader("X-C\r\nSet-Cookie", "evil=3")
-		w.WriteString("ok")
+		w.set_header("X-A", "1\r\nSet-Cookie: evil=1")
+		w.set_header("X-B", "2\nSet-Cookie: evil=2")
+		w.set_header("Bad Name", "x")
+		w.set_header("X-C\r\nSet-Cookie", "evil=3")
+		w.write_string("ok")
 	case "/body":
-		w.Write(r.Body)
+		w.write(r.body)
 	case "/status":
-		code, _ := strconv.Atoi(r.QueryValue("c"))
-		w.WriteHeader(code)
-		n, _ := strconv.Atoi(r.QueryValue("n"))
+		code, _ := strconv.atoi(r.query_value("c"))
+		w.write_header(code)
+		n, _ := strconv.atoi(r.query_value("n"))
 		for i := 0; i < n; i++ {
-			w.WriteByte(byte('a' + i%26))
+			w.write_byte(u8('a' + i%26))
 		}
 	default:
-		w.WriteString("hi")
+		w.write_string("hi")
 	}
 }
 
-func main() {
-	http.ReadHeaderTimeout = 300 * time.Millisecond
-	http.ReadTimeout = 600 * time.Millisecond
-	if err := http.ListenAndServe(os.Arg(1), handle); err != nil {
+fn main() {
+	http.read_header_timeout = 300 * time.millisecond
+	http.read_timeout = 600 * time.millisecond
+	if err := http.listen_and_serve(os.arg(1), handle); err != nil {
 		panic(err)
 	}
 }
@@ -140,9 +135,9 @@ func TestHTTPProtocol(t *testing.T) {
 			"GET /echo-id HTTP/1.1\r\nHost: x\r\nX-Request-Id: 1\nSet-Cookie: session=evil\r\n\r\n",
 			"GET /echo-id HTTP/1.1\r\nHost: x\r\nX-Request-Id: 1\rSet-Cookie: session=evil\r\n\r\n",
 			"GET /echo-id HTTP/1.1\r\nHost: x\r\nX-Request-Id: 1\x00\r\n\r\n",
-			"GET / HTTP/1.1\nHost: x\n\n",               // LF-only lines (F37)
-			"GET /\r HTTP/1.1\r\nHost: x\r\n\r\n",       // bare CR in the request line
-			"GET / HTTP/1.1\r\nHost: x\r\n\n",           // bare LF ending the head
+			"GET / HTTP/1.1\nHost: x\n\n",         // LF-only lines (F37)
+			"GET /\r HTTP/1.1\r\nHost: x\r\n\r\n", // bare CR in the request line
+			"GET / HTTP/1.1\r\nHost: x\r\n\n",     // bare LF ending the head
 		} {
 			start := time.Now()
 			resp := rawExchange(t, addr, req)
@@ -368,9 +363,9 @@ func TestHTTPProtocol(t *testing.T) {
 			closed <- time.Since(start)
 		}
 		wg.Add(4)
-		go slow("GET / HTTP/1.1\r\nHost: x\r\n", "X")       // headers never end
-		go slow("GET / HTTP/1.1\r\nHost: x\r\nX: ", "y")     // still in a header value
-		go slow("GET / HTTP/1.1\r\n", "Y")                                              // nor here
+		go slow("GET / HTTP/1.1\r\nHost: x\r\n", "X")                                  // headers never end
+		go slow("GET / HTTP/1.1\r\nHost: x\r\nX: ", "y")                               // still in a header value
+		go slow("GET / HTTP/1.1\r\n", "Y")                                             // nor here
 		go slow("POST /body HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n", "z") // body never ends
 		time.Sleep(100 * time.Millisecond)
 		alive(t) // a fifth connection gets served once the deadlines free a goroutine

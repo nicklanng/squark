@@ -1,17 +1,17 @@
-package main
+program
 
 // The SIMD versions. Their results equal the scalar ones because the data are small integers,
 // so every float sum is exact in any order.
 
 //squark:noinline
-func sumFloat64SIMD(x []float64) float64 {
-	var a, b float64x4
+fn sum_float64_simd(x f64[]) -> f64 {
+	var a, b f64x4
 	i := 0
 	for ; i+8 <= len(x); i += 8 {
-		a += float64x4(x[i:])
-		b += float64x4(x[i+4:])
+		a += f64x4(x[i:])
+		b += f64x4(x[i+4:])
 	}
-	s := (a + b).Sum()
+	s := (a + b).sum()
 	for ; i < len(x); i++ {
 		s += x[i]
 	}
@@ -19,14 +19,14 @@ func sumFloat64SIMD(x []float64) float64 {
 }
 
 //squark:noinline
-func dotFloat32SIMD(x []float32, y []float32) float32 {
-	var a, b float32x8
+fn dot_float32_simd(x f32[], y f32[]) -> f32 {
+	var a, b f32x8
 	i := 0
 	for ; i+16 <= len(x); i += 16 {
-		a += float32x8(x[i:]) * float32x8(y[i:])
-		b += float32x8(x[i+8:]) * float32x8(y[i+8:])
+		a += f32x8(x[i:]) * f32x8(y[i:])
+		b += f32x8(x[i+8:]) * f32x8(y[i+8:])
 	}
-	s := (a + b).Sum()
+	s := (a + b).sum()
 	for ; i < len(x); i++ {
 		s += x[i] * y[i]
 	}
@@ -34,11 +34,11 @@ func dotFloat32SIMD(x []float32, y []float32) float32 {
 }
 
 //squark:noinline
-func indexByteSIMD(b []byte, c byte) int {
-	cs := uint8x16(c)
+fn index_byte_simd(b u8[], c u8) -> int {
+	cs := u8x16(c)
 	i := 0
 	for ; i+16 <= len(b); i += 16 {
-		if m := uint8x16(b[i:]) == cs; m.Any() {
+		if m := u8x16(b[i:]) == cs; m.any() {
 			for j := 0; j < 16; j++ {
 				if m[j] != 0 {
 					return i + j
@@ -54,50 +54,50 @@ func indexByteSIMD(b []byte, c byte) int {
 	return -1
 }
 
-// hexEncodeSIMD looks up the digits of 16 high and 16 low nibbles at once, then interleaves them.
+// hex_encode_simd looks up the digits of 16 high and 16 low nibbles at once, then interleaves them.
 //
 //squark:noinline
-func hexEncodeSIMD(dst []byte, src []byte) {
-	t := uint8x16(hexDigits)
+fn hex_encode_simd(dst u8[], src u8[]) {
+	t := u8x16(hex_digits)
 	i := 0
 	for ; i+16 <= len(src); i += 16 {
-		b := uint8x16(src[i:])
-		hi, lo := t.Lookup(b>>4), t.Lookup(b&15)
-		hi.Shuffle(lo, 0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23).Store(dst[2*i:])
-		hi.Shuffle(lo, 8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31).Store(dst[2*i+16:])
+		b := u8x16(src[i:])
+		hi, lo := t.lookup(b>>4), t.lookup(b&15)
+		hi.shuffle(lo, 0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23).store(dst[2*i:])
+		hi.shuffle(lo, 8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31).store(dst[2*i+16:])
 	}
 	for ; i < len(src); i++ {
-		dst[2*i] = hexDigits[src[i]>>4]
-		dst[2*i+1] = hexDigits[src[i]&15]
+		dst[2*i] = hex_digits[src[i]>>4]
+		dst[2*i+1] = hex_digits[src[i]&15]
 	}
 }
 
-// simdKernel runs a SIMD kernel: the same work and result as the scalar kernel it is named after.
-func simdKernel(name string, reps int) (int64, bool) {
-	var check int64
+// simd_kernel runs a SIMD kernel: the same work and result as the scalar kernel it is named after.
+fn simd_kernel(name str, reps int) -> (i64, bool) {
+	var check i64
 	switch name {
 	case "sum-float64/simd":
 		for r := 0; r < reps; r++ {
-			check += int64(sumFloat64SIMD(f64a[:]))
-			f64a[r%n] = float64(r % 64)
+			check += i64(sum_float64_simd(f64a[:]))
+			f64a[r%n] = f64(r % 64)
 		}
 	case "dot-float32/simd":
-		setupDot()
+		setup_dot()
 		for r := 0; r < reps; r++ {
-			check += int64(dotFloat32SIMD(f32a[:], f32b[:]))
-			f32a[r%n] = float32(r % 8)
+			check += i64(dot_float32_simd(f32a[:], f32b[:]))
+			f32a[r%n] = f32(r % 8)
 		}
 	case "index-byte/simd":
-		setupIndex()
+		setup_index()
 		for r := 0; r < reps; r++ {
-			check += int64(indexByteSIMD(u8c[:], 255))
-			u8c[r%(n-5)] = byte(r % 200)
+			check += i64(index_byte_simd(u8c[:], 255))
+			u8c[r%(n-5)] = u8(r % 200)
 		}
 	case "hex/simd":
 		for r := 0; r < reps; r++ {
-			hexEncodeSIMD(hexOut[:], u8a[:])
-			check += int64(hexOut[(r*7)%(2*n)])
-			u8a[r%n] = byte(r)
+			hex_encode_simd(hex_out[:], u8a[:])
+			check += i64(hex_out[(r*7)%(2*n)])
+			u8a[r%n] = u8(r)
 		}
 	default:
 		return 0, false

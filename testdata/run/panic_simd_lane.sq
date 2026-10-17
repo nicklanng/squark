@@ -1,9 +1,9 @@
-package main
+program
 
-func lane(v uint8x16, i int) byte { return v[i] }
+fn lane(v u8x16, i int) -> u8 { return v[i] }
 
-func main() {
-	v := uint8x16{1, 2, 3}
+fn main() {
+	v := u8x16{1, 2, 3}
 	println(lane(v, 2))
 	println(lane(v, 16))
 }

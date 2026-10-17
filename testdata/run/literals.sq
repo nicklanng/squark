@@ -1,6 +1,6 @@
-package main
+program
 
-func main() {
+fn main() {
 	println("\101\x41A\U00000041", "\a\b\f\v\\" == "\x07\x08\x0c\x0b\x5c")
 	println('\'', '\377', 'é', len("é"), len("\xff"))
 	println(0x1p4, 0x1.8p1, 0x.8p1, 0X10P-1)

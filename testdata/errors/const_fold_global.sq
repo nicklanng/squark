@@ -1,5 +1,5 @@
-package main
+program
 
 const f = 1.0 / 0 // ERROR "division by zero"
 
-func main() { println(f) }
+fn main() { println(f) }

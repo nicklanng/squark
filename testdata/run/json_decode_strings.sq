@@ -1,11 +1,11 @@
-// Generated: Decoder.String, TextMax and Skip on random JSON strings (escapes, long plain runs,
+// Generated: Decoder.string, TextMax and Skip on random JSON strings (escapes, long plain runs,
 // invalid UTF-8, control bytes, truncation). The expected output is what the byte-at-a-time
 // decoder (before SIMD run skipping) printed: values, errors and offsets must not change.
-package main
+program
 
-import "json"
+use json
 
-var cases = []string{
+thread cases = str[]{
 	"\"v\xc4\" , 1",
 	"\"wabcdefghijabcdefghijabcdefghié\u2028",
 	"\"déjz\\",
@@ -308,32 +308,32 @@ var cases = []string{
 	"\"rq\\ud800x",
 }
 
-func show(s string, ok bool, d *json.Decoder) {
-	print(ok, " ", d.Offset(), " ", d.Err.Code(), " ", len(s), " [")
+fn show(s str, ok bool, d *json.Decoder) {
+	print(ok, " ", d.offset(), " ", d.err.code(), " ", len(s), " [")
 	print(s)
 	println("]")
 }
 
-func main() {
-	var data [512]byte
-	var buf [256]byte
-	for ci, c := range cases {
+fn main() {
+	var data u8[512]
+	var buf u8[256]
+	for ci, c in cases {
 		n := copy(data[:], c)
 		println("case", ci)
-		for _, k := range []int{0, 3, 17, 40, 200} {
-			d := json.NewDecoder(data[:n])
-			s, ok := d.String(buf[:k])
+		for k in int[]{0, 3, 17, 40, 200} {
+			d := json.new_decoder(data[:n])
+			s, ok := d.string(buf[:k])
 			show(s, ok, &d)
 		}
-		for _, m := range []int{0, 5, 20, 1000} {
-			arena a 1K {
-				d := json.NewDecoderIn(data[:n], a)
-				s, ok := d.TextMax(m)
+		for m in int[]{0, 5, 20, 1000} {
+			with arena a 1K {
+				d := json.new_decoder_in(data[:n], a)
+				s, ok := d.text_max(m)
 				show(s, ok, &d)
 			}
 		}
-		d := json.NewDecoder(data[:n])
-		ok := d.Skip()
+		d := json.new_decoder(data[:n])
+		ok := d.skip()
 		show("", ok, &d)
 	}
 }

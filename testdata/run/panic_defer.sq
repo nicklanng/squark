@@ -1,7 +1,7 @@
-package main
+program
 
 // a deferred panic reports its own message
-func main() {
+fn main() {
 	defer panic("real message")
 	println("before")
 }

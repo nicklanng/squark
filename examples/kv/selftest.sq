@@ -1,22 +1,13 @@
 // The self-test, run when kv has no -port: it serves on a port the system picks and drives a
 // scripted client over real TCP, printing both sides of the conversation.
-package main
+program
 
-import (
-	"bufio"
-	"io"
-	"net"
-	"os"
-	"runtime"
-	"strconv"
-	"strings"
-	"time"
-)
+use bufio, io, net, os, runtime, strconv, strings, time
 
-const clientTimeout = 2 * time.Second
+const client_timeout = 2 * time.second
 
 // script is what the client sends on its first connection, one command per line.
-const script = [...]string{
+const script = str[...]{
 	"PING",
 	"",
 	"SET greeting hello world",
@@ -41,141 +32,143 @@ const script = [...]string{
 	"SET 0123456789012345678901234567890123456789012345678901234567890123456789 too-long",
 }
 
-// client is the test's end of a connection.
-type client struct {
+// Client is the test's end of a connection.
+struct Client {
 	c net.Conn
 	r bufio.Reader
 }
 
-thread var closed chan connStats cap 8 // the server reports each finished connection here
+impl Client {
+	fn read_line(&self) -> str ! in self {
+		return self.r.read_line(self.c.with_timeout(client_timeout))
+	}
+
+	// read_reply reads one reply (a *n reply is followed by n lines) and prints it.
+	fn read_reply(&self) -> ! {
+		line := self.read_line()!
+		println("<", line)
+		if not strings.has_prefix(line, "*") {
+			return nil
+		}
+		n := strconv.atoi(line[1:])!
+		for i := 0; i < n; i++ {
+			println("<", self.read_line()!)
+		}
+		return nil
+	}
+
+	fn send(&self, cmd str) -> ! {
+		if cmd == "" {
+			println("> (empty line)")
+		} else {
+			println(">", cmd)
+		}
+		var buf u8[max_line]
+		self.c.write(append(append(buf[:0], cmd...), '\n'))!
+		return self.read_reply()
+	}
+
+	// expect_close reads until the server closes the connection.
+	fn expect_close(&self) {
+		loop {
+			line, err := self.read_line()
+			if err == io.EOF {
+				println("  (server closed the connection)")
+				return
+			}
+			if err != nil {
+				println("  (read error:", err.message(), ")")
+				return
+			}
+			println("<", line)
+		}
+	}
+}
+
+thread closed ConnStats chan[8] // the server reports each finished connection here
 
 // ---- the client ----
 
-func dial(port int, buf []byte) (client, error) from buf {
-	var addr [32]byte
-	c := try net.Dial(string(net.AppendHostPort(addr[:0], "127.0.0.1", port)))
-	return client{c: c, r: bufio.NewReader(buf)}, nil
-}
-
-func (cl *client) readLine() (string, error) from cl {
-	return cl.r.ReadLine(cl.c.WithTimeout(clientTimeout))
-}
-
-// readReply reads one reply (a *n reply is followed by n lines) and prints it.
-func (cl *client) readReply() error {
-	line := try cl.readLine()
-	println("<", line)
-	if !strings.HasPrefix(line, "*") {
-		return nil
-	}
-	n := try strconv.Atoi(line[1:])
-	for i := 0; i < n; i++ {
-		println("<", try cl.readLine())
-	}
-	return nil
-}
-
-func (cl *client) send(cmd string) error {
-	if cmd == "" {
-		println("> (empty line)")
-	} else {
-		println(">", cmd)
-	}
-	var buf [maxLine]byte
-	try cl.c.Write(append(append(buf[:0], cmd...), '\n'))
-	return cl.readReply()
-}
-
-// expectClose reads until the server closes the connection.
-func (cl *client) expectClose() {
-	for {
-		line, err := cl.readLine()
-		if err == io.EOF {
-			println("  (server closed the connection)")
-			return
-		}
-		if err != nil {
-			println("  (read error:", err.Error(), ")")
-			return
-		}
-		println("<", line)
-	}
+fn dial(port int, buf u8[]) -> Client ! in buf {
+	var addr u8[32]
+	c := net.dial(str(net.append_host_port(addr[:0], "127.0.0.1", port)))!
+	return Client{c: c, r: bufio.new_reader(buf)}, nil
 }
 
 // ---- the server's side ----
 
-func reportClosed(s connStats) { closed <- s }
+fn report_closed(s ConnStats) { closed <- s }
 
-// waitClosed waits for the server's report on a finished connection.
-func waitClosed() {
+// wait_closed waits for the server's report on a finished connection.
+fn wait_closed() {
 	select {
 	case s := <-closed:
-		println("  server: connection ended after", s.commands, "commands:", errText(s.reason))
-	case <-time.After(clientTimeout):
+		println("  server: connection ended after", s.commands, "commands:", err_text(s.reason))
+	case <-time.after(client_timeout):
 		println("  server: no report")
 	}
 }
 
 // ---- the script ----
 
-func runScript() error {
-	l := try net.Listen("127.0.0.1:0")
-	go acceptLoop(l, 50*time.Millisecond)
-	port := l.Port()
-	var buf [maxLine]byte // each connection's replies, one at a time
+fn run_script() -> ! {
+	l := net.listen("127.0.0.1:0")!
+	start accept_loop(l, 50*time.millisecond)
+	port := l.port()
+	var buf u8[max_line] // each connection's replies, one at a time
 
 	println("== connection 1: every command")
-	c := try dial(port, buf[:])
-	defer c.c.Close()
-	for _, cmd := range script {
-		try c.send(cmd)
+	c := dial(port, buf[:])!
+	defer c.c.close()
+	for cmd in script {
+		c.send(cmd)!
 	}
 
 	println("> GET counter / INCR counter (pipelined in one write)")
-	try c.c.WriteString("GET counter\nINCR counter\n")
-	try c.readReply()
-	try c.readReply()
+	c.c.write_string("GET counter\nINCR counter\n")!
+	c.read_reply()!
+	c.read_reply()!
 
 	println("> GET apple (split across two writes)")
-	try c.c.WriteString("GE")
-	time.Sleep(5 * time.Millisecond)
-	try c.c.WriteString("T apple\r\n")
-	try c.readReply()
+	c.c.write_string("GE")!
+	time.sleep(5 * time.millisecond)
+	c.c.write_string("T apple\r\n")!
+	c.read_reply()!
 
-	try c.send("QUIT")
-	c.expectClose()
-	waitClosed()
+	c.send("QUIT")!
+	c.expect_close()
+	wait_closed()
 
 	println("== connection 2: the store outlives connections; then idle")
-	c2 := try dial(port, buf[:])
-	defer c2.c.Close()
-	try c2.send("GET counter")
+	c2 := dial(port, buf[:])!
+	defer c2.c.close()
+	c2.send("GET counter")!
 	println("  (client goes quiet)")
-	c2.expectClose()
-	waitClosed()
+	c2.expect_close()
+	wait_closed()
 
 	println("== connection 3: a line longer than the server's buffer")
-	c3 := try dial(port, buf[:])
-	defer c3.c.Close()
-	// exactly maxLine bytes: the server reads all of them before closing, so the close is a clean
+	c3 := dial(port, buf[:])!
+	defer c3.c.close()
+	// exactly max_line bytes: the server reads all of them before closing, so the close is a clean
 	// FIN (closing with unread data would send a reset, which can overtake the error reply)
-	var long [maxLine]byte
-	println(">", maxLine, "bytes without a newline")
-	try c3.c.Write(strings.AppendRepeat(long[:0], "x", maxLine))
-	c3.expectClose()
-	waitClosed()
+	var long u8[max_line]
+	println(">", max_line, "bytes without a newline")
+	c3.c.write(strings.append_repeat(long[:0], "x", max_line))!
+	c3.expect_close()
+	wait_closed()
 	return nil
 }
 
-func selfTest() {
+fn self_test() {
 	// Every thread runs main, but only the first serves and runs the client, so the transcript
 	// is the same with any number of threads.
-	if runtime.Shard() != 0 {
+	if runtime.shard() != 0 {
 		return
 	}
-	onClose = reportClosed
-	if err := runScript(); err != nil {
-		println("self-test:", err.Error())
-		os.Exit(1)
+	on_close = report_closed
+	if err := run_script(); err != nil {
+		println("self-test:", err.message())
+		os.exit(1)
 	}
 }

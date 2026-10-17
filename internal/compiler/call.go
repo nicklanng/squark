@@ -75,20 +75,20 @@ func (c *Checker) call(e *CallExpr) {
 			case *SIMD:
 				e.Builtin = "simd." + f.Sel.Name
 				switch f.Sel.Name {
-				case "Select":
+				case "select":
 					c.simdSelect(e, simdOf(f.X.info().T))
 					return
-				case "Shuffle", "Swizzle":
+				case "shuffle", "swizzle":
 					c.simdShuffle(e, f.X.info().T, f.Sel.Name)
 					return
-				case "Lookup":
+				case "lookup":
 					c.simdLookup(e, f.X.info().T)
 					return
 				}
 			default:
 				e.Builtin = "error." + f.Sel.Name
 			}
-			if vt, ok := f.X.info().T.Underlying().(*VecType); ok && (e.Builtin == "vec.Append" || e.Builtin == "vec.TryAppend") && len(e.Args) == 1 {
+			if vt, ok := f.X.info().T.Underlying().(*VecType); ok && (e.Builtin == "vec.append" || e.Builtin == "vec.try_append") && len(e.Args) == 1 {
 				// a byte vector also takes a string
 				if !c.valueExpr(e.Args[0], nil) {
 					c.invalid(e)
@@ -125,7 +125,7 @@ func (c *Checker) call(e *CallExpr) {
 		}
 	}
 	if isTimeAfter(e.Callee) && e != c.afterCall {
-		c.errorf(e.P, "time.After can only be used as a select case (case <-time.After(d):): it has no channel to return")
+		c.errorf(e.P, "time.after can only be used as a select case (case <-time.after(d):): it has no channel to return")
 	}
 	owner := c.fn
 	if owner == nil {
@@ -330,12 +330,12 @@ func (c *Checker) conversion(e *CallExpr, t Type) {
 			e.InArena = c.allocArena
 			return
 		}
-		c.errorf(e.P, "converting %s to []byte copies it: allocate the copy in an arena ([]byte(s) in a), or copy into a buffer with copy(buf[:], s)", exprString(x))
+		c.errorf(e.P, "converting %s to u8[] copies it: allocate the copy in an arena (u8[](s) in a), or copy into a buffer with copy(buf[:], s)", exprString(x))
 		c.invalid(e)
 		return
 	}
 	if isString(t) && isInteger(xi.T) {
-		c.errorf(e.P, "cannot convert integer %s to string at run time; use utf8.AppendRune or strconv into a buffer", exprString(x))
+		c.errorf(e.P, "cannot convert integer %s to str at run time; use utf8.append_rune or strconv into a buffer", exprString(x))
 		c.invalid(e)
 		return
 	}
@@ -708,11 +708,11 @@ func (c *Checker) makeBuiltin(e *CallExpr) {
 		hint := "declare storage instead"
 		switch u := t.Underlying().(type) {
 		case *Slice:
-			hint = fmt.Sprintf("declare an array (var buf [N]%s) or a vector (var v [..N]%s) and use a view of it", u.Elem, u.Elem)
+			hint = fmt.Sprintf("declare an array (var buf %s[N]) or a vector (var v %s[..N]) and use a view of it", elemString(u.Elem), elemString(u.Elem))
 		case *Map:
-			hint = fmt.Sprintf("declare storage: var m map[%s]%s cap N", u.Key, u.Value)
+			hint = fmt.Sprintf("declare storage: var m %s[%s; N]", elemString(u.Value), u.Key)
 		case *Chan:
-			hint = fmt.Sprintf("declare storage at package level: var ch chan %s cap N", u.Elem)
+			hint = fmt.Sprintf("declare storage at package level: thread ch %s chan[N]", elemString(u.Elem))
 		}
 		c.errorf(e.P, "make needs an arena (make(...) in a); otherwise %s", hint)
 		c.invalid(e)

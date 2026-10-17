@@ -1,20 +1,20 @@
 // Package errors creates error values. A squark error is a value (code + static message),
 // so creating one never allocates.
-package errors
+module errors
 
-// New returns an error with the given message. The message must be constant data: a string
+// new returns an error with the given message. The message must be constant data: a string
 // constant, or a string copied into a package arena (not a view of a package variable, which can
 // change); the compiler checks this at every call site.
-func New(msg static string) error {
+pub fn new(msg str in static) -> ! {
 	return error(1, msg)
 }
 
-// WithCode returns an error carrying an integer code.
-func WithCode(code int, msg static string) error {
+// with_code returns an error carrying an integer code.
+pub fn with_code(code int, msg str in static) -> ! {
 	return error(code, msg)
 }
 
-// Is reports whether err is target.
-func Is(err, target error) bool {
+// is reports whether err is target.
+pub fn is(err, target error) -> bool {
 	return err == target
 }

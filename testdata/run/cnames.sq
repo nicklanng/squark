@@ -1,28 +1,33 @@
-package main
+program
 
 // squark identifiers that map onto each other's C names must stay distinct
 
-type T struct{ n int }
+struct T {
+	n int
+}
 
-func (t T) M() int { return t.n + 1 }
-func T__M(t T) int  { return t.n + 2 }
+impl T {
+	fn m(self) -> int { return self.n + 1 }
+}
 
-func k_1() int   { return 7 }
-func other() int { return 8 }
+fn t__m(t T) -> int  { return t.n + 2 }
 
-var g__x = 30
+fn k_1() -> int   { return 7 }
+fn other() -> int { return 8 }
 
-func g_x_2() int { return 31 }
+thread g__x = 30
 
-func main() {
+fn g_x_2() -> int { return 31 }
+
+fn main() {
 	main__k := other // C local must not shadow the function k_1 (main__k_1)
 	println(k_1(), main__k())
 
 	t := T{n: 10}
-	println(t.M(), T__M(t))
+	println(t.m(), t__m(t))
 
-	G_main__g := 40 // must not shadow the global g__x
-	println(g__x, G_main__g, g_x_2())
+	g_main__g := 40 // must not shadow the global g__x
+	println(g__x, g_main__g, g_x_2())
 
 	x__ := 1
 	x_ := 2

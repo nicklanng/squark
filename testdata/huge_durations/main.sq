@@ -1,22 +1,17 @@
-package main
+program
 
-// A duration too large to add to the clock (time.Duration(math.MaxInt64)) means "never": it must
+// A duration too large to add to the clock (time.Duration(math.max_int64)) means "never": it must
 // not wrap into the past or stop the thread's other timers. Test program for TestHugeDurations
 // (internal/driver), which kills it if it hangs.
 
-import (
-	"math"
-	"net"
-	"strconv"
-	"time"
-)
+use math, net, strconv, time
 
-const forever = time.Duration(math.MaxInt64)
+const forever = time.Duration(math.max_int64)
 
-var never chan int cap 1
+thread never int chan[1]
 
 task sleeper() pool 1 {
-	time.Sleep(forever)
+	time.sleep(forever)
 	println("sleeper woke")
 }
 
@@ -24,41 +19,41 @@ task selecter() pool 1 {
 	select {
 	case <-never:
 		println("received")
-	case <-time.After(forever):
+	case <-time.after(forever):
 		println("select timed out")
 	}
 }
 
 task waiter(c net.Conn) pool 1 {
-	println("readable:", c.WaitReadable(forever))
+	println("readable:", c.wait_readable(forever))
 }
 
-func main() {
-	l, err := net.Listen("127.0.0.1:0")
+fn main() {
+	l, err := net.listen("127.0.0.1:0")
 	if err != nil {
 		panic(err)
 	}
-	var b [32]byte
-	a := string(strconv.AppendInt(append(b[:0], "127.0.0.1:"...), l.Port()))
-	c, err := net.Dial(a)
+	var b u8[32]
+	a := str(strconv.append_int(append(b[:0], "127.0.0.1:"...), l.port()))
+	c, err := net.dial(a)
 	if err != nil {
 		panic(err)
 	}
-	server, err := l.Accept()
+	server, err := l.accept()
 	if err != nil {
 		panic(err)
 	}
 	_ = c
-	go waiter(server)
-	go sleeper()
-	go selecter()
-	start := time.Now()
-	time.Sleep(100 * time.Millisecond)
-	d := time.Since(start)
-	println(d >= 100*time.Millisecond, d < 5*time.Second)
+	start waiter(server)
+	start sleeper()
+	start selecter()
+	start := time.now()
+	time.sleep(100 * time.millisecond)
+	d := time.since(start)
+	println(d >= 100*time.millisecond, d < 5*time.second)
 	select {
 	case <-never:
-	case <-time.After(50 * time.Millisecond):
+	case <-time.after(50 * time.millisecond):
 		println("main's select timed out")
 	}
 }

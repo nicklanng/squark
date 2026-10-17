@@ -1,36 +1,36 @@
-package main
+program
 
 // A pointer to a vector works like the vector (as a pointer to an array does), and len, cap,
 // index and range work on a vector that isn't in a variable (it is read from a temporary copy).
-type Board struct {
-	cells [3]int
-	hist  [..4]int
+struct Board {
+	cells int[3]
+	hist  int[..4]
 }
 
-func fresh() Board {
+fn fresh() -> Board {
 	b := Board{}
-	b.hist.Push(7)
-	b.hist.Push(8)
+	b.hist.push(7)
+	b.hist.push(8)
 	return b
 }
 
-func fill(v *[..4]int) {
-	v.Push(5)
-	v.Push(6)
+fn fill(v *(int[..4])) {
+	v.push(5)
+	v.push(6)
 	println(len(v), cap(v), v[0], v[1])
-	for i, x := range v {
+	for i, x in v {
 		println(i, x)
 	}
 	s := v[:1]
-	println(len(s), v.Pop(), len(v))
+	println(len(s), v.pop(), len(v))
 }
 
-func main() {
+fn main() {
 	println(len(fresh().cells), len(fresh().hist), fresh().hist[1])
-	for _, h := range fresh().hist {
+	for h in fresh().hist {
 		println(h)
 	}
-	var v [..4]int
+	var v int[..4]
 	fill(&v)
 	println(len(v))
 }

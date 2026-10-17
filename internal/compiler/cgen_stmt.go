@@ -123,6 +123,14 @@ func (g *gen) declStmt(d *GenDecl) {
 		if len(vs.Values) == 0 {
 			for _, n := range vs.Names {
 				v := n.Obj.Var
+				if _, ok := v.Type.Underlying().(*VecType); ok {
+					// A vector's storage past its length is never read (indexing is checked
+					// against len, v[:] ends there, vectors aren't comparable), so only the
+					// length is set: zeroing a large vector on every declaration costs a memset.
+					g.line("%s;", g.localDecl(v.Type, v.CName))
+					g.line("%s.len = 0;", v.CName)
+					continue
+				}
 				g.line("%s = %s;", g.localDecl(v.Type, v.CName), g.zero(v.Type))
 			}
 			continue
@@ -935,9 +943,14 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		} else {
 			n := g.tmp()
 			ct := g.ctype(xt)
+			lo := "0"
+			if s.Lo != nil {
+				lo = g.tmp()
+				g.line("%s %s = %s;", ct, lo, g.expr(s.Lo))
+			}
 			g.line("%s %s = %s;", ct, n, g.expr(s.X))
-			g.versioned(s, g.planLoop(iv, s.Body), func() loopBound { return loopBound{"sq_inrange", "0", n} }, func() {
-				g.line("for (%s %s = 0; %s < %s; %s++) {", ct, i, i, n, i)
+			g.versioned(s, g.planLoop(iv, s.Body), func() loopBound { return loopBound{"sq_inrange", lo, n} }, func() {
+				g.line("for (%s %s = %s; %s < %s; %s++) {", ct, i, lo, i, n, i)
 				g.ind++
 				g.rangeVar(s.Key, s.Define, i, xt)
 				body()

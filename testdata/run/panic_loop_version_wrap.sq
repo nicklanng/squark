@@ -1,11 +1,11 @@
-package main
+program
 
-const maxInt = 9223372036854775807
+const max_int = 9223372036854775807
 
-// i <= maxInt never ends: i wraps around to negative values, and with this offset the index
+// i <= max_int never ends: i wraps around to negative values, and with this offset the index
 // comes back into range before it leaves it. The range test must reject the loop, so the
 // indexes stay checked and panic at [3].
-func upTo(a []int, last int, off int) int {
+fn up_to(a int[], last int, off int) -> int {
 	s := 0
 	for i := last - 1; i <= last; i++ {
 		s += a[i+off]
@@ -13,8 +13,8 @@ func upTo(a []int, last int, off int) int {
 	return s
 }
 
-func main() {
-	a := []int{1, 2, 3}
-	println(upTo(a, 2, 0))
-	println(upTo(a, maxInt, -maxInt+1))
+fn main() {
+	a := int[]{1, 2, 3}
+	println(up_to(a, 2, 0))
+	println(up_to(a, max_int, -max_int+1))
 }

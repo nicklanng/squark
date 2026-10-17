@@ -31,6 +31,7 @@ type lexToken struct {
 	tok     Tok
 	lit     string
 	pos     Pos
+	end     Pos // just after the token
 	pragmas []string
 	doc     []string
 }
@@ -177,8 +178,9 @@ again:
 	}
 
 	t := l.scan(p)
+	t.end = l.pos()
 	switch t.tok {
-	case IDENT, INT, FLOAT, CHAR, STRING, BREAK, CONTINUE, RETURN, INC, DEC, RPAREN, RBRACK, RBRACE, ARENA:
+	case IDENT, INT, FLOAT, CHAR, STRING, BREAK, CONTINUE, RETURN, INC, DEC, RPAREN, RBRACK, RBRACE, ARENA, BANG, CHAN:
 		l.insertSemi = true
 	default:
 		l.insertSemi = false
@@ -252,6 +254,10 @@ func (l *lexer) scan(p Pos) lexToken {
 			l.next()
 			return lexToken{tok: DEC, pos: p}
 		}
+		if l.peekc() == '>' {
+			l.next()
+			return lexToken{tok: ARROWR, pos: p}
+		}
 		return two('=', SUB_ASSIGN, SUB)
 	case '*':
 		return two('=', MUL_ASSIGN, MUL)
@@ -264,7 +270,7 @@ func (l *lexer) scan(p Pos) lexToken {
 	case '&':
 		if l.peekc() == '&' {
 			l.next()
-			return lexToken{tok: LAND, pos: p}
+			return lexToken{tok: AMPAMP, pos: p}
 		}
 		if l.peekc() == '^' {
 			l.next()
@@ -274,7 +280,7 @@ func (l *lexer) scan(p Pos) lexToken {
 	case '|':
 		if l.peekc() == '|' {
 			l.next()
-			return lexToken{tok: LOR, pos: p}
+			return lexToken{tok: BARBAR, pos: p}
 		}
 		return two('=', OR_ASSIGN, OR)
 	case '<':
@@ -296,7 +302,7 @@ func (l *lexer) scan(p Pos) lexToken {
 	case '=':
 		return two('=', EQL, ASSIGN)
 	case '!':
-		return two('=', NEQ, NOT)
+		return two('=', NEQ, BANG)
 	case ':':
 		return two('=', DEFINE, COLON)
 	case '.':
@@ -362,7 +368,7 @@ func (l *lexer) number(p Pos) lexToken {
 	for isDigit(l.peekc()) || l.peekc() == '_' {
 		l.next()
 	}
-	if l.peekc() == '.' {
+	if l.peekc() == '.' && l.peekAt(1) != '.' { // 0..n is a range, not 0. and .n
 		isFloat = true
 		l.next()
 		for isDigit(l.peekc()) || l.peekc() == '_' {

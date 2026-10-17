@@ -1,7 +1,7 @@
-package main
+program
 
-func main() {
-	arena a 1K {
+fn main() {
+	with arena a 1K {
 		x := "a"
 		x + "b" in a // ERROR "is not used"
 		len(x) in a // ERROR "is not used"

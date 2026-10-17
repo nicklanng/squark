@@ -1,9 +1,10 @@
 # squark language reference
 
-This is the precise reference for writing squark. It assumes you know Go: squark is Go-shaped, and
-this document lists every place where it differs. Anything not mentioned here behaves as in Go. The
-standard library API is in [stdlib.md](stdlib.md), which is generated from the compiler and always
-current.
+This is the precise reference for writing squark. squark grew out of Go, and its semantics are
+still Go's wherever this document doesn't say otherwise (integer arithmetic, slices, strings,
+`switch`, `select`, `defer`, method sets...). Its syntax is its own: this document describes all of
+it. The standard library API is in [stdlib.md](stdlib.md), which is generated from the compiler and
+always current.
 
 ## 0. The ten rules that matter most
 
@@ -13,23 +14,24 @@ current.
 2. **References may not outlive their memory.** The compiler checks this across function calls.
    Returning `&local`, or `buf[:]` of a local array, is an error: take the storage as a parameter
    instead.
-3. **Callers provide buffers.** APIs take a `[]byte`/`[]T` to fill and return a view of it:
-   `strconv.AppendInt(dst, n)`, `d.String(buf)`, `stmt.ColumnText(i, buf)`.
+3. **Callers provide buffers.** APIs take a `u8[]`/`T[]` to fill and return a view of it:
+   `strconv.append_int(dst, n)`, `d.string(buf)`, `stmt.column_text(i, buf)`.
 4. **Capacities are fixed.** `append` past capacity panics (unless `... in arena`), maps have a
-   declared capacity (`map[K]V cap N`), and channels have one (`chan T cap N`).
+   declared capacity (`V[K; N]`), and channels have one (`T chan[N]`).
 5. **No recursion**, direct or indirect, because every stack size is proven at compile time. Use a
-   loop with an explicit stack such as a `[..N]T` vector.
+   loop with an explicit stack such as a `T[..N]` vector.
 6. **No closures, method values, interfaces or generic types.** Use named functions, func-typed
    values of named functions, `switch`, and concrete types. For code that works on several types,
    a function's parameters can be `anytype` (§4): each call makes a copy for its argument types.
-7. **`go` only starts a `task`:** `task f(args) pool N { ... }`. Tasks have no results. Arguments to
-   `go` and values sent on channels must not reference stack or arena memory.
-8. **Errors are values with a constant message:** `const ErrX = error(404, "not found")`. They can't
-   be formatted with dynamic text; use the code, or log separately.
-9. **`string(b)` is a zero-copy view of `b`.** `[]byte(s)` is an error without an arena.
+7. **`start` only starts a `task`:** `task f(args) pool N { ... }`. Tasks have no results.
+   Arguments to `start` and values sent on channels must not reference stack or arena memory.
+8. **Errors are values with a constant message:** `fault NotFound 404 "not found"`. They can't be
+   formatted with dynamic text; use the code, or log separately. A `!` after a call returns its
+   error from the enclosing function: `f := os.open(path)!`.
+9. **`str(b)` is a zero-copy view of `b`.** `u8[](s)` is an error without an arena.
 10. **Cooperative within a thread; threads share nothing mutable.** A thread's goroutines switch
-    only at blocking operations (I/O, channel operations, `time.Sleep`, `go` on a full pool,
-    `runtime.Gosched()`) and in the loops of tasks marked `preemptible`. So data shared between a
+    only at blocking operations (I/O, channel operations, `time.sleep`, `start` on a full pool,
+    `runtime.gosched()`) and in the loops of tasks marked `preemptible`. So data shared between a
     thread's goroutines needs no locks as long as you don't block mid-update. With `threads N` (or
     `workers N`) each thread runs its own copy of `main` with its own package variables; threads
     share only read-only data and shared channels. No lock is ever needed. A busy loop in an
@@ -38,104 +40,128 @@ current.
 
 ## 1. Lexical elements
 
-- **Keywords:** Go's keywords except `fallthrough`, `goto` and `interface`, which are not
-  supported. Added keywords: `arena`, `extern`, `in`, `task`, `try`. `shared` and `thread` mark
-  a package-level `var` (§4) but stay ordinary identifiers elsewhere; so does `select`, which
-  starts a select statement only when followed by `{`.
+- **Keywords:** `and`, `arena`, `break`, `case`, `chan`, `const`, `continue`, `default`, `defer`,
+  `else`, `enum`, `extern`, `fault`, `fn`, `for`, `if`, `in`, `not`, `or`, `pub`, `return`,
+  `struct`, `switch`, `task`, `var`, `while`.
 - **Contextual words** (identifiers elsewhere):
-  - `pool` and `stack` after a signature.
-  - `from` and `static` after results.
-  - `shared` before a package-level `var`.
-  - `static` before a parameter type, and `into` after one.
-  - `cap` after a `map`/`chan` type.
-  - `budget`, `pool`, `workers`, `threads`, `link`, `cflags` and `ldflags` as top-level directives.
+  - `program`, `module` and `use` at the start of a file; `as` in a `use`.
+  - `thread` and `shared` before a package-level variable.
+  - `start` before a call (`start f(x)`), `loop` before `{`, `with` before `arena`, `select`
+    before `{`.
+  - `pool`, `stack`, `blocking` and `preemptible` after a signature; `c"symbol"` after an extern's.
+  - `static` after `in` in a signature.
+  - `budget`, `pool`, `workers`, `threads`, `link`, `cflags` and `ldflags` in the file header.
+- **Member names may be spelled like keywords.** After a `.`, as a struct field, as a method's
+  name, as an enum member and as a key in a struct literal, any word is a name: `r.arena`,
+  `Pair{in: 1}`, `Kind.int`.
+- **Operators** beyond the arithmetic and comparison ones: `and`, `or` and `not` (logic), `!` after
+  an expression (propagate its error, §5), `->` (results), `..` (ranges and vector types), `<-`
+  (channels), `in` (allocate in an arena; provenance). `&&`, `||` and a prefix `!` are errors that
+  name the word to write.
 - **Size literals:** a decimal integer immediately followed by `K`, `M` or `G` is multiplied by 2^10,
   2^20 or 2^30: `64K == 65536`.
-- **`..`** appears only in vector types: `[..N]T`.
 - **Pragmas:** `//squark:noinline` before a function stops clang from inlining it. No other pragmas
   exist.
-- Comments, string/rune/number literals and semicolon insertion are as in Go.
+- **Semicolons** are inserted at the end of a line that ends in an identifier, a literal, `)`, `]`,
+  `}`, `!`, `chan`, `++`, `--`, `return`, `break` or `continue`, as in Go. Comments, string, rune and
+  number literals are as in Go.
+- **Names:** by convention functions, methods, fields, variables and constants are `snake_case`;
+  types and faults are `PascalCase`. Visibility doesn't depend on the spelling (see `pub`, §2).
 
 ## 2. Program structure
 
-```go
-package main
+```squark
+program {                     // the main package; a library file starts with `module name`
+    budget 128M               // program only: fail the build if worst-case memory exceeds this
+    pool http.serve_conn 512  // program only: resize a task's pool (pkg.task or task)
+    workers 4                 // program only: run 4 processes (or auto: one per core); see §9
+    threads auto              // program only: a scheduler thread per core (or N); see §9
+    link "sqlite3"            // link a C library (any package)
+    cflags "-I/opt/include"   // C compiler flags for this package's .c files
+    ldflags "-L/opt/lib"      // linker flags
+}
 
-import (
-    "http"          // standard library packages are imported by path: "http", "math/rand"
-    "./mylib"       // packages in your project by relative path
-)
-
-// top-level directives come after the imports
-budget 128M                 // package main only: fail the build if worst-case memory exceeds this
-pool http.serveConn 512     // package main only: resize a task's pool (pkg.task or task)
-workers 4                   // package main only: run 4 processes (or auto: one per core); see §9
-threads auto                // package main only: a scheduler thread per core (or N); see §9
-link "sqlite3"              // link a C library (any package)
-cflags "-I/opt/include"     // C compiler flags for this package's .c files
-ldflags "-L/opt/lib"        // linker flags
+use http, math/rand, ./mylib  // std packages by path, project packages by relative path
+use strings as s              // a different name for an import
 
 const ...
-var ...
-type ...
-func ...
-task ...
-extern ...
+enum ...
+fault ...
+thread ... / shared ...
+struct ... / Name: T
+fn ... / task ... / extern fn ...
 arena ...
 ```
 
-- A package is a directory of `.sq` files. `.c` files in the same directory are compiled and linked
-  as C shims.
-- `func main()` in package `main` is the entry point; when it returns, the program exits.
-- There are no `init` functions. Package-level `var` initializers run in declaration order, packages
-  in import order. An initializer that reads a variable not initialized yet (a later one, or itself
-  through a function, `var x = f()` with `f` reading `x`) sees its zero value; Go would reorder the
-  initializers or report an initialization cycle.
-- Exported means capitalized, as in Go.
+- A package is a directory of `.sq` files. Every file starts with the same header: `program` for
+  the main package, `module NAME` for a library (its name, as importers use it). The `{ ... }`
+  block of directives is optional and may be in any of the package's files. `.c` files in the
+  same directory are compiled and linked as C shims.
+- `use` lists imports: unquoted paths (`math/rand`, `./lib`, `../util`), or quoted ones for paths
+  with other characters. `use ( ... )` takes one per line.
+- `fn main()` in the program is the entry point; when it returns, the program exits.
+- There are no `init` functions. Package-level initializers run in declaration order, packages in
+  import order. An initializer that reads a variable not initialized yet (a later one, or itself
+  through a function, `thread x = f()` with `f` reading `x`) sees its zero value.
+- **`pub`** makes a package-level declaration (`pub fn`, `pub type`, `pub const`, `pub fault`,
+  `pub thread`, `pub arena`...) or a struct field (`pub name str`) visible to importers; in a
+  group, `pub` goes before each spec it applies to (or before the group for all of them).
+  Nothing imports the program, so its declarations need no `pub`, and the standard library's
+  `anytype` functions can use the fields and methods of the program's types.
 
 ## 3. Types
 
+Types are written with their modifiers after the element type, read left to right:
+`u8[64]` is "u8, 64 of them". A pointer `*` comes first and binds tighter than the brackets, as
+in C: `*Node[]` is a slice of `*Node`; a pointer to an array is `*(u8[64])`.
+
 | type | notes |
 |---|---|
-| `bool`, `string`, `int` (64-bit), `int8`…`int64`, `uint` (64-bit), `uint8`…`uint64`, `uintptr`, `float32`, `float64` | as Go; `byte` = `uint8`, `rune` = `int32` |
+| `bool`, `str`, `int` (64-bit), `i8` `i16` `i32` `i64`, `uint` (64-bit), `u8` `u16` `u32` `u64`, `uintptr`, `f32`, `f64` | as in Go; `rune` is `i32` |
 | `rawptr` | untyped C pointer (`void*`) for extern calls; converts to and from pointers and `uintptr`, and is not lifetime-checked |
-| `error` | a value: integer code + constant message (§5). Methods `Error() string`, `Code() int`. Zero value is `nil`, whose `Error()` is `""` and `Code()` is 0 (not a panic: an error isn't an interface) |
-| `arena` | a reference to arena storage. Methods `Used()`, `Left()`, `Cap()` (all `int`) |
-| `[N]T` | array (storage) |
-| `[]T` | slice (view) |
-| `[..N]T` | vector: inline storage for N elements plus a length (storage) |
-| `float32x4`, `uint8x16`, … | SIMD vector: N numbers that operators work on lane by lane (below) |
-| `map[K]V cap N` | map storage with fixed capacity N (`cap(m)` is N, also through a view; 0 for a nil map). K is an integer, string, bool or pointer type |
-| `map[K]V` | map view |
-| `chan T cap N` | channel storage with an N-element buffer (`cap 0` = unbuffered) |
-| `chan T` | channel view (no direction types) |
-| `*T`, `struct{...}`, `func(...) ...` | as Go. A func value can only be a named top-level function |
+| `error` | a value: integer code + constant message (§4). Methods `message() str`, `code() int`. Zero value is `nil`, whose `message()` is `""` and `code()` is 0 (not a panic: an error isn't an interface) |
+| `arena` | a reference to arena storage. Methods `used()`, `left()`, `cap()` (all `int`) |
+| `T[N]` | array (storage) |
+| `T[]` | slice (view) |
+| `T[..N]` | vector: inline storage for N elements plus a length (storage) |
+| `f32x4`, `u8x16`, … | SIMD vector: N numbers that operators work on lane by lane (below) |
+| `V[K; N]` | map storage with fixed capacity N (`cap(m)` is N, also through a view; 0 for a nil map). K is an integer, string, bool or pointer type |
+| `V[K]` | map view |
+| `T chan[N]` | channel storage with an N-element buffer (`chan[0]` = unbuffered) |
+| `T chan` | channel view (no direction types) |
+| `*T`, `struct { ... }`, `fn(int) -> bool` | pointer, struct, function. A func value can only be a named top-level function |
+
+`T[x]` is an array when `x` is a constant and a map when `x` names a type: `int[n]` with `const n
+= 4` is an array, `int[str]` a map. A function or channel-view element is parenthesized:
+`(fn() -> int)[]`, `(Job chan)[4]` (brackets right after `chan` are its capacity:
+`Req chan[8][4]` is four channels of eight).
 
 Not supported: interfaces, generic types (functions can take `anytype` parameters, §4), complex
 numbers, type aliases, embedded fields, local type declarations, directional channel types, and
 named types that refer to themselves only through pointers, slices, arrays and func types
-(`type State func() State`, `type L []L`): put a struct in between
-(`type State struct{ next func() State }`).
+(`State: fn() -> State`, `L: L[]`): put a struct in between
+(`struct State { next fn() -> State }`).
 
 ### Storage and views
 
-A storage value (`[N]T`, `[..N]T`, `map[K]V cap N`, `chan T cap N`) contains its elements inline.
-Declaring it is the allocation, and its zero value is ready to use:
+A storage value (`T[N]`, `T[..N]`, `V[K; N]`, `T chan[N]`) contains its elements inline. Declaring
+it is the allocation, and its zero value is ready to use:
 
-```go
-var seen map[string]int cap 1024
-seen["x"]++                 // no make needed
-var jobs chan Job cap 16    // package level: shared by all goroutines (on its thread, with threads N)
-var line [..256]byte
+```squark
+thread seen int[str; 1024]
+seen["x"]++                  // no make needed
+shared jobs Job chan[16]     // one channel for every scheduler thread (§4)
+var line u8[..256]
 ```
 
 Where a view type is expected (assignment, argument, return), addressable storage converts to a view
-implicitly. Indexing, `range`, `len`, `delete`, `close`, sends and receives work on storage directly:
+implicitly. Indexing, `for ... in`, `len`, `delete`, `close`, sends and receives work on storage
+directly:
 
-```go
-func count(m map[string]int, w string) { m[w]++ }
-count(seen, "x")            // seen converts to map[string]int
-for k, v := range seen {}
+```squark
+fn count(m int[str], w str) { m[w]++ }
+count(seen, "x")             // seen converts to int[str]
+for k, v in seen {}
 ```
 
 - The view points into the storage, so the storage must outlive it (rule 2).
@@ -143,38 +169,36 @@ for k, v := range seen {}
   themselves. Pass a view. The same holds for a struct, array or vector that contains map or
   channel storage: copying one out of a variable is an error (use a pointer), while a fresh value
   (`T{}`, a call result) is fine because its storage is still unused. This covers every copy:
-  `copy`, `append(s, xs...)`, a vector's `Append`, an `append` that grows into an arena, calling a
-  value-receiver method (give it a pointer receiver), and a named result (it is a variable that is
-  copied out on return; return an unnamed result built by a literal instead).
+  `copy`, `append(s, xs...)`, a vector's `append`, an `append` that grows into an arena, calling a
+  method that takes `self` (take `&self` instead), and a named result (it is a
+  variable that is copied out on return; return an unnamed result built by a literal instead).
 - Arrays and vectors copy by value, like Go arrays.
 
-### Vectors `[..N]T`
+### Vectors `T[..N]`
 
-```go
-var v [..8]int
-v.Push(1)            // panics if len(v) == 8
-ok := v.TryPush(2)   // false if full
-v.Append(xs)         // appends a []int; panics if it doesn't all fit
-ok = v.TryAppend(xs) // false (and appends nothing) if it doesn't all fit
-x := v.Pop()         // panics if empty
-v.Clear()            // len(v) = 0
+```squark
+var v int[..8]
+v.push(1)            // panics if len(v) == 8
+ok := v.try_push(2)  // false if full
+v.append(xs)         // appends an int[]; panics if it doesn't all fit
+ok = v.try_append(xs) // false (and appends nothing) if it doesn't all fit
+x := v.pop()         // panics if empty
+v.clear()            // len(v) = 0
 len(v); cap(v)       // cap is the constant 8
 v[i]                 // bounds-checked against len(v)
-v[:]                 // a []int view with len == cap == len(v)
-for i, x := range v {}
-w := [..4]Point{{1, 2}, {3, 4}}   // literal: len 2, cap 4
+v[:]                 // an int[] view with len == cap == len(v)
+for i, x in v {}
+w := Point[..4]{{1, 2}, {3, 4}}   // literal: len 2, cap 4
 ```
 
-A byte vector's `Append` and `TryAppend` take a string too: a `[..N]byte` holds text by value, so
-it can go on a shared channel to another thread (`string(v[:])` reads it back).
+A byte vector's `append` and `try_append` take a string too: a `u8[..N]` holds text by value, so
+it can go on a shared channel to another thread (`str(v[:])` reads it back).
 
-`Push`, `TryPush`, `Append`, `TryAppend`, `Pop` and `Clear` need an addressable vector. `len`, `cap`, indexing and
-`range` also work on a vector that isn't in a variable (a call's result), reading a copy; its
-elements can't then be assigned or have their address taken. A pointer to a vector works like the
-vector (`p.Push(x)`, `len(p)`, `p[i]`), as a pointer to an array does. Vectors aren't comparable
-(`==`), nor is a struct or array containing one.
-
-## 4. Declarations
+`push`, `try_push`, `append`, `try_append`, `pop` and `clear` need an addressable vector. `len`,
+`cap`, indexing and `for ... in` also work on a vector that isn't in a variable (a call's
+result), reading a copy; its elements can't then be assigned or have their address taken. A
+pointer to a vector works like the vector (`p.push(x)`, `len(p)`, `p[i]`), as a pointer to an
+array does. Vectors aren't comparable (`==`), nor is a struct or array containing one.
 
 ### SIMD vectors
 
@@ -184,36 +208,36 @@ and 256 bits wide:
 
 | element | 128-bit | 256-bit |
 |---|---|---|
-| `int8`, `uint8` | `int8x16`, `uint8x16` | `int8x32`, `uint8x32` |
-| `int16`, `uint16` | `int16x8`, `uint16x8` | `int16x16`, `uint16x16` |
-| `int32`, `uint32` | `int32x4`, `uint32x4` | `int32x8`, `uint32x8` |
-| `int64`, `uint64` | `int64x2`, `uint64x2` | `int64x4`, `uint64x4` |
-| `float32` | `float32x4` | `float32x8` |
-| `float64` | `float64x2` | `float64x4` |
+| `i8`, `u8` | `i8x16`, `u8x16` | `i8x32`, `u8x32` |
+| `i16`, `u16` | `i16x8`, `u16x8` | `i16x16`, `u16x16` |
+| `i32`, `u32` | `i32x4`, `u32x4` | `i32x8`, `u32x8` |
+| `i64`, `u64` | `i64x2`, `u64x2` | `i64x4`, `u64x4` |
+| `f32` | `f32x4` | `f32x8` |
+| `f64` | `f64x2` | `f64x4` |
 
 A 256-bit vector is two 128-bit registers where the CPU has no wider ones (arm64, x86-64
 without AVX).
 
-```go
-a := float32x4{1, 2, 3, 4}       // a literal; missing lanes are 0
-b := float32x4(x)                // broadcast: x (a float32) in every lane
-c := float32x4(xs[i:])           // load xs[i], …, xs[i+3]; panics if len(xs[i:]) < 4
-u := uint8x16(s[i:])             // a byte vector also loads from a string
-d := float32x4(int32x4{1, 2})    // lane by lane conversion: same lane count
-a*b + c                          // operators work lane by lane
-a * 2                            // an untyped constant is broadcast
-m := a > b                       // a mask: int32x4, -1 where a > b, 0 elsewhere
-m.Select(a, b)                   // a where the mask is nonzero, b elsewhere
-m.Any(); m.All()                 // some / every lane nonzero
-m.First(); m.Last()              // index of the first / last nonzero lane, or -1
-min(a, b); max(a, b, c)          // lane by lane
-a.Sum(); a.Min(); a.Max()        // across the lanes, giving a float32
-a.Store(ys[i:])                  // write the lanes to ys[i:]; panics if len(ys[i:]) < 4
-a[2]; a[2] = 7; len(a)           // a lane (bounds-checked); len is the constant 4
-a.Swizzle(3, 2, 1, 0)            // rearrange lanes: lane i of the result is a[index i]
-a.Shuffle(b, 0, 4, 1, 5)         // the same from a and b: indexes 0-3 are a's, 4-7 are b's
-t := uint8x16("0123456789abcdef") // a table, loaded from a constant
-t.Lookup(x >> 4)                 // lane i is t[(x>>4)[i]]: x a uint8x16 (or uint8x32)
+```squark
+a := f32x4{1, 2, 3, 4}         // a literal; missing lanes are 0
+b := f32x4(x)                  // broadcast: x (an f32) in every lane
+c := f32x4(xs[i:])             // load xs[i], …, xs[i+3]; panics if len(xs[i:]) < 4
+u := u8x16(s[i:])              // a byte vector also loads from a string
+d := f32x4(i32x4{1, 2})        // lane by lane conversion: same lane count
+a*b + c                        // operators work lane by lane
+a * 2                          // an untyped constant is broadcast
+m := a > b                     // a mask: i32x4, -1 where a > b, 0 elsewhere
+m.select(a, b)                 // a where the mask is nonzero, b elsewhere
+m.any(); m.all()               // some / every lane nonzero
+m.first(); m.last()            // index of the first / last nonzero lane, or -1
+min(a, b); max(a, b, c)        // lane by lane
+a.sum(); a.min(); a.max()      // across the lanes, giving an f32
+a.store(ys[i:])                // write the lanes to ys[i:]; panics if len(ys[i:]) < 4
+a[2]; a[2] = 7; len(a)         // a lane (bounds-checked); len is the constant 4
+a.swizzle(3, 2, 1, 0)          // rearrange lanes: lane i of the result is a[index i]
+a.shuffle(b, 0, 4, 1, 5)       // the same from a and b: indexes 0-3 are a's, 4-7 are b's
+t := u8x16("0123456789abcdef") // a table, loaded from a constant
+t.lookup(x >> 4)               // lane i is t[(x>>4)[i]]: x a u8x16 (or u8x32)
 ```
 
 - Operators: `+ - *` on all vectors, `/` on float vectors only (no CPU divides integer vectors:
@@ -222,51 +246,78 @@ t.Lookup(x >> 4)                 // lane i is t[(x>>4)[i]]: x a uint8x16 (or uin
   Go: a count of at least the lane width gives 0 (or the sign for `>>` of a signed lane), and a
   negative count panics.
 - Both operands have the same type. An untyped constant is broadcast; a typed scalar must be
-  broadcast with a conversion (`v * float32x4(k)`).
-- Comparisons give a mask, a signed integer vector as wide as the lanes (`float64x2` compares to
-  `int64x2`), not a `bool`. Compare whole vectors with `(a == b).All()`. So SIMD vectors can't be
+  broadcast with a conversion (`v * f32x4(k)`).
+- Comparisons give a mask, a signed integer vector as wide as the lanes (`f64x2` compares to
+  `i64x2`), not a `bool`. Compare whole vectors with `(a == b).all()`. So SIMD vectors can't be
   map keys and a struct holding one can't be compared with `==`.
 - A lane of a variable can be assigned (`v[i] = x`, `v[i] += x`, `v[i]++`), but not addressed
-  (`&v[i]` is an error). A pointer to a SIMD vector works like the vector (`p[i]`, `p.Sum()`).
-- `Swizzle` and `Shuffle` take one constant index per lane; they compile to the CPU's shuffle
-  instructions (reversing a `int32x4` is two arm64 instructions).
-- `Lookup` is a table lookup with variable indexes, on a 16-lane byte vector (`uint8x16` or
-  `int8x16`), the table. It takes 16 or 32 byte indexes (`uint8x16`, `uint8x32` or the signed
-  ones) and gives as many lanes of the table's type: lane `i` is `t[idx[i]]`, or 0 where
-  `idx[i]` is 16 or more (a negative signed index is 128 or more). It is one instruction on
-  arm64 (`tbl`) and x86-64 from `-cpu x86-64-v2` (`pshufb`); baseline x86-64 has none and looks
-  the lanes up one at a time. Decoders use it to map nibbles to classes or digits (hex, base64,
-  UTF-8 validation).
-- `Sum` adds the upper half of the lanes to the lower half until one lane is left, so the order of
-  float additions is fixed, the same on every CPU. `Min` and `Max` pick lanes the way the builtin
+  (`&v[i]` is an error). A pointer to a SIMD vector works like the vector (`p[i]`, `p.sum()`).
+- `swizzle` and `shuffle` take one constant index per lane; they compile to the CPU's shuffle
+  instructions (reversing an `i32x4` is two arm64 instructions).
+- `lookup` is a table lookup with variable indexes, on a 16-lane byte vector (`u8x16` or
+  `i8x16`), the table. It takes 16 or 32 byte indexes (`u8x16`, `u8x32` or the signed ones) and
+  gives as many lanes of the table's type: lane `i` is `t[idx[i]]`, or 0 where `idx[i]` is 16 or
+  more (a negative signed index is 128 or more). It is one instruction on arm64 (`tbl`) and
+  x86-64 from `-cpu x86-64-v2` (`pshufb`); baseline x86-64 has none and looks the lanes up one at
+  a time. Decoders use it to map nibbles to classes or digits (hex, base64, UTF-8 validation).
+- `sum` adds the upper half of the lanes to the lower half until one lane is left, so the order of
+  float additions is fixed, the same on every CPU. `min` and `max` pick lanes the way the builtin
   `min` and `max` do.
 - Converting float lanes to integer lanes saturates, as scalar conversions do (§5).
-- `Any`, `All`, `First`, `Last` and `Select` are methods of integer vectors; `Select` takes two vectors with the
-  mask's lane count and lane width (`int32x4` selects between `float32x4`s or `uint32x4`s).
+- `any`, `all`, `first`, `last` and `select` are methods of integer vectors; `select` takes two
+  vectors with the mask's lane count and lane width (an `i32x4` selects between `f32x4`s or
+  `u32x4`s).
 - `println(v)` prints `[a b c d]`.
 - SIMD types can't be constants. They have no references, so they go anywhere a number can:
-  struct fields, arrays, channels, `go` arguments.
-- A named type can have a SIMD type (`type Vec4 float32x4`) and keeps its operators and
-  methods; its own methods can't be named like a built-in one.
+  struct fields, arrays, channels, `start` arguments.
+- A named type can have a SIMD type (`Vec4: f32x4`) and keeps its operators and methods; its
+  own methods can't be named like a built-in one.
 
 Most loops vectorize without these types (§9). Use them where clang can't: float sums (it keeps
 the source order), searches that stop early, and data-dependent selects.
 
-### Functions, tasks, externs
+## 4. Declarations
 
-```go
-func name(params) results { ... }
+### Functions, methods, tasks, externs
 
-task name(params) pool N { ... }               // a goroutine entry point; no results
-task name(params) pool N stack 64K { ... }     // also assert a stack upper bound
-task name(params) pool N preemptible { ... }   // its loops may yield after a time slice
+```squark
+fn name(a int, b, c str) -> int { ... }      // parameters as in Go: a name list, then the type
+fn f() { ... }                               // no results
+fn f() -> (int, bool) { ... }                // several results
+fn f() -> (n int, err error) { ... }         // named results
+fn open(path str) -> File ! { ... }          // ! adds an error result: (File, error)
+fn check() -> ! { ... }                      // just an error
+fn divmod(a, b int) -> (int, int) ! { ... }  // (int, int, error)
 
-extern func sqrt(x float64) float64 stack 1K               // C function of the same name
-extern "sq_read" func read(fd int, b []byte) int stack 8K  // C symbol differs from the name
-extern "slow_query" func query(q string) int stack 128K blocking // runs on a helper thread
+struct Stack {
+    items int[..64]
+}
+
+impl Stack {                                 // methods: in impl blocks, self or &self first
+    fn push(&self, x int) { ... }            // &self: a pointer to the Stack (*Stack)
+    fn len(self) -> int { ... }              // self: a copy of it
+}
+impl Stack {                                 // another impl block (in any file of the package)
+    fn pop(&self) -> int { ... }
+}
+
+task name(params) pool N { ... }             // a goroutine entry point; no results
+task name(params) pool N stack 64K { ... }   // also assert a stack upper bound
+task name(params) pool N preemptible { ... } // its loops may yield after a time slice
+
+extern fn sqrt(x f64) -> f64 stack 1K                        // the C function of the same name
+extern fn read(fd int, b u8[]) -> int stack 8K c"sq_read"    // the C symbol differs from the name
+extern fn query(q str) -> int stack 128K blocking c"slow_query" // runs on a helper thread
 ```
 
-- `pool N`: at most N instances run at once. `go` on a full pool waits for a slot.
+- A method is declared in an `impl T { ... }` block, for a struct, enum or named type of the same
+  package; a type may have any number of impl blocks, in any of the package's files. Its first
+  parameter is `self`, a copy of the value (type `T`), or `&self`, a pointer to it (type `*T`), and
+  `self` is an ordinary variable in the body (`self.n += 1`). It is called `x.m(...)`; as in Go, a
+  `&self` method can be called on an addressable value (its address is taken) and a `self` method
+  on a pointer.
+- Each method's name belongs to its type, so two types can both have a `close`.
+- `pool N`: at most N instances run at once. `start` on a full pool waits for a slot.
 - `preemptible` on a task: once one of its goroutines has run for a time slice (about 10ms)
   without blocking, it yields at the next loop iteration, in its own code or any function it
   calls, so a long computation doesn't hold up its thread. Those functions get a check at each
@@ -275,9 +326,9 @@ extern "slow_query" func query(q string) int stack 128K blocking // runs on a he
   that other goroutines read half-updated across a loop iteration (or update it in one step).
 - `stack N` on an extern is required: it's the C function's stack budget used in the stack proof.
   On a task it is an assertion, and the build fails if the proven size is larger.
-- Extern parameter types map to C as follows: `int`/`int64` → `int64_t`, `int32` → `int32_t`, and so
-  on; `string` → `struct { const uint8_t *p; int64_t len; }`; `[]byte` → `struct { uint8_t *p;
-  int64_t len, cap; }`; `*T`/`rawptr` → pointers.
+- Extern parameter types map to C as follows: `int`/`i64` → `int64_t`, `i32` → `int32_t`, and so
+  on; `str` → `struct { const uint8_t *p; int64_t len; }`; `u8[]` → `struct { uint8_t *p; int64_t
+  len, cap; }`; `*T`/`rawptr` → pointers.
 - Extern results are trusted to point to static memory unless provenance is declared.
 - `blocking` on an extern runs each call on a helper thread while the calling goroutine waits, so
   a C call that blocks (a slow query, a lock wait, a read from a slow disk) doesn't stop the other
@@ -300,34 +351,33 @@ extern "slow_query" func query(q string) int stack 128K blocking // runs on a he
 
 ### anytype parameters
 
-```go
-func Slice(s anytype, less anytype) { ... }  // sort.Slice(entries, byCount)
-func WriteString(w anytype, s string) { ... } // json.WriteString(&buf, s), json.WriteString(w, s)
+```squark
+fn slice(s anytype, less anytype) { ... }    // sort.slice(entries, by_count)
+fn write_string(w anytype, s str) { ... }    // json.write_string(&buf, s), json.write_string(w, s)
 ```
 
 A parameter of type `anytype` takes its type from each call, as in Zig: the compiler makes a copy
 of the function for each combination of argument types it is called with (an instance), and
 checks, proves and compiles each copy like any other function. The body may use the parameter
 however its type allows (index it, call it, call its methods); a type that doesn't fit is an error
-at the call, reported where the body uses it, with the instance named ("in sort.Slice with
-s []main.Entry, called at main.go:40"). Nothing happens at run time and nothing is boxed; each
+at the call, reported where the body uses it, with the instance named ("in sort.slice with
+s main.Entry[], called at main.sq:40"). Nothing happens at run time and nothing is boxed; each
 instance is code, as if written by hand for those types. Storage passed as `anytype` (a map or
-channel with `cap`, or a vector `[..N]T`) becomes its view (a vector becomes the slice `[]T` of
-its elements, so the body can't `Push`; pass `&v` for that), and untyped constants their default
-type.
+channel storage, or a vector `T[..N]`) becomes its view (a vector becomes the slice `T[]` of its
+elements, so the body can't `push`; pass `&v` for that), and untyped constants their default type.
 
 Functions and methods take `anytype` parameters (tasks and externs don't), not as their variadic
-parameter, and results have ordinary types (`bufio.Reader.ReadLine(src anytype)` reads from a
-conn or a file alike). A function with `anytype` parameters can only
-be called, not used as a value.
+parameter, and results have ordinary types (`bufio.Reader.read_line(src anytype)` reads from a
+conn or a file alike). A function with `anytype` parameters can only be called, not used as a
+value.
 
 ### Provenance (optional)
 
-```go
-func Cut(s, sep string) (string, string, bool) from s   // results may point into what s refers to
-func link(a *Node, b *Node into a)                      // b may be stored inside a
-func remember(msg static string)                        // msg must point to static memory
-func Name() string static                               // the result points to static memory
+```squark
+fn cut(s, sep str) -> (str, str, bool) in s    // results may point into what s refers to
+fn link(a *Node, b *Node in a)                 // b may be stored inside a
+fn remember(msg str in static)                 // msg must point to static memory
+fn name() -> str in static                     // the result points to static memory
 ```
 
 - The compiler infers all of this anyway (see `squark doc`). Declaring it makes it a checked
@@ -339,16 +389,16 @@ func Name() string static                               // the result points to 
 
 ### Arenas
 
-```go
-arena interned 8M            // package level: static, bump-only, never freed
+```squark
+arena interned 8M              // package level: static, bump-only, never freed
 
-func f() {
-    arena scratch 64K {      // statement: storage in this stack frame
+fn f() {
+    with arena scratch 64K {   // statement: storage in this stack frame
         p := new(Node) in scratch
-    }                        // everything allocated in scratch is gone here
+    }                          // everything allocated in scratch is gone here
 }
 
-func build(a arena, n int) *Node { return new(Node) in a }   // allocate in the caller's arena
+fn build(a arena, n int) -> *Node { return new(Node) in a }   // allocate in the caller's arena
 ```
 
 - Sizes are constants.
@@ -359,87 +409,157 @@ func build(a arena, n int) *Node { return new(Node) in a }   // allocate in the 
   elements). A slice that is the arena's latest allocation grows in place; any other is copied,
   and the old elements stay allocated until the arena ends. Size arenas for that, or collect into a
   stack buffer or vector first and copy into the arena at the exact size.
-- Every HTTP request carries one: `r.Arena`.
+- Every HTTP request carries one: `r.arena`.
 
-### Constants, variables, types
+### Constants and faults
 
-As in Go, plus two kinds of constant data:
+`const` declares constants as in Go (`const n = 4`, `const ( a = 1; b = 2 )`; every constant
+has a value: there is no `iota` and no implicit repetition, an `enum` names a set of numbers),
+plus constant composites: arrays and structs whose elements are constants (numbers, strings, bools, errors, or
+arrays and structs of them):
 
-- Error constants: `const ErrNotFound = error(404, "not found")`, compared with `==`.
-- Constant composites: arrays and structs whose elements are constants (numbers, strings, bools,
-  errors, or arrays and structs of them):
+```squark
+const primes = int[5]{2, 3, 5, 7, 11}
+const defaults = Config{port: 8080, name: "notes"}
+```
 
-  ```go
-  const primes = [5]int{2, 3, 5, 7, 11}
-  const defaults = Config{Port: 8080, Name: "notes"}
-  ```
+`fault` declares an error constant: a name, an optional integer code and a constant message.
+
+```squark
+pub fault NotFound 404 "not found"
+fault Closed "closed"                 // code 0
+fault (
+    Malformed -40 "http: malformed response"
+    TooLarge -41 "http: too large"
+)
+if err == NotFound { ... }            // faults compare with ==
+```
 
 Both are read-only data in the binary, shared by every scheduler thread (`threads N`). Reading,
-indexing, ranging and copying them work as for variables; assigning to them or their elements,
+indexing, copying and `for ... in` work as for variables; assigning to them or their elements,
 taking their address, slicing them and calling pointer methods on them are errors. Copy into a
-variable first (`t := primes`) to get something writable.
+variable first (`t := primes`) to get something writable. `error(code, msg)` and `error(msg)`
+build an error value anywhere (§5).
 
-For data computed when the program starts, `shared var` declares one copy for all scheduler
-threads:
+### Enums
 
-```go
-shared var crcTable = makeTable()   // may call functions, read files, query SQLite
+```squark
+enum Dir { north, east, south, west }        // 0, 1, 2, 3
+pub enum Status u16 {                        // an integer type other than int
+    ok = 200
+    created                                  // 201: one more than the member before it
+    not_found = 404
+}
+
+d := Dir.east                                // members are reached through the type
+d = .west                                    // or with just .name where a Dir is expected
+switch s {
+case .ok, .created:
+}
+turn(.north)                                 // fn turn(d Dir): the parameter says which enum
+if d == .south { }
+impl Dir {                                   // enums have methods like any named type
+    fn right(self) -> Dir { return Dir((int(self) + 1) % 4) }
+}
+var hits int[Dir; 4]                         // a map keyed by the enum
 ```
 
-Its initializer runs once, on the first scheduler thread and in order with the other package
-initializers, before any other thread starts. Afterwards it is read-only, with the same rules as
-constants. A string in it must be constant data (as for error messages, §5): a string viewing a
-package variable would change when that thread changes the variable, so copy it into a package
-arena instead (`return string(buf[:n]) in pkgArena`). Its type is limited to numbers, strings, bools, errors and arrays or structs of them,
-because nothing a shared slice, map or pointer refers to could be kept read-only.
+An enum is a named integer type (`int` unless another integer type follows the name), and its
+members are constants of that type: the first is 0 unless written, each other one the member before
+plus one unless written. Members are separated by commas or newlines. Being its own type, an enum
+doesn't mix with plain integers without a conversion (`int(d)`, `Dir(3)`), and it can have methods
+like any named type. A member is visible to importers when the enum is `pub`. Enums are declared at
+package level.
 
-A plain `var` is one copy per scheduler thread: under `threads N` a counter counts one thread's
-work and a cache holds one thread's entries. `squark build`, `run` and `check` list the package
-variables a threaded program changes after start-up, since their values can differ between
-threads:
+Where the type the context expects is an enum, `.name` is that enum's member: in an argument, an
+assignment or typed declaration (`var d Dir = .north`, `const home Dir = .south`), a return value,
+a struct or slice literal element, a map key, a channel send, a `case` of a `switch` on an enum,
+and either side of a comparison with an enum. Elsewhere (`x := .north`, an array index) write
+`Dir.north`.
 
+### Variables
+
+Inside a function, `var x T`, `var x = e` and `x := e` declare variables as in Go. A package-level
+variable says whether each scheduler thread has its own copy:
+
+```squark
+thread hits int                   // one copy per scheduler thread (the only copy without threads N)
+thread db sqlite.DB               // each thread's own connection
+shared crc_table = make_table()   // one copy for all threads, read-only after start-up
+thread (
+    a int
+    b = 2
+)
 ```
-note: with threads, each scheduler thread has its own copy of these package variables:
-  main.sq:12: hits: changed in handle
+
+A `thread` variable is ordinary mutable state: under `threads N` a counter counts one thread's
+work and a cache holds one thread's entries. Without `threads N` there is one thread, so `thread`
+just means a package variable.
+
+A `shared` variable's initializer runs once, on the first scheduler thread and in order with the
+other package initializers, before any other thread starts. Afterwards it is read-only, with the
+same rules as constants. A string in it must be constant data (as for error messages, §5): a
+string viewing a package variable would change when that thread changes the variable, so copy it
+into a package arena instead (`return str(buf[:n]) in pkg_arena`). Its type is limited to numbers,
+strings, bools, errors and arrays or structs of them, because nothing a shared slice, map or
+pointer refers to could be kept read-only.
+
+A shared channel connects the scheduler threads: `shared jobs Job chan[64]` (declared without a
+value) is one channel for all of them. Send, receive, `close`, `len` and `for ... in` work as for
+any channel; a goroutine blocked on it is woken by whichever thread completes the operation. Its
+elements may not hold references (no strings, slices, maps or pointers), since a reference could
+view one thread's own memory; send numbers, bools, errors, or arrays and structs of them (an index
+or ID instead of a string). Arrays and structs of shared channels work too: `shared inbox Req
+chan[8][4]` gives each thread its own request channel and `shared replies int chan[1][64]` each
+client its own reply channel; other fields of such a struct are read-only data.
+
+### Types
+
+```squark
+struct Point {
+    x, y int
+    pub label str      // pub: visible to importers
+}
+Celsius: f64           // any other named type: Name: T
+pub Handler: fn(r *Request) -> int
 ```
 
-`thread var` declares one copy per thread on purpose (`thread var db sqlite.DB`, each thread's own
-connection); it behaves exactly like `var` and is left out of the list. So the list shows only the
-variables nobody has decided about: make each `thread var`, or move it to a shared channel.
-Standard library packages aren't listed; their per-thread state is per thread by design.
-
-A shared channel connects the scheduler threads: `shared var jobs chan Job cap 64` (declared
-without a value) is one channel for all of them. Send, receive, `close`, `len` and `range` work
-as for any channel; a goroutine blocked on it is woken by whichever thread completes the
-operation. Its elements may not hold references (no strings, slices, maps or pointers), since a
-reference could view one thread's own memory; send numbers, bools, errors, or arrays and structs
-of them (an index or ID instead of a string). Arrays and structs of shared channels work too:
-`shared var inbox [4]chan Req cap 8` gives each thread its own request channel and `shared var
-replies [64]chan int cap 1` each client its own reply channel; other fields of such a struct are
-read-only data.
+`struct Name { ... }` declares a struct type and `Name: T` (at package level) a named type with any
+other underlying type; each is a type of its own, as in Go: a `Celsius` doesn't mix with an `f64`
+without a conversion. Methods are declared with
+`impl` blocks (above): `impl Celsius { fn fahrenheit(self) -> f64 { return f64(self)*9/5 + 32 } }`.
+An unnamed struct type is written
+`struct { x, y int }` where a type goes.
 
 ## 5. Expressions
 
 | expression | squark |
 |---|---|
 | `x in a` | allocations made by `x` come from arena `a`. Lowest precedence: `a + b + c in ar` is one allocation |
+| `.name` | the member `name` of the enum the context expects (§4) |
 | `new(T) in a` | zeroed `*T` in the arena. `new(T)` without an arena is an error |
-| `make([]T, n[, c]) in a` | run-time sizes are OK. `make(map[K]V, n) in a` also works. `make` without an arena is an error, as is `make(chan ...)` |
+| `make(T[], n[, c]) in a` | run-time sizes are OK. `make(V[K], n) in a` also works. `make` without an arena is an error, as is `make(T chan)` |
 | `append(s, xs...)` | panics if the result exceeds `cap(s)`. `append(s, x) in a` grows into the arena instead |
 | `s + t` (strings) | only if both are constants, or `in a` |
-| `string(b)` | zero-copy view of `b`'s bytes. `string(b) in a` copies into the arena, and so does `string(s) in a` for a string `s` (to keep a string beyond the memory it views) |
-| `[]byte(s)` | only `[]byte(s) in a` (copies). Otherwise `copy(buf[:], s)` |
-| `string(r)` (rune) | only for constants; use `utf8.AppendRune` |
-| `try f(...)` | if `f`'s last result (an `error`) is non-nil, return it from the enclosing function (whose last result must be `error`), with zero values for the other results (named results too, even if already assigned). Otherwise yields the remaining results |
-| `error(code, msg)`, `error(msg)` | builds an error. `msg` must be constant data: a string constant, another error's `Error()`, a `shared var`, a C extern's result, or a string copied into a package arena (`string(b) in pkgArena`). A package variable's contents can change, so it can't be a message |
+| `str(b)` | zero-copy view of `b`'s bytes. `str(b) in a` copies into the arena, and so does `str(s) in a` for a string `s` (to keep a string beyond the memory it views) |
+| `u8[](s)` | only `u8[](s) in a` (copies). Otherwise `copy(buf[:], s)` |
+| `str(r)` (rune) | only for constants; use `utf8.append_rune` |
+| `f(...)!` | if `f`'s last result (an `error`) is non-nil, return it from the enclosing function (whose last result must be `error`), with zero values for the other results (named results too, even if already assigned). Otherwise yields the remaining results. It binds like a call: `f()!.x`, `a.b()!` |
+| `error(code, msg)`, `error(msg)` | builds an error. `msg` must be constant data: a string constant, another error's `message()`, a `shared` variable, a C extern's result, or a string copied into a package arena (`str(b) in pkg_arena`). A package variable's contents can change, so it can't be a message |
+| `not x`, `x and y`, `x or y` | logic, short-circuiting as in Go |
 | `&T{...}` | address of a temporary that lives until the end of the enclosing block |
-| `[]T{...}` | the backing array lives until the end of the enclosing block |
+| `T[]{...}`, `T[N]{...}`, `T[...]{...}`, `T[..N]{...}` | slice, array and vector literals; a slice's backing array lives until the end of the enclosing block |
+| `(*T)[]{...}` | a slice of pointers: in an expression `*T[]` would dereference `T[]` |
 | map literals | not supported; declare storage and assign |
 | `f(g())` with a multi-value `g` | not supported; assign `g`'s results first |
-| `[N]T(s)`, `(*[N]T)(s)` (slice to array) | not supported; `copy(arr[:], s)` |
-| `[]*T{{...}}` (elided `&T`) | not supported; write `&T{...}` |
-| func literals, method values, method expressions | not supported |
-| `v.(T)`, type switches | not supported (no interfaces) |
+| `T[N](s)`, `(*(T[N]))(s)` (slice to array) | not supported; `copy(arr[:], s)` |
+| `(*T)[]{{...}}` (elided `&T`) | not supported; write `&T{...}` |
+| function literals, method values, method expressions | not supported |
+| type assertions, type switches | not supported (no interfaces) |
+
+In the condition of `if`, `for`, `while` and `switch`, a `{` ends the expression, so a composite
+literal there needs parentheses unless its type can't be anything else: `for x in int[]{1, 2}` is
+fine, `for x in (int[2]{1, 2})` needs them (`int[2] {` could be an index and a block).
 
 Integer arithmetic wraps on overflow, division by zero panics, shifts by at least the width
 yield 0 (or -1 for negative signed `>>`), and a negative shift count panics, as in Go.
@@ -454,7 +574,7 @@ differences, all about side effects within one statement:
 - `a[i] = f()`: `f()` runs before the index `i` is evaluated (Go: `i` first).
 - `getm()[key()]`, read or write: the key is evaluated before the map.
 - `getch() <- v`: `v` is evaluated before the channel.
-- Keyed composite literals (`T{b: f(), a: g()}`, `[3]int{2: f(), 0: g()}`) evaluate their elements
+- Keyed composite literals (`T{b: f(), a: g()}`, `int[3]{2: f(), 0: g()}`) evaluate their elements
   in field or index order, not source order.
 
 If the order matters, compute the operands into variables first.
@@ -464,40 +584,58 @@ is not necessarily NaN, and `min(0.0, -0.0)` may return either zero.
 
 ### Builtins
 
-`len`, `cap`, `append`, `copy` (also `copy(dst []byte, src string)`), `delete`, `close`, `min`,
-`max`, `panic(x)` (x is a string, integer, bool or error), `print`/`println` (write to **stdout**
-a line at a time, so threads' lines don't mix; a partial line is written before other output to
-stdout, and every thread's at exit or a panic; accept numbers, strings, bools, pointers, errors and
-`[]byte`), `new`/`make` (arena only).
+`len`, `cap`, `append`, `copy` (also `copy(dst u8[], src str)`), `delete`, `close`, `min`, `max`,
+`panic(x)` (x is a string, integer, bool or error), `print`/`println` (write to **stdout** a line
+at a time, so threads' lines don't mix; a partial line is written before other output to stdout,
+and every thread's at exit or a panic; accept numbers, strings, bools, pointers, errors and `u8[]`),
+`new`/`make` (arena only).
 
 ## 6. Statements
 
-As in Go, except:
+```squark
+for x in xs { }            // each element (a slice, array, vector, string's runes, map's values)
+for i, x in xs { }         // index (map: key) and element
+for k, _ in m { }          // just the keys
+for v in ch { }            // a channel's values until it is closed
+for i in 0..n { }          // 0, 1, …, n-1; n is evaluated once
+for i in lo..hi { }        // lo, …, hi-1 (both integers of one type; an untyped one takes the other's)
+for _ in 0..3 { }
+for i := n - 1; i >= 0; i-- { }   // the three-clause loop, as in Go
+while cond { }
+loop { }                   // until break or return
+outer: for ... { break outer }    // labels on for, while, loop, switch and select
+if v, ok := m[k]; ok { } else { }
+switch x { case 1, 2: ... default: ... }
+select { case v := <-c: ... case d <- 1: ... default: ... }
+start worker(i)            // start a task (rule 7)
+defer f.close()
+with arena scratch 64K { }
+```
 
-- No `goto` or `fallthrough`. Labels are allowed only on `for`, `switch` and `select`, for
-  labeled `break`/`continue`.
+- `for ... in` always declares its variables, fresh for each iteration (assigning one doesn't
+  change the iteration). One variable is the element, except over a channel or a range, where it
+  is the value. Over an array the loop reads the array itself, not a copy: changes made in the
+  loop are seen by later iterations (copying would put a second array on the stack); loop over a
+  copy explicitly if you need Go's behaviour.
+- A map loop may delete entries as it goes, as in Go. Inserting a *new* key inside the loop may
+  make it skip or repeat entries (to reuse deleted slots, a map with many deletions compacts
+  itself on insert); collect the keys first if you need both.
 - `select` works as in Go: it waits until one of its sends or receives can proceed (a random one
   if several can), `default` runs if none can, nil channels are never ready, and `break` leaves
-  it. `select {}` blocks forever. Cases may mix per-thread and shared channels. For a timeout, `case <-time.After(d):` runs
-  if no other case is ready within d; since there is no heap to make a channel per call,
-  `time.After` is allowed only there, without a received value (`time.Now()` gives the time).
+  it. `select {}` blocks forever. Cases may mix per-thread and shared channels. For a timeout,
+  `case <-time.after(d):` runs if no other case is ready within d; since there is no heap to make
+  a channel per call, `time.after` is allowed only there, without a received value (`time.now()`
+  gives the time).
 - `defer` is not allowed inside loops. Its arguments must live until the function returns. The
   builtins it takes are `close`, `panic`, `print` and `println` (defer a function that calls
   `delete`, `copy` or a vector method), and a variadic call needs its arguments as a slice
   (`defer f(xs...)`).
 - A panic ends the program at once: deferred calls don't run while panicking (there is no
   `recover`, and the operating system closes the program's files and sockets).
-- `go f(args)`: `f` must be a task. Arguments must not reference stack or arena memory.
+- `start f(args)`: `f` must be a task. Arguments must not reference stack or arena memory.
 - Channel sends: the value must not reference stack or arena memory.
-- `arena NAME SIZE { ... }` is a statement.
-- `for i := range 10` works (Go 1.22 style). `range` over a string yields runes.
-- `range` over an array value iterates the array itself, not a copy: changes made in the loop are
-  seen by later iterations. (Copying would put a second array on the stack.) Range over a copy
-  explicitly if you need Go's behaviour.
+- There is no `goto` and no `fallthrough`.
 - Unused variables and unused imports are not errors.
-- Deleting map entries inside a `range` over the map works as in Go. Inserting a *new* key inside
-  the loop may make it skip or repeat entries (to reuse deleted slots, a map with many deletions
-  compacts itself on insert); collect the keys first if you need both.
 
 ## 7. The memory rules (what the checker enforces)
 
@@ -510,145 +648,161 @@ must not outlive the memory it points to:
   memory to outlive the storage. Package variables accept only static memory.
 - **Calls:** the compiler knows each callee's flows ("argument 2 is stored inside argument 1", "the
   result points into argument 1") and checks them against your arguments.
-- **Arenas:** memory from `arena x` lives until the end of that block. A package arena is static.
+- **Arenas:** memory from `with arena x` lives until the end of that block. A package arena is
+  static.
 - **Goroutines and channels:** only static memory crosses goroutines.
 
 ### Error messages and fixes
 
 | error contains | fix |
 |---|---|
-| `cannot return reference to variable buf` | take `buf []byte` as a parameter and return a view of it, or allocate in a caller-provided arena |
+| `cannot return reference to variable buf` | take `buf u8[]` as a parameter and return a view of it, or allocate in a caller-provided arena |
 | `cannot return reference to arena x` | the arena dies with its block; take `a arena` as a parameter instead |
-| `cannot escape into static memory (assigned to G)` | package variables can only point to static data: make the referenced data package-level too, or copy it into a package arena (`string(b) in pkgArena`) |
+| `cannot escape into static memory (assigned to g)` | package variables can only point to static data: make the referenced data package-level too, or copy it into a package arena (`str(b) in pkg_arena`) |
 | `does not live long enough to be stored in variable v` | declare the referenced variable in an outer block (it must live at least as long as v) |
 | `f stores argument 2 inside argument 1` | the second argument must live at least as long as the first |
-| `make needs an arena` | declare storage (`var buf [N]T`, `var v [..N]T`, `var m map[K]V cap N`), or `make(...) in a` |
+| `make needs an arena` | declare storage (`var buf T[N]`, `var v T[..N]`, `var m V[K; N]`), or `make(...) in a` |
 | `new(T) needs memory` | `var x T` and use `&x`, or `new(T) in a` |
-| `string concatenation needs memory` | `a + b in r.Arena`, or append into a buffer |
-| `converting s to []byte copies it` | `copy(buf[:], s)`, or `[]byte(s) in a` |
-| `recursion is not allowed` | loop with an explicit stack (`var stack [..64]T`) |
-| `go needs a task` | declare the function `task f(...) pool N` |
+| `string concatenation needs memory` | `a + b in r.arena`, or append into a buffer |
+| `converting s to u8[] copies it` | `copy(buf[:], s)`, or `u8[](s) in a` |
+| `recursion is not allowed` | loop with an explicit stack (`var stack T[..64]`) |
+| `start needs a task` | declare the function `task f(...) pool N` |
 | `goroutine … can outlive this function` | pass only static data, or values without references (ints, structs of ints) |
-| `cannot copy map[...] cap N storage` | pass a view: `func f(m map[K]V)` and call `f(store)` |
-| `cannot copy x: T contains … storage` | pass or keep a pointer (`*T`); range by index and use `&xs[i]` |
-| `cannot copy the elements of xs` | keep a slice of pointers (`[]*T`), or of views for map/chan elements |
-| `cannot call M on a copy of x` | declare M with a pointer receiver: `func (x *T) M()` |
+| `cannot copy int[str; 8] storage` | pass a view: `fn f(m int[str])` and call `f(store)` |
+| `cannot copy x: T contains … storage` | pass or keep a pointer (`*T`); loop over the indexes and use `&xs[i]` |
+| `cannot copy the elements of xs` | keep a slice of pointers (`*T[]`), or of views for map/chan elements |
+| `cannot call m on a copy of x` | give m a `&self` receiver: `fn m(&self)` |
+| `methods go in an impl block` | `impl T { fn m(&self, ...) { ... } }`, after the type |
+| `a method takes self … or &self … first` | `fn m(self, ...)` or `fn m(&self, ...)`; a function without a receiver goes outside the impl |
 | `named result r holds … storage` | return an unnamed `T{...}`, or take a `*T` parameter and fill it |
 | `append exceeds capacity` (runtime panic) | larger storage, or `append(...) in a` |
-| `mismatched types float32x4 and float32` | broadcast the scalar: `v * float32x4(k)` |
+| `mismatched types f32x4 and f32` | broadcast the scalar: `v * f32x4(k)` |
 | `integer vectors have no division` | divide lane by lane in a loop, or multiply by a reciprocal in a float vector |
-| `non-boolean condition` on `a == b` with vectors | comparisons give masks: `(a == b).All()` or `.Any()` |
-| `map capacity exceeded` (runtime panic) | a larger `cap N` |
+| `non-boolean condition` on `a == b` with vectors | comparisons give masks: `(a == b).all()` or `.any()` |
+| `map capacity exceeded` (runtime panic) | a larger capacity: `V[K; N]` |
 | `memory budget exceeded` | lower pool sizes (`pool pkg.task N`), fewer `workers`, or raise the budget |
 | `workers auto can't be checked against the budget` | `workers N` with the number of cores you deploy on |
 | `threads auto can't be checked against the budget` | `threads N` with the number of cores you deploy on |
-| `cannot be used as constant data` | use a string constant, or copy the string into a package arena (`string(b) in pkgArena`) |
-| `shared var X: T can't be shared` | share numbers, strings, bools, errors or arrays/structs of them; keep everything else per thread |
+| `cannot be used as constant data` | use a string constant, or copy the string into a package arena (`str(b) in pkg_arena`) |
+| `shared x: T can't be shared` | share numbers, strings, bools, errors or arrays/structs of them; keep everything else per thread |
 | `a shared channel's elements can't hold references` | send an index, ID or fixed-size array instead of a string or slice |
-| `time.After can only be used as a select case` | `select { case <-time.After(d): ... }`; to just wait, `time.Sleep(d)` |
+| `time.after can only be used as a select case` | `select { case <-time.after(d): ... }`; to just wait, `time.sleep(d)` |
 | `anytype is only allowed as the type of a function's parameter` | make the function take it as a parameter; results, variables and fields have concrete types |
-| `F has anytype parameters: it can only be called` | wrap the call in a named function with concrete parameter types, and pass that |
-| `... (in pkg.F with x T, called at file:line)` | the error is in F's body for that argument type: pass a type that supports what F does with it |
-| `m is a map with no storage` | declare it `var m map[K]V cap N`, or assign it storage (`m = make(map[K]V, n) in a`) |
-| `c is a channel with no storage` | declare it `var c chan T cap N` |
+| `f has anytype parameters: it can only be called` | wrap the call in a named function with concrete parameter types, and pass that |
+| `... (in pkg.f with x T, called at file:line)` | the error is in f's body for that argument type: pass a type that supports what f does with it |
+| `m is a map with no storage` | declare it `thread m V[K; N]`, or assign it storage (`m = make(V[K], n) in a`) |
+| `c is a channel with no storage` | declare it `thread c T chan[N]` |
 | `only tasks can be preemptible` | mark the task the work runs in; functions it calls yield too |
 | `only extern functions can be blocking` | drop `blocking`; squark code waits by parking already (channels, I/O, sleeps) |
-| `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (error constants, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |
+| `cannot take address of …` / `cannot slice …` / `cannot assign to …` (a constant) | constants (faults, constant tables) are read-only and shared by every thread: copy into a variable first, `t := table; p := &t[0]` |
 | `defer inside a loop` | move the loop body into a function and defer there |
+| `constant x needs a value` | write every constant's value; for numbered names, declare an `enum` |
+| `undefined: iota` | an `enum` numbers its members: `enum Kind { a, b, c }` |
+| `Kind has no member x` | the members are listed in the enum's declaration (`squark doc` shows them) |
+| `can't tell which enum .x belongs to` | write `Kind.x`, or give the variable a type (`var k Kind = .x`) |
+| `pkg.x is not pub` / `it isn't pub` | declare it `pub` in its package |
+| `write and, not &&` (and `or`, `not x`) | the logical operators are words |
+| `results follow ->` | `fn f() -> int`, `fn f() -> (int, bool)`, `fn f() -> T !` |
+| `for in a condition is while` | `while cond { }`; `loop { }` for an endless loop |
+| `try is gone` | a `!` after the call: `f()!` |
+| `a package variable is thread … or shared` | `thread x T` (per thread) or `shared x = ...` (read-only, one copy) |
+| `the brackets go after the element type` | `T[]`, `T[N]`, `V[K]` |
+| `a struct type is declared struct T { ... }` | `struct T { ... }` |
+| `a named type is declared T: U` | `Celsius: f64`, not `type Celsius f64` |
 
-## 8. Idioms: translating Go
+## 8. Idioms
 
-```go
-// fmt.Sprintf("id=%d name=%s", id, name)
-var buf [64]byte
-line := strconv.AppendInt(append(buf[:0], "id="...), id)
+```squark
+// formatting: append into a buffer
+var buf u8[64]
+line := strconv.append_int(append(buf[:0], "id="...), id)
 line = append(append(line, " name="...), name...)
-os.Stdout.Write(line)
+os.stdout.write(line)
 // or, in an arena: s := "name=" + name in a
 
-// os.ReadFile(path): read into caller storage
-var data [1M]byte
-f := try os.Open(path)
-n, _ := f.ReadFull(data[:])
+// reading a file: into caller storage
+var data u8[1M]
+f := os.open(path)!
+n, _ := f.read_full(data[:])
 
-// command-line flags: Go's flag API, the values kept in the package's fixed storage
-port := flag.Int("port", 8080, "port to listen on")   // names and usage: constant strings
-idle := flag.Duration("idle", 30*time.Second, "idle timeout")
-flag.Parse()                     // -h prints the usage; a bad flag prints Go's message and exits 2
-serve(*port, *idle, flag.Args()) // flag.Arg(i) and flag.NArg() for the positional arguments
+// command-line flags: the values are kept in the flag package's fixed storage
+port := flag.int_flag("port", 8080, "port to listen on")   // names and usage: constant strings
+idle := flag.duration_flag("idle", 30*time.second, "idle timeout")
+flag.parse()                     // -h prints the usage; a bad flag prints Go's message and exits 2
+serve(*port, *idle, flag.args()) // flag.arg(i) and flag.n_arg() for the positional arguments
 
 // a function returning a new slice: take the output buffer
-func Squares(n int, out []int) []int {
+fn squares(n int, out int[]) -> int[] in out {
     out = out[:0]
-    for i := 0; i < n; i++ {
+    for i in 0..n {
         out = append(out, i*i)
     }
     return out
 }
 
 // recursive tree walk: explicit stack
-var stack [..64]*Node
-stack.Push(root)
-for len(stack) > 0 {
-    n := stack.Pop()
-    for _, c := range n.Children {
-        stack.Push(c)
+var stack (*Node)[..64]
+stack.push(root)
+while len(stack) > 0 {
+    n := stack.pop()
+    for c in n.children {
+        stack.push(c)
     }
 }
 
 // building a tree: allocate in an arena
-arena tree 256K {
+with arena tree 256K {
     root := new(Node) in tree
-    root.Children = append(root.Children, new(Node) in tree) in tree
+    root.children = append(root.children, new(Node) in tree) in tree
 }
 
 // interface-like dispatch: switch on a kind, or a func-typed field holding a named function
-type Shape struct{ Kind int; W, H float64 }
-func Area(s Shape) float64 {
-    switch s.Kind {
-    case Circle:
-        return math.Pi * s.W * s.W
+struct Shape { kind int; w, h f64 }
+fn area(s Shape) -> f64 {
+    switch s.kind {
+    case circle:
+        return math.pi * s.w * s.w
     }
-    return s.W * s.H
+    return s.w * s.h
 }
 
 // errors with context: use codes and constant messages
-const ErrNoUser = error(404, "user not found")
+fault NoUser 404 "user not found"
 if err != nil {
-    println("lookup failed for", name, ":", err.Error())
-    return ErrNoUser
+    println("lookup failed for", name, ":", err.message())
+    return NoUser
 }
 
 // HTTP server: Go 1.22 patterns ("METHOD /path/{param}"), 404 and 405 answered for you
-func getNote(w *http.ResponseWriter, r *http.Request) {
-    id, ok := r.PathInt("id")        // r.PathValue("id") for the string; r.QueryParam("q") decoded
-    if !ok {
-        http.Error(w, 404)           // "404 Not Found"; w.Text(code, s) for your own text
+fn get_note(w *http.ResponseWriter, r *http.Request) {
+    id, ok := r.path_int("id")       // r.path_value("id") for the string; r.query_param("q") decoded
+    if not ok {
+        http.send_error(w, 404)      // "404 Not Found"; w.text(code, s) for your own text
         return
     }
-    j := w.JSON()                    // streams into the response: commas, nesting and escapes handled
-    j.Object()
-    j.Key("id")
-    j.Int(id)
-    j.End()
+    j := w.json()                    // streams into the response: commas, nesting and escapes handled
+    j.object()
+    j.key("id")
+    j.int(id)
+    j.end()
 }
-func main() {
-    http.HandleFunc("GET /notes/{id}", getNote)
-    http.ListenAndServe(http.Port(8080), nil)   // nil: the HandleFunc patterns
+fn main() {
+    http.handle_func("GET /notes/{id}", get_note)
+    http.listen_and_serve(http.port(8080), nil)   // nil: the handle_func patterns
 }
 
-// JSON request body: strings decoded into the request's arena, no buffers to size (TextMax: a
-// string over 200 bytes sets json.ErrTooLong in d.Err; Text has no limit)
-d := json.NewDecoderIn(r.Body, r.Arena)
-for k, ok := d.Key(); ok; k, ok = d.Key() {
-    if k == "title" { title, _ = d.TextMax(200) } else { d.Skip() }   // lives until the response is done
+// JSON request body: strings decoded into the request's arena, no buffers to size (text_max: a
+// string over 200 bytes sets json.TooLong in d.err; text has no limit)
+d := json.new_decoder_in(r.body, r.arena)
+for k, ok := d.key(); ok; k, ok = d.key() {
+    if k == "title" { title, _ = d.text_max(200) } else { d.skip() }   // lives until the response is done
 }
-// json.NewEncoder(buf) / NewEncoderIn(nil, a) build JSON outside a handler the same way
+// json.new_encoder(buf) / new_encoder_in(nil, a) build JSON outside a handler the same way
 
 // HTTP client: responses are read into the caller's buffer, and the connection is kept alive
-var buf [64K]byte
-c := try http.Dial("127.0.0.1:8080", buf[:])
-resp := try c.Get("/notes/1")    // resp.Body and resp.HeaderValue(...) view buf until the next request
+var buf u8[64K]
+c := http.dial("127.0.0.1:8080", buf[:])!
+resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view buf until the next request
 ```
 
 ## 9. Runtime behaviour
@@ -656,41 +810,40 @@ resp := try c.Get("/notes/1")    // resp.Body and resp.HeaderValue(...) view buf
 - One OS thread by default. Goroutines are cooperative and switch at blocking operations (and in
   preemptible tasks' loops). Netpoll is kqueue on macOS and epoll on Linux. One goroutine may
   read a connection while another writes it. Closing a connection, file or listener wakes the
-  goroutines of the same thread blocked on it, whose `Read`, `Write` or `Accept` returns an error
+  goroutines of the same thread blocked on it, whose `read`, `write` or `accept` returns an error
   (`bad file descriptor`); a goroutine of another thread blocked on it isn't woken, so close a
   descriptor on the thread that uses it.
 - A watchdog thread asks a goroutine that has run for a time slice to yield (only preemptible
   tasks do), and prints a warning naming the task when a goroutine has held its thread for 100ms
   while other goroutines waited on it. Both count the CPU time the thread actually got, so an
   overloaded machine that doesn't run the thread doesn't make its goroutine look slow. A program
-  with nothing else to run isn't warned about.
-  `runtime.Gosched()` yields by hand.
+  with nothing else to run isn't warned about. `runtime.gosched()` yields by hand.
 - `threads N` (1 to 1024, or `auto` for one per core) runs N scheduler threads (shards) in one
   process. The directive says the program is written for threads; without it a program runs one
   thread. `threads auto` is the usual choice: one thread per core, and `SQUARK_THREADS=N` in the
   environment overrides the count at run time (like `GOMAXPROCS`). `SQUARK_THREADS` also
   overrides `threads N`, except that with a `budget` it can't go above N, the count the budget
   was proven for. It has no effect on programs without the directive. Each shard runs `main`
-  with its own package variables (see `thread var`, §4), goroutine pools, timers and poller;
-  goroutines never move between shards, so rule 10 holds within each and nothing needs locks.
-  Error constants are shared (they're read-only). Listening on an address from every shard works:
-  on Linux each shard gets its own socket (`SO_REUSEPORT`) and the kernel spreads connections; on
-  macOS the shards share one socket. Port 0 is never shared: each shard listening on `":0"` gets
-  its own port (`l.Port()`), so a program that tests itself listens on one shard. A `net.Conn` is a
-  descriptor and can be sent to another shard on a shared channel; use it on one shard at a time,
-  and close it on the shard that uses it (§9 on closing). Each shard also has about 350 KiB of
-  runtime data (output buffer, poller and idle-connection tables), counted in static data. `runtime.Shard()` and `runtime.Shards()`
-  report where a goroutine runs. The process exits when every shard's `main` has returned (a
-  shard whose `main` returns stops its goroutines), at the first panic, or at `os.Exit`. The
-  memory budget counts static data and stacks once per shard (and `threads auto` can't be
-  combined with `budget`). `threads` and `workers` combine: workers × threads shards in all.
-  Shards share only constants, `shared var` data and shared channels. A shard whose goroutines
-  all wait on shared channels sleeps until another shard wakes them, so a deadlock across shards
-  hangs instead of reporting `all goroutines are asleep` (with one thread, a goroutine blocked on a
-  shared channel is reported like any other). Externs are called from whichever shard
-  runs the goroutine (or a helper thread, for `blocking` externs), so C libraries must be
-  thread-safe (libc and SQLite are; each shard opens its own SQLite connection, since package
-  variables are per shard: `thread var db sqlite.DB`).
+  with its own `thread` variables (§4), goroutine pools, timers and poller; goroutines never move
+  between shards, so rule 10 holds within each and nothing needs locks. Faults are shared (they're
+  read-only). Listening on an address from every shard works: on Linux each shard gets its own
+  socket (`SO_REUSEPORT`) and the kernel spreads connections; on macOS the shards share one
+  socket. Port 0 is never shared: each shard listening on `":0"` gets its own port (`l.port()`),
+  so a program that tests itself listens on one shard. A `net.Conn` is a descriptor and can be
+  sent to another shard on a shared channel; use it on one shard at a time, and close it on the
+  shard that uses it (see above). Each shard also has about 350 KiB of runtime data (output
+  buffer, poller and idle-connection tables), counted in static data. `runtime.shard()` and
+  `runtime.shards()` report where a goroutine runs. The process exits when every shard's `main`
+  has returned (a shard whose `main` returns stops its goroutines), at the first panic, or at
+  `os.exit`. The memory budget counts static data and stacks once per shard (and `threads auto`
+  can't be combined with `budget`). `threads` and `workers` combine: workers × threads shards in
+  all. Shards share only constants, `shared` variables and shared channels. A shard whose
+  goroutines all wait on shared channels sleeps until another shard wakes them, so a deadlock
+  across shards hangs instead of reporting `all goroutines are asleep` (with one thread, a
+  goroutine blocked on a shared channel is reported like any other). Externs are called from
+  whichever shard runs the goroutine (or a helper thread, for `blocking` externs), so C libraries
+  must be thread-safe (libc and SQLite are; each shard opens its own SQLite connection:
+  `thread db sqlite.DB`).
 - `workers N` (1 to 1024, or `auto` for one per core) starts N processes before any squark code
   runs; each has its own package variables, goroutines and connections. Listening sockets use
   `SO_REUSEPORT`, so the kernel spreads connections across the workers (on Linux; macOS sends them
@@ -702,21 +855,21 @@ resp := try c.Get("/notes/1")    // resp.Body and resp.HeaderValue(...) view buf
 - Each task pool has N stacks of a size proven at compile time, each with a guard page. A C function
   that exceeds its `stack` budget hits the guard: `fatal error: stack overflow in goroutine [pool]`.
 - **Loops and SIMD.** clang vectorizes loops, so a loop over slices often runs as SIMD code. A loop
-  gets an unchecked copy, which clang can vectorize, when it counts by one (`for i := range s`,
-  `for i := range n`, `for i := a; i < b; i++` with `<=` too, or `for i := a; i >= b; i--` with
+  gets an unchecked copy, which clang can vectorize, when it counts by one (`for i in lo..hi`,
+  `for i, x in s`, `for i := a; i < b; i++` with `<=` too, or `for i := a; i >= b; i--` with
   `>` too). Its body must be at most 40 statements, with no loop, `switch`, `select`, `defer`,
-  `go`, `try`, channel operation or allocation (`make`, `new`, `append`, `in`). The copy drops
+  `start`, `!`, channel operation or allocation (`make`, `new`, `append`, `in`). The copy drops
   the bounds checks of indexes of the form `x[i]`, `x[i+k]` and `x[i-k]`, or with `c*i` in place
   of `i` for a positive constant `c` (`x[2*i+1]`), where `x` is an array, a pointer to an array,
   or a slice or string that the loop can't change, and `k` is an `int` expression of locals and
-  constants that the loop doesn't change. A slice in a local variable
-  qualifies if the loop doesn't assign it and its address isn't taken. A slice in a field of a
-  local (`p.data` in a method on `*T`, `s.data`) or in a package variable qualifies if the loop
-  calls no functions (builtins are fine) and stores only into local variables or values without
-  references, so nothing in it can change the slice. A test before the loop runs the unchecked
-  copy only when every index the counter can reach is in range (and `p` isn't nil), so a loop
-  that would go out of range still panics at the same iteration. Floating-point sums stay in
-  source order, so they don't vectorize: write them with SIMD types (§3).
+  constants that the loop doesn't change. A slice in a local variable qualifies if the loop
+  doesn't assign it and its address isn't taken. A slice in a field of a local (`p.data` in a
+  method on `*T`, `s.data`) or in a package variable qualifies if the loop calls no functions
+  (builtins are fine) and stores only into local variables or values without references, so
+  nothing in it can change the slice. A test before the loop runs the unchecked copy only when
+  every index the counter can reach is in range (and `p` isn't nil), so a loop that would go out
+  of range still panics at the same iteration. Floating-point sums stay in source order, so they
+  don't vectorize: write them with SIMD types (§3).
 - Panics print `panic: <message>` with the goroutine and source position, then exit with status 2.
   There is no `recover`. A nil dereference becomes `panic: runtime error: invalid memory address or
   nil pointer dereference`.
@@ -750,7 +903,7 @@ the temporary files and exits with 128+n.
 
 ## 11. A complete program
 
-```go
+```squark
 // count is an HTTP server with SQLite: it reports how many rows a table holds.
 //
 //    squark run examples/count
@@ -758,47 +911,43 @@ the temporary files and exits with 128+n.
 //
 // It shows:
 //   - a SQLite statement prepared once and reused by every request
-//   - try, where an error only propagates
-package main
-
-import (
-    "http"
-    "sqlite"
-    "strconv"
-)
-
-budget 64M
-pool http.serveConn 128
-
-var db sqlite.DB
-var countStmt sqlite.Stmt
-
-// GET /count: how many items the database holds
-func count(w *http.ResponseWriter, r *http.Request) {
-    defer countStmt.Reset()
-    row, err := countStmt.Step()
-    if err != nil || !row {
-        http.Error(w, 500)
-        return
-    }
-    var buf [24]byte
-    w.Text(200, string(strconv.AppendInt(buf[:0], countStmt.ColumnInt(0))))
+//   - !, where an error only propagates
+program {
+    budget 64M
+    pool http.serve_conn 128
 }
 
-func setup() error {
-    db = try sqlite.Open("app.db")
-    try db.Exec("CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY)")
-    countStmt = try db.Prepare("SELECT count(*) FROM items")
+use http, sqlite, strconv
+
+thread db sqlite.DB
+thread count_stmt sqlite.Stmt
+
+// GET /count: how many items the database holds
+fn count(w *http.ResponseWriter, r *http.Request) {
+    defer count_stmt.reset()
+    row, err := count_stmt.step()
+    if err != nil or not row {
+        http.send_error(w, 500)
+        return
+    }
+    var buf u8[24]
+    w.text(200, str(strconv.append_int(buf[:0], count_stmt.column_int(0))))
+}
+
+fn setup() -> ! {
+    db = sqlite.open("app.db")!
+    db.exec("CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY)")!
+    count_stmt = db.prepare("SELECT count(*) FROM items")!
     return nil
 }
 
-func main() {
+fn main() {
     if err := setup(); err != nil {
-        println("setup:", err.Error())
+        println("setup:", err.message())
         return
     }
-    http.HandleFunc("GET /count", count)
-    if err := http.ListenAndServe(":8080", nil); err != nil {
+    http.handle_func("GET /count", count)
+    if err := http.listen_and_serve(":8080", nil); err != nil {
         panic(err)
     }
 }

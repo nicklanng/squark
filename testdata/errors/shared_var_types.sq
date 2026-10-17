@@ -1,11 +1,11 @@
-package main
+program
 
-shared var list = []int{1, 2} // ERROR "shared var list: []int can't be shared"
+shared list = int[]{1, 2} // ERROR "shared list: int[] can't be shared"
 
-var counter = 3
+thread counter = 3
 
-shared var n = counter + 1 // reading package variables while initializing is fine
+shared n = counter + 1 // reading package variables while initializing is fine
 
-const table = [1]int{n} // ERROR "const table: n is not constant"
+const table = int[1]{n} // ERROR "const table: n is not constant"
 
-func main() { println(n, len(list)) }
+fn main() { println(n, len(list)) }

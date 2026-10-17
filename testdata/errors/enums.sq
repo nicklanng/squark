@@ -1,0 +1,13 @@
+program
+
+enum Dir { north, east, south, west }
+
+enum Small u8 { a = 255, b } // ERROR "enum member Small.b = 256 overflows u8"
+
+enum Real f64 { x } // ERROR "enum Real must have an integer type, not f64"
+
+enum Twice { one, one } // ERROR "duplicate enum member Twice.one"
+
+enum Odd { a = "x" } // ERROR "enum member Odd.a needs a constant integer"
+
+fn main() {}

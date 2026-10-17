@@ -1,15 +1,15 @@
-package main
+program
 
 // b is too short, so the checked copy of the loop runs: the first iterations happen (their
 // output appears) and it panics at index 3, as without versioning.
-func fill(b []int, n int) {
+fn fill(b int[], n int) {
 	for i := 0; i < n; i++ {
 		println(i)
 		b[i] = i
 	}
 }
 
-func main() {
-	var b [3]int
+fn main() {
+	var b int[3]
 	fill(b[:], 5)
 }

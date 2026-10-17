@@ -1,0 +1,12 @@
+program
+
+enum Dir { north, east, south, west }
+
+fn main() {
+	d := Dir.up // ERROR "Dir has no member up"
+	var n int = Dir.north // ERROR "cannot use Dir.north (type Dir) as type int"
+	_ = iota // ERROR "undefined: iota"
+	if Dir.east == 1 {
+	}
+	println(d, n)
+}

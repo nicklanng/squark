@@ -1,31 +1,31 @@
 // Package sort sorts slices of any element type in place. less(a, b) reports whether a goes
 // before b. Heap sort: O(n log n) comparisons, no extra memory, no recursion; not stable (equal
 // elements may change order).
-package sort
+module sort
 
-// Slice sorts s ([]T for any T) by less (a func(a, b T) bool).
-func Slice(s anytype, less anytype) {
+// slice sorts s (T[] for any T) by less (an fn(a, b T) -> bool).
+pub fn slice(s anytype, less anytype) {
 	n := len(s)
 	for start := n/2 - 1; start >= 0; start-- {
-		siftDown(s, less, start, n)
+		sift_down(s, less, start, n)
 	}
 	for end := n - 1; end > 0; end-- {
 		s[0], s[end] = s[end], s[0]
-		siftDown(s, less, 0, end)
+		sift_down(s, less, 0, end)
 	}
 }
 
-// siftDown restores the max-heap below root in s[:n].
-func siftDown(s anytype, less anytype, root, n int) {
-	for {
+// sift_down restores the max-heap below root in s[:n].
+fn sift_down(s anytype, less anytype, root, n int) {
+	loop {
 		child := 2*root + 1
 		if child >= n {
 			return
 		}
-		if child+1 < n && less(s[child], s[child+1]) {
+		if child+1 < n and less(s[child], s[child+1]) {
 			child++
 		}
-		if !less(s[root], s[child]) {
+		if not less(s[root], s[child]) {
 			return
 		}
 		s[root], s[child] = s[child], s[root]
@@ -33,8 +33,8 @@ func siftDown(s anytype, less anytype, root, n int) {
 	}
 }
 
-// IsSorted reports whether s is sorted by less.
-func IsSorted(s anytype, less anytype) bool {
+// is_sorted reports whether s is sorted by less.
+pub fn is_sorted(s anytype, less anytype) -> bool {
 	for i := 1; i < len(s); i++ {
 		if less(s[i], s[i-1]) {
 			return false
@@ -43,12 +43,12 @@ func IsSorted(s anytype, less anytype) bool {
 	return true
 }
 
-func intLess(a, b int) bool { return a < b }
+fn int_less(a, b int) -> bool { return a < b }
 
-func stringLess(a, b string) bool { return a < b }
+fn string_less(a, b str) -> bool { return a < b }
 
-// Ints sorts s in increasing order.
-func Ints(s []int) { Slice(s, intLess) }
+// ints sorts s in increasing order.
+pub fn ints(s int[]) { slice(s, int_less) }
 
-// Strings sorts s in increasing order.
-func Strings(s []string) { Slice(s, stringLess) }
+// strings sorts s in increasing order.
+pub fn strings(s str[]) { slice(s, string_less) }

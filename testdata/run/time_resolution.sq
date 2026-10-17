@@ -1,15 +1,15 @@
-package main
+program
 
-// time.Now and time.Since count nanoseconds: macOS's CLOCK_MONOTONIC has only microsecond
+// time.now and time.since count nanoseconds: macOS's CLOCK_MONOTONIC has only microsecond
 // resolution, so every short duration measured with it was a whole number of microseconds.
 
-import "time"
+use time
 
-func main() {
+fn main() {
 	fine := false
-	for i := 0; i < 1000 && !fine; i++ {
-		t0 := time.Now()
-		if d := time.Since(t0); d%time.Microsecond != 0 {
+	for i := 0; i < 1000 and not fine; i++ {
+		t0 := time.now()
+		if d := time.since(t0); d%time.microsecond != 0 {
 			fine = true
 		}
 	}

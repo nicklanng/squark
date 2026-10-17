@@ -1,5 +1,5 @@
-package main
+program {
+	workers 0 // ERROR "workers must be between 1 and 1024"
+}
 
-workers 0 // ERROR "workers must be between 1 and 1024"
-
-func main() {}
+fn main() {}

@@ -1,0 +1,9 @@
+program
+
+struct C { n int }
+
+impl C {
+	fn get(c C) -> int { return c.n } // ERROR "a method takes self (a copy of the C) or &self (a pointer to it) first: fn get(&self, ...)"
+}
+
+fn main() {}

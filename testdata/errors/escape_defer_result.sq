@@ -1,25 +1,25 @@
-package main
+program
 
 // With deferred calls every return goes through the named results, and a deferred call can
 // point one at a local after the return statement ran.
-var g int = 5
+thread g int = 5
 
-func set(pp **int, q *int) { *pp = q }
+fn set(pp **int, q *int) { *pp = q }
 
-func f() (res *int) { // ERROR "cannot return reference to variable local"
+fn f() -> (res *int) { // ERROR "cannot return reference to variable local"
 	var local int = 1234
 	defer set(&res, &local)
 	return &g
 }
 
 // without a defer the named result is just a variable
-func h() (res *int) {
+fn h() -> (res *int) {
 	var local int = 1
 	res = &local
 	return &g
 }
 
-func main() {
+fn main() {
 	_ = f()
 	_ = h()
 }

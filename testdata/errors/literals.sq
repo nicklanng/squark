@@ -1,6 +1,6 @@
-package main
+program
 
-func main() {
+fn main() {
 	a := "\xZZ|"         // ERROR "invalid character 'Z' in hexadecimal escape"
 	b := "\400"          // ERROR "octal escape value 256 > 255"
 	c := "\08|"          // ERROR "invalid character '8' in octal escape"

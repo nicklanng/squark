@@ -37,8 +37,8 @@ const (
 	SHR_ASSIGN     // >>=
 	AND_NOT_ASSIGN // &^=
 
-	LAND  // &&
-	LOR   // ||
+	LAND  // and
+	LOR   // or
 	ARROW // <-
 	INC   // ++
 	DEC   // --
@@ -47,7 +47,11 @@ const (
 	LSS    // <
 	GTR    // >
 	ASSIGN // =
-	NOT    // !
+	NOT    // not
+	BANG   // ! (postfix: propagate an error)
+	AMPAMP // && (not squark: and)
+	BARBAR // || (not squark: or)
+	ARROWR // ->
 
 	NEQ      // !=
 	LEQ      // <=
@@ -77,27 +81,25 @@ const (
 	DEFAULT
 	DEFER
 	ELSE
+	ENUM
+	FAULT
+	FN
 	FOR
-	FUNC
-	GO
 	IF
-	IMPORT
-	MAP
-	PACKAGE
-	RANGE
+	IMPL
+	PUB
 	RETURN
 	STRUCT
 	SWITCH
 	TYPE
 	VAR
-	// squark keywords
+	WHILE
 	ARENA
 	EXTERN
 	IN
 	TASK
-	TRY
 
-	lastKeyword = TRY
+	lastKeyword = TASK
 )
 
 var tokStrings = [...]string{
@@ -105,13 +107,14 @@ var tokStrings = [...]string{
 	ADD: "+", SUB: "-", MUL: "*", QUO: "/", REM: "%", AND: "&", OR: "|", XOR: "^", SHL: "<<", SHR: ">>", AND_NOT: "&^",
 	ADD_ASSIGN: "+=", SUB_ASSIGN: "-=", MUL_ASSIGN: "*=", QUO_ASSIGN: "/=", REM_ASSIGN: "%=", AND_ASSIGN: "&=", OR_ASSIGN: "|=",
 	XOR_ASSIGN: "^=", SHL_ASSIGN: "<<=", SHR_ASSIGN: ">>=", AND_NOT_ASSIGN: "&^=",
-	LAND: "&&", LOR: "||", ARROW: "<-", INC: "++", DEC: "--",
-	EQL: "==", LSS: "<", GTR: ">", ASSIGN: "=", NOT: "!", NEQ: "!=", LEQ: "<=", GEQ: ">=", DEFINE: ":=", ELLIPSIS: "...", DOTDOT: "..",
+	LAND: "and", LOR: "or", ARROW: "<-", INC: "++", DEC: "--",
+	BANG: "!", AMPAMP: "&&", BARBAR: "||", ARROWR: "->",
+	EQL: "==", LSS: "<", GTR: ">", ASSIGN: "=", NOT: "not", NEQ: "!=", LEQ: "<=", GEQ: ">=", DEFINE: ":=", ELLIPSIS: "...", DOTDOT: "..",
 	LPAREN: "(", LBRACK: "[", LBRACE: "{", COMMA: ",", PERIOD: ".", RPAREN: ")", RBRACK: "]", RBRACE: "}", SEMICOLON: ";", COLON: ":",
 	BREAK: "break", CASE: "case", CHAN: "chan", CONST: "const", CONTINUE: "continue", DEFAULT: "default", DEFER: "defer",
-	ELSE: "else", FOR: "for", FUNC: "func", GO: "go", IF: "if", IMPORT: "import", MAP: "map", PACKAGE: "package",
-	RANGE: "range", RETURN: "return", STRUCT: "struct", SWITCH: "switch", TYPE: "type", VAR: "var",
-	ARENA: "arena", EXTERN: "extern", IN: "in", TASK: "task", TRY: "try",
+	ELSE: "else", ENUM: "enum", FAULT: "fault", FN: "fn", FOR: "for", IF: "if", IMPL: "impl", PUB: "pub",
+	RETURN: "return", STRUCT: "struct", SWITCH: "switch", TYPE: "type", VAR: "var", WHILE: "while",
+	ARENA: "arena", EXTERN: "extern", IN: "in", TASK: "task",
 }
 
 func (t Tok) String() string {
@@ -125,8 +128,13 @@ var keywords = map[string]Tok{}
 
 func init() {
 	for t := BREAK; t <= lastKeyword; t++ {
-		keywords[tokStrings[t]] = t
+		if t != TYPE { // TYPE names type declarations (Name: T, struct, enum); "type" is an ordinary word
+			keywords[tokStrings[t]] = t
+		}
 	}
+	keywords["not"] = NOT
+	keywords["and"] = LAND
+	keywords["or"] = LOR
 }
 
 // Precedence returns the binary operator precedence, or 0 if t is not a binary operator.

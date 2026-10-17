@@ -1,0 +1,12 @@
+program
+
+enum Dir { north, east, south, west }
+
+fn main() {
+	d := .north // ERROR "can't tell which enum .north belongs to: here no enum is expected (write Type.north)"
+	var n int = .east // ERROR "can't tell which enum .east belongs to: int is expected here, not an enum"
+	var e Dir = .up // ERROR "Dir has no member up"
+	if .north == .south { // ERROR "can't tell which enum .north belongs to"
+	}
+	println(d, n, e)
+}

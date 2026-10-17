@@ -1,27 +1,27 @@
 // Package utf8 encodes and decodes UTF-8.
-package utf8
+module utf8
 
-const RuneError = 0xFFFD
-const MaxRune = 0x10FFFF
+pub const rune_error = 0xFFFD
+pub const max_rune = 0x10FFFF
 
-// AppendRune appends the UTF-8 encoding of r to dst.
-func AppendRune(dst []byte, r rune) []byte {
+// append_rune appends the UTF-8 encoding of r to dst.
+pub fn append_rune(dst u8[], r rune) -> u8[] {
 	switch {
-	case r >= 0 && r < 0x80:
-		return append(dst, byte(r))
-	case r >= 0 && r < 0x800:
-		return append(dst, byte(0xC0|r>>6), byte(0x80|r&0x3F))
-	case r >= 0xD800 && r <= 0xDFFF, r < 0, r > MaxRune:
-		r = RuneError
+	case r >= 0 and r < 0x80:
+		return append(dst, u8(r))
+	case r >= 0 and r < 0x800:
+		return append(dst, u8(0xC0|r>>6), u8(0x80|r&0x3F))
+	case r >= 0xD800 and r <= 0xDFFF, r < 0, r > max_rune:
+		r = rune_error
 	}
 	if r < 0x10000 {
-		return append(dst, byte(0xE0|r>>12), byte(0x80|(r>>6)&0x3F), byte(0x80|r&0x3F))
+		return append(dst, u8(0xE0|r>>12), u8(0x80|(r>>6)&0x3F), u8(0x80|r&0x3F))
 	}
-	return append(dst, byte(0xF0|r>>18), byte(0x80|(r>>12)&0x3F), byte(0x80|(r>>6)&0x3F), byte(0x80|r&0x3F))
+	return append(dst, u8(0xF0|r>>18), u8(0x80|(r>>12)&0x3F), u8(0x80|(r>>6)&0x3F), u8(0x80|r&0x3F))
 }
 
-// RuneLen returns the number of bytes needed to encode r.
-func RuneLen(r rune) int {
+// rune_len returns the number of bytes needed to encode r.
+pub fn rune_len(r rune) -> int {
 	switch {
 	case r < 0:
 		return -1
@@ -29,24 +29,24 @@ func RuneLen(r rune) int {
 		return 1
 	case r < 0x800:
 		return 2
-	case r >= 0xD800 && r < 0xE000:
+	case r >= 0xD800 and r < 0xE000:
 		return -1 // surrogates are not valid runes
 	case r < 0x10000:
 		return 3
-	case r <= MaxRune:
+	case r <= max_rune:
 		return 4
 	}
 	return -1
 }
 
-// DecodeRuneInString returns the first rune of s and its width in bytes. Invalid UTF-8 gives
-// (RuneError, 1); an empty string gives (RuneError, 0).
-func DecodeRuneInString(s string) (rune, int) {
+// decode_rune_in_string returns the first rune of s and its width in bytes. Invalid UTF-8 gives
+// (rune_error, 1); an empty string gives (rune_error, 0).
+pub fn decode_rune_in_string(s str) -> (rune, int) {
 	if len(s) == 0 {
-		return RuneError, 0
+		return rune_error, 0
 	}
-	first := rune(RuneError)
-	for i, r := range s {
+	first := rune(rune_error)
+	for i, r in s {
 		if i > 0 {
 			return first, i
 		}
@@ -55,10 +55,10 @@ func DecodeRuneInString(s string) (rune, int) {
 	return first, len(s)
 }
 
-// RuneCountInString counts the runes in s.
-func RuneCountInString(s string) int {
+// rune_count_in_string counts the runes in s.
+pub fn rune_count_in_string(s str) -> int {
 	n := 0
-	for range s {
+	for _ in s {
 		n++
 	}
 	return n

@@ -1,0 +1,10 @@
+program
+
+use os
+
+fn f() -> ! {
+	file := try os.open("x") // ERROR "try is gone: a ! after the call propagates its error"
+	return file.close()
+}
+
+fn main() {}

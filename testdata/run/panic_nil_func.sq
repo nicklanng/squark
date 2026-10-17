@@ -1,7 +1,7 @@
-package main
+program
 
-func main() {
-	var f func()
+fn main() {
+	var f fn()
 	println("before")
 	f()
 	println("after")

@@ -1,31 +1,28 @@
-package main
+program {
+	threads 2
+}
 
 // Test program for TestThreads (internal/driver): with threads 2 each shard listens on the same
 // address once; listening again from the same shard is "address in use" (as with one thread), and
 // after closing, the shard can listen again.
 
-import (
-	"net"
-	"os"
-)
+use net, os
 
-threads 2
-
-func main() {
-	l, err := net.Listen(os.Arg(1))
+fn main() {
+	l, err := net.listen(os.arg(1))
 	if err != nil {
 		println("first listen failed:", err)
 		return
 	}
-	if _, err := net.Listen(os.Arg(1)); err != nil {
+	if _, err := net.listen(os.arg(1)); err != nil {
 		print("ok in-use ")
 	} else {
 		print("ok shared-twice ")
 	}
-	l.Close()
-	if l2, err := net.Listen(os.Arg(1)); err == nil {
+	l.close()
+	if l2, err := net.listen(os.arg(1)); err == nil {
 		println("relisten-ok")
-		l2.Close()
+		l2.close()
 	} else {
 		println("relisten failed:", err)
 	}
