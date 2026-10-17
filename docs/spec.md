@@ -48,10 +48,11 @@ always current.
   - `thread` and `shared` before a package-level variable.
   - `start` before a call (`start f(x)`), `loop` before `{`, `with` before `arena` or
     `deadline`, `select` before `{`.
-  - `pool`, `stack`, `blocking` and `preemptible` after a signature; `c"symbol"` after an extern's.
+  - `pool`, `stack`, `blocking`, `preemptible` and `isolate` after a signature; `c"symbol"` after
+    an extern's.
   - `static` after `in` in a signature.
-  - `budget`, `pool`, `workers`, `threads`, `shutdown`, `link`, `cflags` and `ldflags` in the file
-    header.
+  - `budget`, `pool`, `workers`, `threads`, `shutdown`, `connections`, `sockbuf`, `heap`, `link`,
+    `cflags` and `ldflags` in the file header.
 - **Member names may be spelled like keywords.** After a `.`, as a struct field, as a method's
   name, as an enum member and as a key in a struct literal, any word is a name: `r.arena`,
   `Pair{in: 1}`, `Kind.int`.
@@ -78,6 +79,9 @@ program {                     // the main package; a library file starts with `m
     workers 4                 // program only: run 4 processes (or auto: one per CPU); see §9
     threads auto              // program only: a scheduler thread per CPU (or N); see §9
     shutdown 20s              // program only: a graceful stop's grace period (ms, s or m); see §9
+    connections 2048          // program only: at most 2048 sockets open; see §9
+    sockbuf 32K               // program only: every socket's send and receive buffer; see §9
+    heap sqlite3 32M          // the most a linked C library may allocate (a module's is a default)
     link "sqlite3"            // link a C library (any package)
     cflags "-I/opt/include"   // C compiler flags for this package's .c files
     ldflags "-L/opt/lib"      // linker flags
@@ -306,6 +310,7 @@ impl Stack {                                 // another impl block (in any file 
 task name(params) pool N { ... }             // a goroutine entry point; no results
 task name(params) pool N stack 64K { ... }   // also assert a stack upper bound
 task name(params) pool N preemptible { ... } // its loops may yield after a time slice
+task name(params) pool N isolate { ... }     // a panic in it ends only that goroutine
 
 extern fn sqrt(x f64) -> f64 stack 1K                        // the C function of the same name
 extern fn read(fd int, b u8[]) -> int stack 8K c"sq_read"    // the C symbol differs from the name
@@ -328,6 +333,16 @@ extern fn query(q str) -> int stack 128K blocking c"slow_query" // runs on a hel
   loop iteration (a load and a branch, too cheap to measure); called from other goroutines they
   never yield. Only a preemptible task can be interrupted mid-loop, so keep it from leaving state
   that other goroutines read half-updated across a loop iteration (or update it in one step).
+- `isolate` on a task: a panic in one of its goroutines (or anything that goroutine calls) prints
+  as usual, then unwinds that goroutine instead of ending the program: each frame's deferred
+  calls run, innermost first, and the goroutine ends at the task's entry, giving its pool slot
+  back; goroutine locks it still holds (`sq_gmutex`, as C shims use) are released. Release other
+  resources with `defer` (`defer f.close()`), as in Go. Its stack and arenas just go away: the
+  memory rules already keep every other goroutine from pointing into them. Package and thread
+  variables it was updating stay as they were when it panicked, as in Go. Faults in C code and
+  stack overflows still end the program. `http.serve_conn` is isolate: a handler that panics
+  closes its own connection, and the server goes on. In a program with an isolate task, each
+  function with deferred calls costs a `setjmp` per call.
 - `stack N` on an extern is required: it's the C function's stack budget used in the stack proof.
   On a task it is an assertion, and the build fails if the proven size is larger.
 - Extern parameter types map to C as follows: `int`/`i64` → `int64_t`, `i32` → `int32_t`, and so
@@ -639,7 +654,8 @@ with deadline 2 * time.second { }
   `delete`, `copy` or a vector method), and a variadic call needs its arguments as a slice
   (`defer f(xs...)`).
 - A panic ends the program at once: deferred calls don't run while panicking (there is no
-  `recover`, and the operating system closes the program's files and sockets).
+  `recover`, and the operating system closes the program's files and sockets), except in an
+  `isolate` task (§4), where it unwinds and ends only that goroutine.
 - `start f(args)`: `f` must be a task. Arguments must not reference stack or arena memory.
 - Channel sends: the value must not reference stack or arena memory.
 - `with deadline d { ... }` (`d` a `time.Duration`): blocking I/O in the block, and in everything
@@ -897,7 +913,8 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   every index the counter can reach is in range (and `p` isn't nil), so a loop that would go out
   of range still panics at the same iteration. Floating-point sums stay in source order, so they
   don't vectorize: write them with SIMD types (§3).
-- Panics print `panic: <message>` with the goroutine and source position, then exit with status 2.
+- Panics print `panic: <message>` with the goroutine and source position, then exit with status 2
+  (or, in an `isolate` task, end only that goroutine: §4).
   There is no `recover`. A nil dereference becomes `panic: runtime error: invalid memory address or
   nil pointer dereference`.
 - **Graceful stop.** SIGTERM and SIGINT end a program at once, unless it has called
@@ -913,6 +930,15 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   keep-alive connections and returns nil from `serve`, so a container's stop (Kubernetes,
   `docker stop`, systemd) drops no request. With `workers N` the supervisor passes the signal on
   and each worker stops this way.
+- **Counted kernel and C memory.** `connections N` caps the sockets a process has open (accepted
+  and dialed connections, UDP sockets, and each listener's backlog of `min(128, N/16)`):
+  `accept` waits for one to close, and `dial` and `listen` return `net.TooManyConnections`.
+  `sockbuf N` sets `SO_RCVBUF` and `SO_SNDBUF` on every socket (instead of the system's, which on
+  Linux grow to megabytes). With both, the memory report counts N × (4 × sockbuf + 4 KiB) for the
+  kernel's socket memory, which Linux charges to the cgroup; without, it reports sockets as not
+  counted. `heap LIB N` declares a C library's heap limit, which its package enforces (`sqlite`
+  calls `sqlite3_hard_heap_limit64`; 16M by default) and the report counts. Both are per process
+  (once per worker).
 - **Resource limits at start-up.** On Linux a program checks its cgroup before running any squark
   code. If the memory limit (`memory.max`, a container's `--memory`, a pod's `limits.memory`) is
   below the proven worst case, it doesn't start: it exits with status 1 and a message naming
@@ -939,8 +965,9 @@ squark emit-c [dir]                             # the generated C
 `-manifest k8s` prints, on stdout, a pod spec's `resources` (requests equal to limits, so the
 pod is in the Guaranteed QoS class) and `terminationGracePeriodSeconds`; `-manifest systemd`
 prints `MemoryMax=`, `CPUQuota=` and `TimeoutStopSec=` for a unit. The memory limit is the
-proven worst case plus 10% or 16 MiB, whichever is more, for what squark doesn't count (kernel
-socket buffers, C libraries); the CPU limit is the scheduler threads; the stop timeout is the
+proven worst case plus headroom for what squark doesn't count: 10% or 16 MiB, whichever is more,
+or 5% or 8 MiB once sockets and every C library's heap are declared (page cache remains); the CPU
+limit is the scheduler threads; the stop timeout is the
 shutdown grace period plus 5 seconds. It needs `threads N`, not `auto`.
 
 `-cpu` (or `SQUARK_CPU` in the environment) picks the CPU to build for: `baseline` (the default:

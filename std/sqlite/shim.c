@@ -13,6 +13,7 @@
 // work; the lock calls run on the scheduler thread, before the blocking call they protect.
 #include <sqlite3.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <string.h>
 #include <unistd.h>
 #include "sq_rt.h"
@@ -85,7 +86,20 @@ void sq_sqlite_stmt_use(stmt *s) {
 
 // sq_sqlite_open opens a connection (blocking: on a helper thread). The wrapper is allocated by
 // SQLite, which manages its own memory.
+// apply_heap_limit sets SQLite's heap limit to the program's heap sqlite3 N (or the package's
+// default), once per process: SQLite then frees cache to stay under it, and fails an allocation
+// with SQLITE_NOMEM rather than grow past it, so the memory report can count it.
+static pthread_once_t heap_once = PTHREAD_ONCE_INIT;
+
+static void apply_heap_limit(void) {
+	int64_t n = sq_c_heap("sqlite3");
+	if (n <= 0) return;
+	sqlite3_soft_heap_limit64(n / 4 * 3); // shrink caches before the hard limit is near
+	sqlite3_hard_heap_limit64(n);
+}
+
 int64_t sq_sqlite_open(sq_string path, conn **out) {
+	pthread_once(&heap_once, apply_heap_limit);
 	char buf[1024];
 	*out = NULL;
 	if (path.len >= (int64_t)sizeof buf) return SQLITE_CANTOPEN;

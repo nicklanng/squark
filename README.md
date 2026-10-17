@@ -184,7 +184,10 @@ task serve_conn(c net.Conn, h Handler) pool 10000 stack 256K {
 start serve_conn(c, h)
 ```
 
-Only tasks can be started. The pool is the maximum number running at once: `start` waits for a
+Only tasks can be started. `isolate` on a task makes a panic in one of its goroutines run that
+goroutine's deferred calls and end only it, not the program; `http.serve_conn` is isolate, so a
+handler that panics closes its own connection and the server goes on. The pool is the maximum
+number running at once: `start` waits for a
 free slot instead of growing, and `start f(x) else { ... }` runs the block instead of waiting. The compiler proves each task's stack size from clang's frame sizes
 and the call graph; recursion is banned so that this is possible. `stack N` asserts an upper bound,
 and a program can resize a library's pool with `pool http.serve_conn 512`.
@@ -223,6 +226,8 @@ memory: worst case 97.1 MiB of 128.0 MiB budget
   C libraries                 not counted   sqlite3 manages its own memory
 ```
 
+`connections N` and `sockbuf N` add the kernel's socket buffers to it, and `heap sqlite3 N` SQLite's
+heap (enforced, 16M by default), so the worst case covers what the kernel charges a container.
 If the worst case is over budget, the build fails and prints this breakdown. The binary knows its
 worst case too: on Linux it refuses to start in a cgroup (a container, a pod) whose memory limit
 is lower, rather than being killed later at its busiest. `squark build -manifest k8s` prints the

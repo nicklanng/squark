@@ -125,7 +125,7 @@ func (p *parser) memberIdent() *Ident {
 	return p.ident()
 }
 
-var directiveWords = map[string]bool{"budget": true, "link": true, "cflags": true, "ldflags": true, "pool": true, "workers": true, "threads": true, "shutdown": true}
+var directiveWords = map[string]bool{"budget": true, "link": true, "cflags": true, "ldflags": true, "pool": true, "workers": true, "threads": true, "shutdown": true, "sockbuf": true, "connections": true, "heap": true}
 
 func (p *parser) file(path string) *File {
 	f := &File{Path: path, Pragmas: p.tok.pragmas, Doc: p.tok.doc}
@@ -208,6 +208,10 @@ func (p *parser) directive() *Directive {
 		if p.got(PERIOD) {
 			d.Target += "." + p.ident().Name
 		}
+	}
+	if d.Name == "heap" {
+		// heap sqlite3 16M: the most a linked C library may allocate
+		d.Target = p.ident().Name
 	}
 	if d.Name == "shutdown" {
 		// shutdown 20s: a number with its unit right after it
@@ -299,11 +303,15 @@ func (p *parser) clauses(d *FuncDecl) {
 			p.next()
 			continue
 		}
-		if name != "pool" && name != "stack" && name != "blocking" && name != "preemptible" {
+		if name != "pool" && name != "stack" && name != "blocking" && name != "preemptible" && name != "isolate" {
 			return
 		}
 		p.next()
 		switch name {
+		case "isolate":
+			d.Isolate = true
+			d.IsolatePos = pos
+			continue
 		case "blocking":
 			d.Blocking = true
 			d.BlockingPos = pos
@@ -541,7 +549,7 @@ func (p *parser) startsResultType() bool {
 		return true
 	case IDENT:
 		switch p.tok.lit {
-		case "pool", "stack", "blocking", "preemptible":
+		case "pool", "stack", "blocking", "preemptible", "isolate":
 			return false
 		case "c":
 			return p.peek().tok != STRING

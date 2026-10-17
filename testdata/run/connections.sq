@@ -1,0 +1,44 @@
+program {
+	connections 6
+	sockbuf 16K
+}
+
+// connections N: the process keeps at most N sockets open. A listener holds part of the N for the
+// connections queued on it (here max(1, 6/16) = 1), dial fails with net.TooManyConnections when
+// none is left, and accept waits for a socket to close.
+
+use net, time
+
+fn addr(l net.Listener, b u8[]) -> str in b {
+	return str(net.append_host_port(b[:0], "127.0.0.1", l.port()))
+}
+
+fn main() {
+	var b u8[32]
+	l, err := net.listen("127.0.0.1:0") // 1
+	if err != nil {
+		panic(err)
+	}
+	a := addr(l, b[:])
+	c1, _ := net.dial(a) // 2
+	s1, _ := l.accept()  // 3
+	c2, _ := net.dial(a) // 4
+	s2, _ := l.accept()  // 5
+	c3, _ := net.dial(a) // 6: every socket in use
+	_, err = net.dial(a)
+	println("dial with none left:", err.message())
+	with deadline 50 * time.millisecond {
+		_, err = l.accept() // c3 is queued, but accepting it would need a seventh
+		println("accept with none left:", err.message())
+	}
+	c1.close()
+	s3, err := l.accept()
+	println("accept once one closed:", err == nil)
+	for c in net.Conn[]{c2, c3, s1, s2, s3} {
+		c.close()
+	}
+	c4, err := net.dial(a)
+	println("dial after closing:", err == nil)
+	c4.close()
+	l.close()
+}

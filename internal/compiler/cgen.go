@@ -33,6 +33,7 @@ type cdef struct {
 }
 
 type gen struct {
+	unwinds bool // the function registers an unwind frame: it has deferred calls and the program an isolate task
 	prog *Program
 
 	usesLookup bool // a SIMD Lookup: sq_rt.h then includes arm_neon.h, which takes a while to parse
@@ -860,6 +861,7 @@ func (g *gen) function(f *Func) string {
 	g.usesGlobals = false
 	g.addressed = nil
 	g.fnPreempt, g.usesPreempt = g.preemptFns[f], false
+	g.unwinds = g.prog.HasIsolate && len(f.Defers) > 0
 	g.topDecls = nil
 	var body strings.Builder
 	g.out = &body
@@ -870,7 +872,7 @@ func (g *gen) function(f *Func) string {
 		}
 	}
 	for _, d := range f.Defers {
-		g.topDecls = append(g.topDecls, fmt.Sprintf("bool _d%d_on = false;", d.ID))
+		g.topDecls = append(g.topDecls, fmt.Sprintf("%sbool _d%d_on = false;", g.volatile(), d.ID))
 	}
 	g.stmts(f.Decl.Body.List)
 	if len(f.Sig.Results) == 0 {
@@ -895,6 +897,16 @@ func (g *gen) function(f *Func) string {
 	for _, d := range g.topDecls {
 		b.WriteString("\t" + d + "\n")
 	}
+	if g.unwinds {
+		// an isolate task's panic unwinds through here: the frame's deferred calls run, then the
+		// unwinding goes on to the caller's frame (sq_unwind_resume)
+		b.WriteString("\tsq_unwind _uw;\n\tsq_unwind_push(&_uw);\n\tif (_setjmp(_uw.jb)) {\n")
+		for i := len(f.Defers) - 1; i >= 0; i-- {
+			d := f.Defers[i]
+			fmt.Fprintf(&b, "\t\tif (_d%d_on) { _d%d_on = false; %s; }\n", d.ID, d.ID, g.deferCall(d))
+		}
+		b.WriteString("\t\tsq_unwind_resume();\n\t}\n")
+	}
 	b.WriteString(body.String())
 	b.WriteString("}\n")
 	g.fn = nil
@@ -907,9 +919,30 @@ func (g *gen) lineDirectiveTo(b *strings.Builder, p Pos) {
 	}
 }
 
+// volatile qualifies the locals a deferred call reads when the function has an unwind frame: they
+// change after its _setjmp, and the unwinding path must see their latest values.
+func (g *gen) volatile() string {
+	if g.unwinds {
+		return "volatile "
+	}
+	return ""
+}
+
+// unwindPop is the statement that leaves the function's unwind frame on a return, before its
+// deferred calls run (one that panics unwinds from the caller's frame on).
+func (g *gen) unwindPop() string {
+	if g.unwinds {
+		return "sq_unwind_pop(&_uw); "
+	}
+	return ""
+}
+
 func (g *gen) runDefers() {
 	if g.fn == nil {
 		return
+	}
+	if p := g.unwindPop(); p != "" {
+		g.line("%s", strings.TrimSpace(p))
 	}
 	for i := len(g.fn.Defers) - 1; i >= 0; i-- {
 		d := g.fn.Defers[i]

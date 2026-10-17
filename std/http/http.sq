@@ -481,16 +481,20 @@ task wake_idle() pool 1 {
 // serve_conn runs one keep-alive connection while it is busy. At most 10000 run at once; further
 // connections wait for a slot. A connection that stays quiet for idle_release is parked in the
 // runtime's idle set and this goroutine exits, returning its whole stack to the OS.
-// During a graceful stop it closes the connection once no request is pending.
-task serve_conn(c net.Conn, id int) pool 10000 {
+// During a graceful stop it closes the connection once no request is pending. It is isolate: a
+// handler that panics ends only its own connection (closed, as Go's net/http does), while the
+// server goes on.
+task serve_conn(c net.Conn, id int) pool 10000 isolate {
 	active++
-	defer conn_done()
+	open := true // until the connection is closed or parked: if a handler panics, it is still open
+	defer conn_done(c, &open)
 	h := handlers[id]
 	var rbuf u8[read_buffer_size]
 	var wbuf u8[write_buffer_size]
 	n := 0
 	loop {
 		if n == 0 and (runtime.stopping() or not c.wait_readable(idle_release)) {
+			open = false
 			if runtime.stopping() {
 				c.close()
 			} else {
@@ -501,13 +505,19 @@ task serve_conn(c net.Conn, id int) pool 10000 {
 		ok := false
 		n, ok = serve_request(c, h, rbuf[:], n, wbuf[:])
 		if not ok {
+			open = false
 			c.close()
 			return
 		}
 	}
 }
 
-fn conn_done() { active-- }
+fn conn_done(c net.Conn, open *bool) {
+	active--
+	if *open {
+		c.close() // a handler panicked
+	}
+}
 
 // read_more reads into rbuf[n:] until start+limit. It returns how many bytes it read, or 0 if the
 // connection is done (an error, EOF, or the deadline, which gets a 408).

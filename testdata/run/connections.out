@@ -1,0 +1,4 @@
+dial with none left: too many connections (the program's connections limit)
+accept with none left: i/o timeout
+accept once one closed: true
+dial after closing: true

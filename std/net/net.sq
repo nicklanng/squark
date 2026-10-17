@@ -56,10 +56,19 @@ pub fault Stopping -23 "stopping: the program got a stop signal"
 
 const sq_e_stop = 65537 // sq_accept returns -sq_e_stop during a graceful stop
 
+// TooManyConnections is returned by dial and listen when the program already has the most sockets
+// its connections N directive allows (accept waits for one to close instead).
+pub fault TooManyConnections -24 "too many connections (the program's connections limit)"
+
+const sq_e_toomany = 65538
+
 // fd_error is the error for a runtime call's negative result: Timeout or an errno.
 fn fd_error(n int) -> error {
 	if n == -sq_e_timeout {
 		return Timeout
+	}
+	if n == -sq_e_toomany {
+		return TooManyConnections
 	}
 	return os.errno(-n)
 }
@@ -121,7 +130,7 @@ pub fn listen(addr str) -> Listener ! {
 	}
 	fd := listen_tcp(host, port, 4096)
 	if fd < 0 {
-		return Listener{sysfd: -1}, os.errno(-fd)
+		return Listener{sysfd: -1}, fd_error(fd)
 	}
 	return Listener{sysfd: fd}, nil
 }
@@ -191,11 +200,8 @@ fn dial_proto(ip IP, port int, udp int) -> Conn ! {
 		return Conn{sysfd: -1}, BadAddress
 	}
 	fd := sys_dial(ip.b[:ip.n], port, udp)
-	if fd == -sq_e_timeout {
-		return Conn{sysfd: -1}, Timeout
-	}
 	if fd < 0 {
-		return Conn{sysfd: -1}, os.errno(-fd)
+		return Conn{sysfd: -1}, fd_error(fd)
 	}
 	return Conn{sysfd: fd}, nil
 }

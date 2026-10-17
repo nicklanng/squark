@@ -1213,12 +1213,14 @@ func (g *gen) tryExpr(e *TryExpr) string {
 			fmt.Fprintf(&b, "%s = %s; ", r.CName, g.zero(r.Type))
 		}
 		fmt.Fprintf(&b, "%s = %s; ", sig.Results[len(sig.Results)-1].CName, errExpr)
+		b.WriteString(g.unwindPop())
 		for i := len(g.fn.Defers) - 1; i >= 0; i-- {
 			d := g.fn.Defers[i]
 			fmt.Fprintf(&b, "if (_d%d_on) { %s; } ", d.ID, g.deferCall(d))
 		}
 		fmt.Fprintf(&b, "return %s; ", g.namedResultsValue(sig))
 	} else if g.fn != nil {
+		b.WriteString(g.unwindPop())
 		for i := len(g.fn.Defers) - 1; i >= 0; i-- {
 			d := g.fn.Defers[i]
 			fmt.Fprintf(&b, "if (_d%d_on) { %s; } ", d.ID, g.deferCall(d))

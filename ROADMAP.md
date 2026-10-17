@@ -149,7 +149,19 @@ Each needs a design pass first: the open questions below are decided in this fil
   - Spec: §2 program block, §10 toolchain. Tests: driver test for `-manifest`; Docker run with
     `--memory` below and above the budget.
 
-- [ ] **2.4 Count the memory the budget misses, so `limits.memory = budget` is true.**
+- [x] **2.4 Count the memory the budget misses, so `limits.memory = budget` is true.** — done:
+  `connections N` (a process-wide socket cap: accept waits, dial and listen return
+  `net.TooManyConnections`, a listener holds `min(128, N/16)` for its backlog), `sockbuf N`
+  (SO_RCVBUF/SO_SNDBUF on every socket), `heap LIB N` (a module's is a default the program
+  overrides; `sqlite` enforces it with `sqlite3_hard_heap_limit64`, 16M by default); the report
+  counts N × (4 × sockbuf + 4 KiB) and the heaps, per worker; the manifest's headroom drops to
+  max(5%, 8 MiB) when nothing is left uncounted. **Decided:** pools can't bound sockets (idle
+  keep-alive connections have no task), so the cap is on sockets; backlogs count against it.
+  **Measured** (Docker, Linux arm64): `connections 1100`, `sockbuf 16K`, 64 KiB responses to
+  clients that never read: 582 sockets full, cgroup `sock` 27.3 MiB (~47 KiB each, under the 68 KiB
+  counted), peak 72.4 MiB against a worst case of 110.1 MiB and a limit of 119 MiB, no OOM. tests:
+  `testdata/run/connections.sq`, `TestCountedMemory`, `testdata/errors/counted.sq`. Plan as first
+  written:
   - `pool http.serve_conn 512 sockbuf 64K`: the runtime sets `SO_RCVBUF`/`SO_SNDBUF` on every
     connection the pool serves, and the budget adds pool × (kernel's doubling of) sockbuf.
     cgroup v2 charges socket memory to the pod.
@@ -161,7 +173,20 @@ Each needs a design pass first: the open questions below are decided in this fil
   - Tests: budget report test; a Docker load test where peak `memory.current` stays under the
     reported worst case.
 
-- [ ] **2.5 Isolated tasks.** `task serve_conn(...) pool 512 isolate`: a panic ends only that task
+- [x] **2.5 Isolated tasks.** — done: `task t() pool N isolate`; in a program with one, every
+  function with deferred calls pushes an `sq_unwind` frame (`_setjmp`) and pops it on return; a
+  panic in an isolate goroutine prints as usual, then unwinds frame by frame running deferred
+  calls, ends at the task's entry (slot returned) and releases the goroutine locks it held.
+  `http.serve_conn` is isolate and closes the connection of a handler that panicked.
+  **Decided:** deferred calls do run (Go's semantics; resources are released with `defer`, so
+  no fd-ownership tracking is needed); no checker restriction on writing package or thread
+  variables (every HTTP handler would hit it, since handlers are called indirectly; Go's net/http
+  recovers handler panics the same way), documented instead; faults in C code and stack overflows
+  stay fatal; the cost is a `setjmp` per call of a function with deferred calls, only in programs
+  with an isolate task. Found while testing: a deferred call's pointer argument must be a
+  volatile *variable* (`__typeof__(T) volatile`), not a pointer to volatile, or longjmp restores
+  it to its value at entry. tests: `testdata/run/isolate.sq`, `testdata/errors/isolate.sq`,
+  `TestIsolateHandlerPanic`, `TestIsolateReleasesLocks`, grammar. Plan as first written: `task serve_conn(...) pool 512 isolate`: a panic ends only that task
   instance. The region checker already proves nothing outside the task points into its stack or
   arenas, so dropping them is memory-safe.
   - Checker: an `isolate` task (and everything it calls) may not write `thread` or package
@@ -180,14 +205,25 @@ Each needs a design pass first: the open questions below are decided in this fil
 
 ## 3. Standard library and tooling
 
-- [ ] **3.1 Metrics.** Everything worth watching is known at compile time: pools, arenas, stacks,
-  the budget. `runtime` exposes it (pool in use / max, arena high-water marks, observed stack
-  depth against the proof, connections idle, budget). `http.handle_metrics("/metrics")` serves it
-  in Prometheus text format. Users add counters and gauges as package variables.
+- [ ] **3.1 Metrics.** Everything worth watching is known at compile time: pools, sockets, the
+  budget. Plan:
+  - Pool counters (`live`, `peak`, `started`) become relaxed atomics, so any thread can read every
+    shard's (a scrape lands on one shard under `threads N`, and must report the process).
+  - `std/metrics`: counters and gauges in a fixed runtime-owned table of atomic cells (C owns
+    them, so threads sharing them breaks no squark rule): `metrics.counter(name, labels, help)`
+    returns a handle (registering is idempotent by name and labels, so every shard's `main` can
+    do it), `c.add(n)`, `g.set(v)`. `metrics.append_text(dst)` writes the Prometheus text format:
+    the program's metrics plus the runtime's (pools, open sockets and the connections limit,
+    idle connections, the worst case and budget, threads, whether a stop has begun).
+  - `http` counts requests by status class and handler panics (isolate).
 - [ ] **3.2 Structured logs.** `std/log`: JSON lines to stdout, fixed-size records, levels;
   `log.info("served", "path", r.path, "ms", ms)`. Never allocates; truncates instead.
-- [ ] **3.3 Probe endpoints that don't starve.** `http.handle_probe("/healthz", fn)` serves
-  probes from a small separate task pool, so a full `serve_conn` pool doesn't fail liveness.
+- [ ] **3.3 An admin port that doesn't starve.** Not `handle_probe` on the main listener: a
+  request is only known to be a probe once read, and by then it holds a `serve_conn` slot. Instead
+  `http.serve_admin(":9090")` serves `/healthz` (alive), `/readyz` (ready: 503 during a graceful
+  stop, so the endpoint is removed before the server stops accepting, and while the program says
+  `http.set_ready(false)`) and `/metrics`, from its own listener and a small task pool of its
+  own, so a full `serve_conn` pool can't fail liveness.
 - [ ] **3.4 Static builds.** `squark build -static` links statically (musl on Linux; libsqlite3
   static too), so the image can be `FROM scratch`. `examples/` gets a Dockerfile.
 - [ ] **3.5 TLS for outbound calls.** BearSSL (no malloc, caller-provided buffers) vendored as a
@@ -214,3 +250,5 @@ Each needs a design pass first: the open questions below are decided in this fil
 - 2026-10-17: the user delegated section 2's design questions; decisions are recorded per item.
   Section 1 committed (41ade0c). 2.1 done (218a759; fuzz 5000 clean). 2.2 and 2.3 done: full
   suite on macOS (ASan) and Linux, fuzz 5000 clean.
+- 2026-10-17: 2.4 and 2.5 done; section 2 closed. Full suite on macOS (ASan) and Linux, fuzz 5000
+  clean. Section 3's plan refined (3.1 metrics through runtime-owned atomics, 3.3 an admin port).

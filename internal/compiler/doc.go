@@ -137,6 +137,9 @@ func DocLine(fn *Func) string {
 	if fn.Preemptible {
 		b.WriteString(" preemptible")
 	}
+	if fn.Isolate {
+		b.WriteString(" isolate")
+	}
 	if fn.Extern != "" && fn.Extern != fn.Name {
 		fmt.Fprintf(&b, " c%q", fn.Extern)
 	}

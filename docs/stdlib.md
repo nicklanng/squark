@@ -667,6 +667,7 @@ thread hosts_file str
 fault BadAddress 22 "invalid address (want host:port)"
 fault Timeout -20 "i/o timeout"
 fault Stopping -23 "stopping: the program got a stop signal"
+fault TooManyConnections -24 "too many connections (the program's connections limit)"
 
 // IP is an IPv4 or IPv6 address, held by value. The zero IP is no address.
 struct IP {
@@ -1148,8 +1149,9 @@ fn ints(s int[])
 // strings sorts s in increasing order.
 fn strings(s str[])
 
-// Package sqlite binds libsqlite3. SQLite manages its own memory; squark code never touches
-// the heap: column text is copied into caller-provided buffers.
+// Package sqlite binds libsqlite3. SQLite manages its own memory, within the heap limit the
+// program declares (heap sqlite3 N; 16M by default), which the memory report counts; squark code
+// never touches the heap: column text is copied into caller-provided buffers.
 module sqlite
 
 const ok = 0

@@ -419,6 +419,36 @@ type constDecl struct {
 }
 
 // findTask resolves "pkg.name" (or "name" in package main) to a task.
+// heapDirective records heap LIB N: a library's (a default) or the program's (which wins). LIB is
+// the library's link name.
+func (c *Checker) heapDirective(pkg *Package, d *Directive) {
+	n, ok := c.constSize(d.Value, "heap")
+	if !ok {
+		return
+	}
+	if n < 64<<10 || n > 1<<40 {
+		c.errorf(d.P, "heap must be between 64K and 1T")
+		return
+	}
+	linked := false
+	for _, p := range c.prog.Packages {
+		for _, l := range p.Links {
+			linked = linked || l == d.Target
+		}
+	}
+	if !linked {
+		c.errorf(d.P, "heap %s: no package links a C library named %s (heap takes a link name, as in link \"%s\")", d.Target, d.Target, d.Target)
+		return
+	}
+	if c.prog.Heaps == nil {
+		c.prog.Heaps = map[string]int64{}
+	}
+	if _, set := c.prog.Heaps[d.Target]; set && pkg != c.prog.Main {
+		return // the program's (checked first or later) wins over a library's
+	}
+	c.prog.Heaps[d.Target] = n
+}
+
 func (c *Checker) findTask(target string) *Func {
 	pkgName, name := "main", target
 	if i := strings.IndexByte(target, '.'); i >= 0 {
@@ -645,6 +675,13 @@ func (c *Checker) resolveDecls(pkg *Package) {
 				}
 			}
 		}
+		if d.Isolate {
+			if !fn.IsTask {
+				c.errorf(d.IsolatePos, "only tasks can be isolate (a panic unwinds to a goroutine's entry point)")
+			}
+			fn.Isolate = true
+			c.prog.HasIsolate = true
+		}
 		if d.Preemptible {
 			if !fn.IsTask {
 				c.errorf(d.PreemptiblePos, "only tasks can be preemptible (a goroutine's entry point decides whether it may be interrupted)")
@@ -673,6 +710,11 @@ func (c *Checker) resolveDecls(pkg *Package) {
 	// budget, pool and workers directives (package main only)
 	var workersDir, threadsDir *Directive
 	for _, d := range pkg.Budgets {
+		if d.Name == "heap" {
+			c.setFile(c.fileOf(d.P))
+			c.heapDirective(pkg, d)
+			continue
+		}
 		if pkg != c.prog.Main {
 			c.errorf(d.P, "%s is only allowed in the program header (program { %s ... }), not in a module", d.Name, d.Name)
 			continue
@@ -700,6 +742,25 @@ func (c *Checker) resolveDecls(pkg *Package) {
 				}
 				*count = n
 			}
+			continue
+		}
+		if d.Name == "sockbuf" || d.Name == "connections" {
+			n, ok := c.constSize(d.Value, d.Name)
+			if !ok {
+				continue
+			}
+			field, lo, hi, rng := &c.prog.SockBuf, int64(4<<10), int64(64<<20), "4K and 64M"
+			if d.Name == "connections" {
+				field, lo, hi, rng = &c.prog.Conns, 1, 1<<24, "1 and 16M"
+			}
+			if n < lo || n > hi {
+				c.errorf(d.P, "%s must be between %s", d.Name, rng)
+				continue
+			}
+			if *field != 0 {
+				c.errorf(d.P, "duplicate %s", d.Name)
+			}
+			*field = n
 			continue
 		}
 		if d.Name == "shutdown" {

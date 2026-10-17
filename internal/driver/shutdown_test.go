@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -378,5 +380,80 @@ func TestShedLoad(t *testing.T) {
 				t.Errorf("shed=%v: a request that had a slot got %d", shed, c)
 			}
 		}
+	}
+}
+
+// TestIsolateHandlerPanic: a handler that panics ends only its own connection (closed; the panic
+// is on stderr) and the server goes on serving.
+func TestIsolateHandlerPanic(t *testing.T) {
+	src := strings.Replace(shutdownServer, "fn handle(w *http.ResponseWriter, r *http.Request) {\n", "fn handle(w *http.ResponseWriter, r *http.Request) {\n\tif r.path == \"/boom\" {\n\t\tvar xs int[2]\n\t\tprintln(xs[len(r.path)])\n\t}\n", 1)
+	bin := buildSource(t, src)
+	_, addr, out, done := startServer(t, bin)
+	// no keep-alive: Go's client retries a GET once on a fresh connection when a reused one closes
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	for i := 0; i < 3; i++ {
+		if resp, err := client.Get("http://" + addr + "/boom"); err == nil {
+			resp.Body.Close()
+			t.Fatalf("/boom answered %d, want the connection closed", resp.StatusCode)
+		}
+		resp, err := client.Get("http://" + addr + "/")
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("after a panic: %v\n%s", err, out.String())
+		}
+		resp.Body.Close()
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the server exited: %v\n%s", err, out.String())
+	default:
+	}
+	if n := strings.Count(out.String(), "the goroutine ends; the program goes on"); n != 3 {
+		t.Errorf("%d isolated panics reported, want 3:\n%s", n, out.String())
+	}
+}
+
+// TestIsolateReleasesLocks: a goroutine lock (sq_gmutex, which C shims such as sqlite's use) held
+// by an isolate task's goroutine when it panics is released, so others don't wait forever.
+func TestIsolateReleasesLocks(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "lock.c"), []byte(`#include "sq_rt.h"
+static sq_gmutex mu;
+static int ready;
+void lk_lock(void) {
+	if (!ready) {
+		sq_gmutex_init(&mu);
+		ready = 1;
+	}
+	sq_gmutex_lock(&mu);
+}
+void lk_unlock(void) { sq_gmutex_unlock(&mu); }
+`), 0o644)
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(`program
+
+use time
+
+extern fn lk_lock() stack 8K
+extern fn lk_unlock() stack 8K
+
+task holder() pool 1 isolate {
+	lk_lock()
+	panic("while holding the lock")
+}
+
+fn main() {
+	start holder()
+	time.sleep(20 * time.millisecond)
+	lk_lock()
+	println("the lock was released")
+	lk_unlock()
+}
+`), 0o644)
+	bin := filepath.Join(dir, "prog")
+	if _, err := Build(Options{Dir: dir, Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := runFor(t, 5*time.Second, bin)
+	if code != 0 || stdout != "the lock was released\n" || !strings.Contains(stderr, "panic: while holding the lock") {
+		t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }

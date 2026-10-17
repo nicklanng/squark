@@ -1,0 +1,11 @@
+program
+
+fn f() isolate { // ERROR "only tasks can be isolate"
+}
+
+task t() pool 2 isolate preemptible {
+}
+
+fn main() {
+	start t()
+}

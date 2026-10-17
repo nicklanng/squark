@@ -1,0 +1,7 @@
+program {
+	sockbuf 1K // ERROR "sockbuf must be between 4K and 64M"
+	connections 0 // ERROR "connections must be between 1 and 16M"
+	heap libfoo 8M // ERROR "heap libfoo: no package links a C library named libfoo"
+}
+
+fn main() {}

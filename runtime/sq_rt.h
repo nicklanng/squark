@@ -282,7 +282,23 @@ typedef struct sq_pool {
 	int64_t observed; // deepest stack use seen (only with SQ_STACKCHECK=1)
 	int64_t index;    // position in sq_pools; each shard has its own copy of every pool
 	bool preemptible; // task ... preemptible: its loops yield when asked (sq_preempt)
+	bool isolate;     // task ... isolate: a panic unwinds to the task's entry and ends only it
 } sq_pool;
+
+// Unwinding (task ... isolate). In a program with an isolate task, every function with deferred
+// calls pushes an sq_unwind frame on entry and pops it on return. A panic in an isolate task's
+// goroutine prints as usual, then jumps to the innermost frame, which runs its deferred calls and
+// resumes the unwinding at the next, up to the task's entry (sq_unwind_base), where the goroutine
+// ends and the program goes on.
+typedef struct sq_unwind {
+	jmp_buf jb;
+	struct sq_unwind *prev;
+} sq_unwind;
+void sq_unwind_push(sq_unwind *u);
+void sq_unwind_pop(sq_unwind *u);
+SQ_NORETURN void sq_unwind_resume(void);
+void sq_unwind_base(sq_unwind *u);
+void sq_unwind_end(sq_unwind *u);
 
 // Preemption: loops in preemptible tasks (and the functions they call) check their thread's flag
 // at every iteration; the watchdog sets it when a goroutine has run for a time slice.
@@ -408,6 +424,16 @@ extern const bool sq_threads_env;  // SQUARK_THREADS applies (the program has a 
 extern const int64_t sq_threads_max; // with a budget: the count it was proven for (0: no limit)
 extern const int64_t sq_shutdown_ns; // shutdown D: the graceful stop's grace period (0: 10s)
 extern const int64_t sq_worst_case;  // the proven worst-case memory (0: not known, e.g. threads auto)
+extern const int64_t sq_sockbuf;     // sockbuf N: every socket's SO_RCVBUF and SO_SNDBUF (0: the system's)
+extern const int64_t sq_max_conns;   // connections N: the most sockets open at once (0: no limit)
+typedef struct sq_heap_limit {
+	const char *lib; // a link name: "sqlite3"
+	int64_t limit;
+} sq_heap_limit;
+extern const sq_heap_limit sq_heap_limits[]; // heap LIB N directives, ended by {0, 0}
+// sq_c_heap returns the heap limit declared for the C library lib (heap lib N), or 0: its shim
+// applies it (the sqlite package calls sqlite3_hard_heap_limit64)
+int64_t sq_c_heap(const char *lib);
 extern const size_t sq_globals_size; // generated: one shard's package variables
 void sq_globals_set(void *p);        // generated: point this thread at a shard's package variables
 int64_t sq_shard_id(void);

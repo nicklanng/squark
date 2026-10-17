@@ -1,0 +1,43 @@
+program
+
+// task ... isolate: a panic in one of its goroutines prints as usual (on stderr), runs that
+// goroutine's deferred calls from the innermost frame out, and ends only that goroutine: its pool
+// slot comes back and the program goes on. Frames without deferred calls are just dropped.
+
+thread done int chan[8]
+
+fn note(s str) { println(s) }
+
+fn inner(n int) {
+	defer note("  inner's defer")
+	var xs int[2]
+	println("  inner reads", xs[n%2*5]) // out of range for n = 1
+}
+
+fn no_defers(n int) { inner(n) }
+
+fn middle(n int) -> int ! {
+	defer note("  middle's defer")
+	no_defers(n)
+	if n == 2 {
+		panic("explicit")
+	}
+	return n, nil
+}
+
+task work(n int) pool 1 isolate {
+	defer finished(n)
+	if _, err := middle(n); err == nil {
+		println("  work", n, "returns")
+	}
+}
+
+fn finished(n int) { done <- n } // deferred: sends even when the goroutine panics
+
+fn main() {
+	for n in int[]{0, 1, 2, 0} {
+		println("start", n)
+		start work(n) // a pool of 1: each start needs the slot the previous goroutine gave back
+		println("finished", <-done)
+	}
+}

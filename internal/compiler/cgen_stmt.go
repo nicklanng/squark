@@ -459,7 +459,12 @@ func (g *gen) goStmt(s *GoStmt) {
 	}
 	fmt.Fprintf(&g.goSites, "struct sq_ga%d { %s };\n", s.ID, strings.Join(fields, " "))
 	fmt.Fprintf(&g.goSites, "static %s;\n", g.proto(f))
-	fmt.Fprintf(&g.goSites, "static void %s(void *p) { struct sq_ga%d *a = p; (void)a; %s(%s); }\n", tramp, s.ID, f.CName, strings.Join(unpack, ", "))
+	if f.Isolate {
+		// the base of the goroutine's unwind frames: a panic in it ends here, and the goroutine exits
+		fmt.Fprintf(&g.goSites, "static void %s(void *p) { struct sq_ga%d *a = p; (void)a; sq_unwind u; sq_unwind_base(&u); if (!_setjmp(u.jb)) %s(%s); sq_unwind_end(&u); }\n", tramp, s.ID, f.CName, strings.Join(unpack, ", "))
+	} else {
+		fmt.Fprintf(&g.goSites, "static void %s(void *p) { struct sq_ga%d *a = p; (void)a; %s(%s); }\n", tramp, s.ID, f.CName, strings.Join(unpack, ", "))
+	}
 	args := g.callArgs(call, sig)
 	ga := g.tmp()
 	init := "{0}"
@@ -507,7 +512,13 @@ func (g *gen) deferStmt(s *DeferStmt) {
 	}
 	for i, a := range args {
 		name := fmt.Sprintf("_d%d_a%d", s.ID, i)
-		g.topDecls = append(g.topDecls, fmt.Sprintf("%s = %s;", g.decl(types[i], name), g.zero(types[i])))
+		decl := g.decl(types[i], name)
+		if g.unwinds {
+			// the variable itself must be volatile (for a pointer, "volatile T *" would be the
+			// pointee): __typeof__ qualifies whatever type it is
+			decl = fmt.Sprintf("__typeof__(%s) volatile %s", g.ctype(types[i]), name)
+		}
+		g.topDecls = append(g.topDecls, fmt.Sprintf("%s = %s;", decl, g.zero(types[i])))
 		g.line("%s = %s;", name, a)
 	}
 	g.line("_d%d_on = true;", s.ID)

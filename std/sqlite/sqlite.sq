@@ -1,7 +1,9 @@
-// Package sqlite binds libsqlite3. SQLite manages its own memory; squark code never touches
-// the heap: column text is copied into caller-provided buffers.
+// Package sqlite binds libsqlite3. SQLite manages its own memory, within the heap limit the
+// program declares (heap sqlite3 N; 16M by default), which the memory report counts; squark code
+// never touches the heap: column text is copied into caller-provided buffers.
 module sqlite {
 	link "sqlite3"
+	heap sqlite3 16M // a program can change it: program { heap sqlite3 64M }
 	cflags "-I/opt/homebrew/opt/sqlite/include"
 	ldflags "-L/opt/homebrew/opt/sqlite/lib"
 }

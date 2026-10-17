@@ -34,6 +34,10 @@ struct sq_g {
 	int64_t heap_index; // -1 when not in the timer heap
 	int64_t deadline;   // with deadline: when blocking I/O times out (sq_nanotime), or 0 for never
 	void *try_jb;       // the jmp_buf of the `v, ok := x in a` being evaluated, or NULL
+	struct sq_unwind *unwind; // the innermost unwind frame (isolate tasks; see sq_rt.h)
+	bool unwinding;           // a panic is unwinding this goroutine
+	struct sq_gmutex *held[8]; // goroutine locks it holds, released if it ends unwinding
+	int nheld;
 	// netpoll
 	int wait_fd;        // fd this goroutine is parked on, or -1
 	bool armed;         // a kqueue/epoll registration for this goroutine is outstanding

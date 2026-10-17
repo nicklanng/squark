@@ -209,7 +209,9 @@ static _Atomic int64_t stop_cap;   // during a graceful stop: when every gorouti
 // graceful stop.
 #define SQ_ETIMEOUT 65536
 #define SQ_ESTOP 65537
+#define SQ_ETOOMANY 65538 // connections N: no socket left
 static void stop_shard(void);
+static void sock_closed(int fd);
 
 static void heap_remove(sq_g *g);
 static void heap_up(int64_t i);
@@ -284,6 +286,9 @@ static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t a
 	g->id = sq_self->next_gid++;
 	g->deadline = 0;
 	g->try_jb = NULL;
+	g->unwind = NULL;
+	g->unwinding = false;
+	g->nheld = 0;
 }
 
 static void pool_init(sq_pool *p) {
@@ -613,8 +618,51 @@ static SQ_NORETURN void die(const char *file, int line) {
 		err_int(line < 0 ? -line : line); // negative: an allocation that may fail (sq_try_enter)
 		err_write("\n");
 	}
+	// a panic in squark code (it has a position) in an isolate task: only this goroutine ends
+	sq_g *g = sq_self->cur_g;
+	if (file && g && g->pool->isolate && g->unwind) {
+		err_write("the goroutine ends; the program goes on (task ");
+		err_write(g->pool->name);
+		err_write(" is isolate)\n");
+		g->unwinding = true;
+		sq_unwind_resume();
+	}
 	err_write("exit status 2\n");
 	_exit(2);
+}
+
+void sq_unwind_push(sq_unwind *u) {
+	sq_g *g = sq_self->cur_g;
+	u->prev = g ? g->unwind : NULL;
+	if (g) g->unwind = u;
+}
+
+void sq_unwind_pop(sq_unwind *u) {
+	sq_g *g = sq_self->cur_g;
+	if (g) g->unwind = u->prev;
+}
+
+void sq_unwind_resume(void) {
+	sq_g *g = sq_self->cur_g;
+	sq_unwind *u = g->unwind; // never NULL in an isolate task: its entry has the base frame
+	g->unwind = u->prev;
+	_longjmp(u->jb, 1);
+}
+
+void sq_unwind_base(sq_unwind *u) {
+	u->prev = NULL;
+	sq_self->cur_g->unwind = u;
+}
+
+// sq_unwind_end runs as an isolate task's entry returns: after an unwinding, it releases the
+// goroutine locks the goroutine still holds, so other goroutines aren't left waiting for them.
+void sq_unwind_end(sq_unwind *u) {
+	(void)u;
+	sq_g *g = sq_self->cur_g;
+	g->unwind = NULL;
+	if (!g->unwinding) return;
+	g->unwinding = false;
+	while (g->nheld > 0) sq_gmutex_unlock(g->held[g->nheld - 1]);
 }
 
 void sq_panic_cstr(const char *msg, const char *file, int line) {
@@ -990,21 +1038,41 @@ void sq_gmutex_init(sq_gmutex *m) {
 	m->wait_head = m->wait_tail = NULL;
 }
 
+// held_add and held_remove keep g's list of the goroutine locks it holds (see sq_unwind_end).
+static void held_add(sq_g *g, sq_gmutex *m) {
+	if (g && g->nheld < (int)(sizeof g->held / sizeof g->held[0])) g->held[g->nheld++] = m;
+}
+
+static void held_remove(sq_g *g, sq_gmutex *m) {
+	for (int i = 0; g && i < g->nheld; i++) {
+		if (g->held[i] == m) {
+			g->held[i] = g->held[--g->nheld];
+			return;
+		}
+	}
+}
+
 void sq_gmutex_lock(sq_gmutex *m) {
 	sq_g *g = sq_self->cur_g, *none = NULL;
-	if (atomic_compare_exchange_strong(&m->owner, &none, g)) return;
+	if (atomic_compare_exchange_strong(&m->owner, &none, g)) {
+		held_add(g, m);
+		return;
+	}
 	pthread_mutex_lock(&m->mu);
 	atomic_store(&m->contended, true);
 	none = NULL;
 	if (atomic_compare_exchange_strong(&m->owner, &none, g)) {
 		pthread_mutex_unlock(&m->mu);
+		held_add(g, m);
 		return;
 	}
 	q_push(&m->wait_head, &m->wait_tail, g);
 	park_shared(&m->mu); // the unlocker hands the lock to us before waking us
+	held_add(g, m);
 }
 
 void sq_gmutex_unlock(sq_gmutex *m) {
+	held_remove(atomic_load_explicit(&m->owner, memory_order_relaxed), m);
 	atomic_store(&m->owner, NULL);
 	if (!atomic_load(&m->contended)) return;
 	pthread_mutex_lock(&m->mu);
@@ -2195,6 +2263,7 @@ static void start_shards(void);
 static void *shard_thread(void *arg);
 
 int64_t sq_close(int64_t fd) {
+	sock_closed((int)fd); // connections N: its share back
 	fd_closed((int)fd); // wakes this shard's goroutines waiting on it
 	if (sq_self->nlisteners > 0) listener_closed((int)fd);
 	return close((int)fd) < 0 ? -errno : 0;
@@ -2277,11 +2346,84 @@ static int parse_addr(sq_string host, int64_t port, listen_addr *la) {
 	return 0;
 }
 
+// connections N: the sockets the process has open (connections and UDP sockets count one each, a
+// listener its backlog) never exceed sq_max_conns, so their kernel buffers fit the budget.
+// sock_kind[fd] says what fd was counted as, so closing it gives its share back.
+static _Atomic int64_t sock_open;
+static _Atomic uint8_t *sock_kind; // 0: not counted, 1: a socket, 2: a listener (listen_backlog)
+static int64_t sock_kinds;
+enum { SOCK_NONE, SOCK_ONE, SOCK_LISTENER };
+
+int64_t sq_c_heap(const char *lib) {
+	for (const sq_heap_limit *h = sq_heap_limits; h->lib; h++)
+		if (strcmp(h->lib, lib) == 0) return h->limit;
+	return 0;
+}
+
+// listen_backlog is each listener's backlog: with connections N, part of the N, as the
+// connections queued on it are sockets too.
+static int64_t listen_backlog(int64_t want) {
+	if (sq_max_conns <= 0) return want;
+	int64_t b = sq_max_conns / 16;
+	if (b > 128) b = 128;
+	if (b < 1) b = 1;
+	return b < want ? b : want;
+}
+
+static void sock_init(void) {
+	if (sq_max_conns <= 0) return;
+	struct rlimit rl;
+	int64_t n = 1024;
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+		if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > (rlim_t)(1 << 20)) n = 1 << 20;
+		else if ((int64_t)rl.rlim_cur > n) n = (int64_t)rl.rlim_cur;
+	}
+	void *m = mmap(NULL, (size_t)n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (m != MAP_FAILED) {
+		sock_kind = m;
+		sock_kinds = n;
+	}
+}
+
+// sock_reserve takes n of the connections N, or returns false if they aren't left.
+static bool sock_reserve(int64_t n) {
+	if (sq_max_conns <= 0) return true;
+	if (atomic_fetch_add(&sock_open, n) + n <= sq_max_conns) return true;
+	atomic_fetch_sub(&sock_open, n);
+	return false;
+}
+
+static void sock_release(int64_t n) {
+	if (sq_max_conns > 0) atomic_fetch_sub(&sock_open, n);
+}
+
+// sock_mark records fd as counted (kind SOCK_ONE or SOCK_LISTENER); sock_closed gives its share
+// back. An fd beyond the table (which RLIMIT_NOFILE bounds) can't be one.
+static void sock_mark(int fd, int kind) {
+	if (sock_kind && fd >= 0 && fd < sock_kinds) atomic_store(&sock_kind[fd], (uint8_t)kind);
+}
+
+static void sock_closed(int fd) {
+	if (!sock_kind || fd < 0 || fd >= sock_kinds) return;
+	uint8_t k = atomic_exchange(&sock_kind[fd], SOCK_NONE);
+	if (k == SOCK_ONE) sock_release(1);
+	else if (k == SOCK_LISTENER) sock_release(listen_backlog(4096));
+}
+
+// set_sockbuf applies sockbuf N to a new socket.
+static void set_sockbuf(int fd) {
+	if (sq_sockbuf <= 0) return;
+	int v = (int)sq_sockbuf;
+	setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
+	setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof v);
+}
+
 static int64_t listen_family(int family, const listen_addr *la, int64_t backlog, bool reuseport) {
 	struct sockaddr_storage sa;
 	socklen_t salen = make_sa(la->ip, family == AF_INET ? 4 : 16, la->port, &sa); // ip is zero for any
 	int fd = socket(family, SOCK_STREAM, 0);
 	if (fd < 0) return -errno;
+	set_sockbuf(fd); // before listen, so that accepted connections start with it
 	int one = 1, zero = 0;
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
 	if (reuseport) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
@@ -2333,7 +2475,18 @@ int64_t sq_local_port(int64_t fd) {
 	return ntohs(((struct sockaddr_in *)&sa)->sin_port);
 }
 
+static int64_t listen_tcp(sq_string host, int64_t port, int64_t backlog);
+
 int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
+	backlog = listen_backlog(backlog);
+	if (!sock_reserve(backlog)) return -SQ_ETOOMANY;
+	int64_t fd = listen_tcp(host, port, backlog);
+	if (fd < 0) sock_release(backlog);
+	else sock_mark((int)fd, SOCK_LISTENER);
+	return fd;
+}
+
+static int64_t listen_tcp(sq_string host, int64_t port, int64_t backlog) {
 	listen_addr la;
 	if (parse_addr(host, port, &la) < 0) return -EINVAL;
 	bool shared = sq_worker_count > 1 || sq_shard_count > 1;
@@ -2405,8 +2558,18 @@ static void listener_closed(int fd) {
 int64_t sq_accept(int64_t lfd) {
 	for (;;) {
 		if (sq_self->stop_seen) return -SQ_ESTOP;
+		// connections N: wait (leaving the connection queued) until one is closed
+		if (!sock_reserve(1)) {
+			int64_t dl = sq_self->cur_g ? effective_deadline(sq_self->cur_g) : 0;
+			if (dl && sq_nanotime() >= dl) return -SQ_ETIMEOUT;
+			sq_sleep(1000000);
+			continue;
+		}
 		int fd = accept((int)lfd, NULL, NULL);
+		if (fd < 0) sock_release(1);
 		if (fd >= 0) {
+			sock_mark(fd, SOCK_ONE);
+			set_sockbuf(fd);
 			set_nonblock(fd);
 			int one = 1;
 			setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
@@ -2440,8 +2603,14 @@ int64_t sq_dial(sq_bytes ip, int64_t port, int64_t udp) {
 	if (ip.len != 4 && ip.len != 16) return -EINVAL;
 	struct sockaddr_storage sa;
 	socklen_t salen = make_sa(ip.p, ip.len, port, &sa);
+	if (!sock_reserve(1)) return -SQ_ETOOMANY;
 	int fd = socket(sa.ss_family, udp ? SOCK_DGRAM : SOCK_STREAM, 0);
-	if (fd < 0) return -errno;
+	if (fd < 0) {
+		sock_release(1);
+		return -errno;
+	}
+	sock_mark(fd, SOCK_ONE); // from here, closing fd gives the reservation back
+	set_sockbuf(fd);
 	set_nonblock(fd);
 	int one = 1;
 	if (!udp) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
@@ -2451,19 +2620,19 @@ int64_t sq_dial(sq_bytes ip, int64_t port, int64_t udp) {
 	if (connect(fd, (struct sockaddr *)&sa, salen) < 0) {
 		if (errno != EINPROGRESS) {
 			int e = errno;
-			close(fd);
+			sock_closed(fd), close(fd);
 			return -e;
 		}
 		int w = wait_fd(fd, 'w'); // fd is new and private: nothing else can close it
 		if (w) { // the deadline passed
-			close(fd);
+			sock_closed(fd), close(fd);
 			return w;
 		}
 		int err = 0;
 		socklen_t len = sizeof err;
 		getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
 		if (err) {
-			close(fd);
+			sock_closed(fd), close(fd);
 			return -err;
 		}
 	}
@@ -3406,6 +3575,7 @@ int main(int argc, char **argv) {
 	// the whole process tree shares one cgroup: check it once, before any worker starts
 	check_limits(sq_threads > 0 ? sq_threads * (sq_workers > 0 ? sq_workers : 1) : 0);
 	run_workers(); // returns in each worker process (or at once, for a single worker)
+	sock_init();   // connections N is per process
 	signal(SIGPIPE, SIG_IGN);
 	struct sigaction sa;
 	memset(&sa, 0, sizeof sa);

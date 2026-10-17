@@ -530,6 +530,8 @@ type FuncDecl struct {
 	BlockingPos    Pos
 	Preemptible    bool // task ... preemptible: its loops may yield after a time slice
 	PreemptiblePos Pos
+	Isolate        bool // task ... isolate: a panic in it ends only that goroutine
+	IsolatePos     Pos
 }
 
 // Directive is a top-level `budget N`, `link "lib"`, `cflags "..."` or `ldflags "..."`.

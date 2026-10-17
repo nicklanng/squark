@@ -67,7 +67,7 @@
           }
         },
         {
-          "match": "^\\s*(budget|pool|workers|threads|shutdown|link|cflags|ldflags)\\b(?=[ \\t]+[^\\s:=,)])",
+          "match": "^\\s*(budget|pool|workers|threads|shutdown|connections|sockbuf|heap|link|cflags|ldflags)\\b(?=[ \\t]+[^\\s:=,)])",
           "captures": { "1": { "name": "keyword.other.directive.squark" } }
         }
       ]
@@ -349,11 +349,11 @@
         },
         {
           "comment": "after a signature: pool N, stack 8K",
-          "match": "(?<![\\w)\\]]\\.)\\b(pool|stack)\\b(?=\\s+(?:[0-9(]|[A-Za-z_]\\w*\\s*(?:\\{|$|//|c\"|\\b(?:pool|stack|blocking|preemptible)\\b|[(.+\\-*/])))",
+          "match": "(?<![\\w)\\]]\\.)\\b(pool|stack)\\b(?=\\s+(?:[0-9(]|[A-Za-z_]\\w*\\s*(?:\\{|$|//|c\"|\\b(?:pool|stack|blocking|preemptible|isolate)\\b|[(.+\\-*/])))",
           "name": "keyword.other.clause.squark"
         },
         {
-          "match": "(?<![\\w)\\]]\\.)\\b(blocking|preemptible)\\b(?=\\s*(?:\\{|$|//|c\"|\\b(?:pool|stack|blocking|preemptible)\\b))",
+          "match": "(?<![\\w)\\]]\\.)\\b(blocking|preemptible|isolate)\\b(?=\\s*(?:\\{|$|//|c\"|\\b(?:pool|stack|blocking|preemptible|isolate)\\b))",
           "name": "keyword.other.clause.squark"
         },
         {

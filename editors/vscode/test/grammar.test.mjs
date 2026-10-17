@@ -66,6 +66,11 @@ expect("program {\n\tbudget 64M\n\tthreads auto\n}", "budget", "keyword.other.di
 expect("program {\n\tbudget 64M\n\tthreads auto\n}", "M", "keyword.other.unit.size");
 expect("program {\n\tbudget 64M\n\tthreads auto\n}", "threads", "keyword.other.directive");
 expect("program {\n\tshutdown 20s\n}", "shutdown", "keyword.other.directive");
+expect("program {\n\tconnections 2048\n\tsockbuf 32K\n}", "connections", "keyword.other.directive");
+expect("program {\n\tconnections 2048\n\tsockbuf 32K\n}", "sockbuf", "keyword.other.directive");
+expect("module sqlite {\n\theap sqlite3 16M\n}", "heap", "keyword.other.directive");
+expect("task serve(c net.Conn) pool 512 isolate {", "isolate", "keyword.other.clause");
+expect("isolate := true", "isolate", "-");
 expect("program {\n\tshutdown 20s\n}", "s", "keyword.other.unit.duration");
 expect("program {\n\tshutdown 500ms\n}", "500", "constant.numeric.integer.decimal");
 expect("program {\n\tpool http.serve_conn 128 // max\n}", "pool", "keyword.other.directive");

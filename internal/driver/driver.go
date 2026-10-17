@@ -105,6 +105,37 @@ type MemoryReport struct {
 	// helper threads for blocking externs, per scheduler thread, and each one's stack
 	Helpers     int64
 	HelperStack int64
+	// sockets: connections N sockets, each with SO_RCVBUF and SO_SNDBUF of sockbuf N (0, 0: not
+	// declared, so not counted); UsesNet says whether the program has sockets at all
+	SockBuf, Conns int64
+	UsesNet        bool
+	Heaps          map[string]int64 // declared C library heaps, by link name
+}
+
+// socketCost is what the kernel may charge one socket: Linux doubles SO_RCVBUF and SO_SNDBUF for
+// its bookkeeping and charges both to the cgroup, plus about 4 KiB for the socket itself.
+func socketCost(sockbuf int64) int64 { return 4*sockbuf + 4<<10 }
+
+// Sockets is the counted socket memory per process (0 if not declared).
+func (m *MemoryReport) Sockets() int64 {
+	if m.SockBuf == 0 || m.Conns == 0 {
+		return 0
+	}
+	return satMul(m.Conns, socketCost(m.SockBuf))
+}
+
+// AllCounted reports whether nothing the report knows of is left uncounted: sockets (if the
+// program uses net) and every linked C library's heap.
+func (m *MemoryReport) AllCounted() bool {
+	if m.UsesNet && m.Sockets() == 0 {
+		return false
+	}
+	for _, l := range m.CLibs {
+		if _, ok := m.Heaps[l]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // helpersPerThread is how many helper threads run blocking externs, per scheduler thread.
@@ -130,7 +161,13 @@ func (m *MemoryReport) Worst() int64 {
 	for _, p := range m.Pools {
 		per = satAdd(per, satMul(int64(p.Count), p.Touchable))
 	}
-	return satAdd(m.Code, satMul(satMul(max(m.Workers, 1), max(m.Threads, 1)), per))
+	total := satAdd(m.Code, satMul(satMul(max(m.Workers, 1), max(m.Threads, 1)), per))
+	// sockets and C heaps are per process: the limits apply to each worker
+	proc := m.Sockets()
+	for _, h := range m.Heaps {
+		proc = satAdd(proc, h)
+	}
+	return satAdd(total, satMul(max(m.Workers, 1), proc))
 }
 
 // satAdd and satMul saturate at MaxInt64 instead of wrapping, so a huge worst case can't pass the
@@ -379,7 +416,8 @@ func Build(opt Options) (*Result, error) {
 		fmt.Fprintf(&pools, "static sq_g sq_gs%d[%d];\n", i, p.Count)
 		preemptible := p.Entry != nil && p.Entry.Preemptible
 		anyPreemptible = anyPreemptible || preemptible
-		fmt.Fprintf(&pools, "sq_pool %s = {.name = %q, .count = %d, .stack_size = %d, .slot_size = %d, .gs = sq_gs%d, .index = %d, .preemptible = %t};\n\n", p.CName, p.Name, p.Count, need, slot, i, i, preemptible)
+		isolate := p.Entry != nil && p.Entry.Isolate
+		fmt.Fprintf(&pools, "sq_pool %s = {.name = %q, .count = %d, .stack_size = %d, .slot_size = %d, .gs = sq_gs%d, .index = %d, .preemptible = %t, .isolate = %t};\n\n", p.CName, p.Name, p.Count, need, slot, i, i, preemptible, isolate)
 		names = append(names, "&"+p.CName)
 		res.Pools = append(res.Pools, PoolReport{Name: p.Name, Count: p.Count, Stack: need, Slot: slot, Touchable: usable})
 	}
@@ -399,6 +437,17 @@ func Build(opt Options) (*Result, error) {
 	fmt.Fprintf(&pools, "sq_g *sq_timer_heap[%d];\n", total)
 	fmt.Fprintf(&pools, "const int64_t sq_helpers_per_thread = %d;\nconst int64_t sq_helper_stack = %d;\n", helpers, helperStack)
 	fmt.Fprintf(&pools, "const int64_t sq_shutdown_ns = %d;\n", prog.Shutdown)
+	fmt.Fprintf(&pools, "const int64_t sq_sockbuf = %d;\nconst int64_t sq_max_conns = %d;\n", prog.SockBuf, prog.Conns)
+	var heapNames []string
+	for l := range prog.Heaps {
+		heapNames = append(heapNames, l)
+	}
+	sort.Strings(heapNames)
+	pools.WriteString("const sq_heap_limit sq_heap_limits[] = {")
+	for _, l := range heapNames {
+		fmt.Fprintf(&pools, "{%q, %d}, ", l, prog.Heaps[l])
+	}
+	pools.WriteString("{0, 0}};\n")
 	if err := os.WriteFile(filepath.Join(work, "pools.c"), []byte(pools.String()), 0o644); err != nil {
 		return nil, err
 	}
@@ -476,7 +525,10 @@ func Build(opt Options) (*Result, error) {
 	res.Notes = notes
 	res.Shutdown = prog.Shutdown
 	mem := &MemoryReport{Budget: prog.Budget, Workers: prog.Workers, Threads: prog.Threads, Pools: res.Pools,
-		Helpers: helpers, HelperStack: helperStackReserved(helperStack)}
+		Helpers: helpers, HelperStack: helperStackReserved(helperStack), SockBuf: prog.SockBuf, Conns: prog.Conns, Heaps: prog.Heaps}
+	for _, p := range prog.Packages {
+		mem.UsesNet = mem.UsesNet || p.Path == "net"
+	}
 	mem.Code, mem.Static, err = segmentSizes(absOut)
 	if err != nil {
 		if prog.Budget > 0 {
@@ -573,14 +625,34 @@ func FormatMemory(m *MemoryReport) string {
 	case m.Threads > 1:
 		fmt.Fprintf(&b, "  %-26s %12s   scheduler threads; static data and stacks above are per thread (counted %d×)\n", "threads", fmt.Sprint(m.Threads), m.Threads)
 	}
-	if len(m.CLibs) > 0 {
+	if s := m.Sockets(); s > 0 {
+		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s: kernel buffers for at most %d sockets (sockbuf %s)%s\n", "sockets", human(s), m.Conns, human(socketCost(m.SockBuf)), m.Conns, human(m.SockBuf), perWorker(m))
+	} else if m.UsesNet {
+		fmt.Fprintf(&b, "  %-26s %12s   kernel socket buffers: declare connections N and sockbuf N to count them\n", "sockets", "not counted")
+	}
+	var uncounted []string
+	for _, l := range m.CLibs {
+		if h, ok := m.Heaps[l]; ok {
+			fmt.Fprintf(&b, "  %-26s %12s   its heap limit (heap %s)%s\n", "C library "+l, human(h), l, perWorker(m))
+		} else {
+			uncounted = append(uncounted, l)
+		}
+	}
+	if len(uncounted) > 0 {
 		verb := "manages its"
-		if len(m.CLibs) > 1 {
+		if len(uncounted) > 1 {
 			verb = "manage their"
 		}
-		fmt.Fprintf(&b, "  %-26s %12s   %s %s own memory\n", "C libraries", "not counted", strings.Join(m.CLibs, ", "), verb)
+		fmt.Fprintf(&b, "  %-26s %12s   %s %s own memory (heap %s N would count it)\n", "C libraries", "not counted", strings.Join(uncounted, ", "), verb, uncounted[0])
 	}
 	return b.String()
+}
+
+func perWorker(m *MemoryReport) string {
+	if m.Workers > 1 {
+		return fmt.Sprintf(", per worker (counted %d×)", m.Workers)
+	}
+	return ""
 }
 
 func absDir(d string) string {
@@ -807,7 +879,11 @@ func Manifest(res *Result, name, format string) (string, error) {
 		return "", fmt.Errorf("the worst-case memory isn't known with threads auto or workers auto: write threads N (and workers N) for a manifest")
 	}
 	worst := m.Worst()
+	// headroom for what squark doesn't count: page cache, and sockets and C heaps unless declared
 	headroom := max(worst/10, 16<<20)
+	if m.AllCounted() {
+		headroom = max(worst/20, 8<<20)
+	}
 	limitMi := (worst + headroom + 1<<20 - 1) >> 20
 	cpus := max(m.Workers, 1) * max(m.Threads, 1)
 	grace := res.Shutdown
@@ -819,12 +895,12 @@ func Manifest(res *Result, name, format string) (string, error) {
 	switch format {
 	case "k8s":
 		fmt.Fprintf(&b, "# %s: proven worst case %s; the limit adds %s for what squark doesn't count\n", name, human(worst), human(headroom))
-		fmt.Fprintf(&b, "# (kernel socket buffers, C libraries%s). requests = limits: the Guaranteed QoS class.\n", clibs(m))
+		fmt.Fprintf(&b, "# (%s). requests = limits: the Guaranteed QoS class.\n", uncountedText(m))
 		fmt.Fprintf(&b, "resources:\n  requests:\n    cpu: \"%d\"\n    memory: \"%dMi\"\n  limits:\n    cpu: \"%d\"\n    memory: \"%dMi\"\n", cpus, limitMi, cpus, limitMi)
 		fmt.Fprintf(&b, "# goes in the pod spec, next to containers: longer than the %s graceful stop\nterminationGracePeriodSeconds: %d\n", time.Duration(grace), stopSec)
 	case "systemd":
 		fmt.Fprintf(&b, "# %s: proven worst case %s, plus %s for what squark doesn't count\n", name, human(worst), human(headroom))
-		fmt.Fprintf(&b, "# (kernel socket buffers, C libraries%s); goes in the [Service] section\n", clibs(m))
+		fmt.Fprintf(&b, "# (%s); goes in the [Service] section\n", uncountedText(m))
 		fmt.Fprintf(&b, "MemoryMax=%dM\nCPUQuota=%d%%\nKillSignal=SIGTERM\nTimeoutStopSec=%d\n", limitMi, cpus*100, stopSec)
 	default:
 		return "", fmt.Errorf("unknown manifest format %q: want k8s or systemd", format)
@@ -832,9 +908,16 @@ func Manifest(res *Result, name, format string) (string, error) {
 	return b.String(), nil
 }
 
-func clibs(m *MemoryReport) string {
-	if len(m.CLibs) == 0 {
-		return ""
+// uncountedText names what the worst case leaves out.
+func uncountedText(m *MemoryReport) string {
+	parts := []string{"page cache"}
+	if m.UsesNet && m.Sockets() == 0 {
+		parts = append(parts, "kernel socket buffers")
 	}
-	return ": " + strings.Join(m.CLibs, ", ")
+	for _, l := range m.CLibs {
+		if _, ok := m.Heaps[l]; !ok {
+			parts = append(parts, l+"'s heap")
+		}
+	}
+	return strings.Join(parts, ", ")
 }
