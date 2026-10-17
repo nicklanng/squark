@@ -205,8 +205,11 @@ Each needs a design pass first: the open questions below are decided in this fil
 
 ## 3. Standard library and tooling
 
-- [ ] **3.1 Metrics.** Everything worth watching is known at compile time: pools, sockets, the
-  budget. Plan:
+- [x] **3.1 Metrics.** — done as planned: `std/metrics` (`counter`, `gauge`, `write_text`; 64
+  cells, about 14 KiB of static data), process-wide pool stats, `http.handle_metrics`,
+  `http_requests_total{code}` and `http_handler_panics_total`. **Decided:** registering panics
+  on misuse (table full, kind clash), as Prometheus' MustRegister does, so a package variable can
+  hold a metric. tests: `testdata/run/metrics.sq`, `TestServeAdmin`. Plan:
   - Pool counters (`live`, `peak`, `started`) become relaxed atomics, so any thread can read every
     shard's (a scrape lands on one shard under `threads N`, and must report the process).
   - `std/metrics`: counters and gauges in a fixed runtime-owned table of atomic cells (C owns
@@ -216,9 +219,13 @@ Each needs a design pass first: the open questions below are decided in this fil
     the program's metrics plus the runtime's (pools, open sockets and the connections limit,
     idle connections, the worst case and budget, threads, whether a stop has begun).
   - `http` counts requests by status class and handler panics (isolate).
-- [ ] **3.2 Structured logs.** `std/log`: JSON lines to stdout, fixed-size records, levels;
+- [x] **3.2 Structured logs.** — done: `std/log`; an `Entry` is a value on the caller's stack
+  (a shared buffer would mix lines when a field's value blocks), `log.err` because `error` is a
+  type; values are cut by their real escaped length. test: `TestLog`. Plan: `std/log`: JSON lines to stdout, fixed-size records, levels;
   `log.info("served", "path", r.path, "ms", ms)`. Never allocates; truncates instead.
-- [ ] **3.3 An admin port that doesn't starve.** Not `handle_probe` on the main listener: a
+- [x] **3.3 An admin port that doesn't starve.** — done: `http.serve_admin`, `set_ready`,
+  `net.Listener.accept_always` (accepts through a graceful stop, so `/readyz` reports `stopping`
+  until the exit). test: `TestServeAdmin`. Plan: Not `handle_probe` on the main listener: a
   request is only known to be a probe once read, and by then it holds a `serve_conn` slot. Instead
   `http.serve_admin(":9090")` serves `/healthz` (alive), `/readyz` (ready: 503 during a graceful
   stop, so the endpoint is removed before the server stops accepting, and while the program says
@@ -252,3 +259,6 @@ Each needs a design pass first: the open questions below are decided in this fil
   suite on macOS (ASan) and Linux, fuzz 5000 clean.
 - 2026-10-17: 2.4 and 2.5 done; section 2 closed. Full suite on macOS (ASan) and Linux, fuzz 5000
   clean. Section 3's plan refined (3.1 metrics through runtime-owned atomics, 3.3 an admin port).
+- 2026-10-17: 3.1-3.3 done (suite on macOS and Linux, fuzz 3000 clean). Order from here: 3.4
+  static builds, then 3.7 the showcase (it exercises everything so far), then 3.5 TLS and 3.6
+  Postgres, the two largest.

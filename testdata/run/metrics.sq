@@ -1,0 +1,41 @@
+program
+
+// std/metrics: counters and gauges registered at package level (registering again returns the
+// same one), written in Prometheus' text format with HELP and TYPE once per name, sorted by name;
+// then the runtime's metrics. Lines whose values vary from run to run are left out here.
+
+use bytes, metrics, strings
+
+thread served = metrics.counter("app_requests_total", `code="2xx"`, "Requests served.")
+thread failed = metrics.counter("app_requests_total", `code="5xx"`, "Requests served.")
+thread queue = metrics.gauge("app_queue_length", "", "Jobs waiting.")
+thread out u8[8K]
+
+task job() pool 3 {
+}
+
+fn main() {
+	again := metrics.counter("app_requests_total", `code="2xx"`, "Requests served.")
+	served.add(3)
+	again.inc()
+	failed.inc()
+	queue.set(7)
+	queue.add(-2)
+	println("same counter:", served.value(), again.value())
+	var zero metrics.Counter
+	zero.inc() // counts nothing
+	start job()
+	start job()
+
+	b := bytes.new_buffer(out[:0])
+	metrics.write_text(&b)
+	var lines str[64]
+	for l in strings.split(b.string(), "\n", lines[:]) {
+		if strings.has_prefix(l, "process_cpu") or strings.has_prefix(l, "squark_memory") or strings.contains(l, "process_cpu") or strings.contains(l, "squark_memory") {
+			continue
+		}
+		if l != "" {
+			println(l)
+		}
+	}
+}

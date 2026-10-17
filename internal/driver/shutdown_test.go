@@ -457,3 +457,88 @@ fn main() {
 		t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
+
+// TestServeAdmin: http.serve_admin answers /healthz, /readyz and /metrics from its own pool, so
+// it answers while every serve_conn slot is busy; /readyz follows set_ready and a graceful stop.
+func TestServeAdmin(t *testing.T) {
+	src := strings.Replace(shutdownServer, "fn main() {\n", "fn main() {\n\thttp.handle_metrics(\"GET /metrics\")\n\tif err := http.serve_admin(os.arg(2)); err != nil {\n\t\tpanic(err)\n\t}\n", 1)
+	src = strings.Replace(src, "fn handle(w *http.ResponseWriter, r *http.Request) {\n", "fn handle(w *http.ResponseWriter, r *http.Request) {\n\tif r.path == \"/unready\" {\n\t\thttp.set_ready(false)\n\t}\n", 1)
+	src = strings.Replace(src, "program\n", "program {\n\tpool http.serve_conn 2\n}\n", 1)
+	bin := buildSource(t, src)
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	admin := l.Addr().String()
+	l.Close()
+	l, _ = net.Listen("tcp", "127.0.0.1:0")
+	addr := l.Addr().String()
+	l.Close()
+	cmd := exec.Command(bin, addr, admin)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	get := func(base, path string) (int, string) {
+		t.Helper()
+		for i := 0; ; i++ {
+			resp, err := client.Get("http://" + base + path)
+			if err == nil {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				return resp.StatusCode, string(b)
+			}
+			if i == 100 {
+				t.Fatalf("GET %s%s: %v\n%s", base, path, err, out.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if c, b := get(admin, "/healthz"); c != 200 || b != "ok\n" {
+		t.Errorf("/healthz: %d %q", c, b)
+	}
+	if c, _ := get(admin, "/readyz"); c != 200 {
+		t.Errorf("/readyz: %d", c)
+	}
+	get(addr, "/")
+	if c, b := get(admin, "/metrics"); c != 200 || !strings.Contains(b, `http_requests_total{code="2xx"}`) || !strings.Contains(b, `squark_pool_goroutines{task="http.serve_conn"}`) {
+		t.Errorf("/metrics: %d\n%s", c, b)
+	}
+	// both serve_conn slots busy: the admin port still answers at once
+	for i := 0; i < 2; i++ {
+		go client.Get("http://" + addr + "/slow?ms=1500")
+	}
+	time.Sleep(200 * time.Millisecond)
+	start := time.Now()
+	if c, _ := get(admin, "/healthz"); c != 200 || time.Since(start) > 500*time.Millisecond {
+		t.Errorf("/healthz with serve_conn full: %d after %v", c, time.Since(start))
+	}
+	// a graceful stop: /readyz says so while the slow requests drain
+	cmd.Process.Signal(syscall.SIGTERM)
+	time.Sleep(200 * time.Millisecond)
+	if c, b := get(admin, "/readyz"); c != 503 || b != "stopping\n" {
+		t.Errorf("/readyz during the stop: %d %q", c, b)
+	}
+	select {
+	case err := <-done:
+		if code := exitCode(err); code != 0 {
+			t.Errorf("exit %d: %s", code, out.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the server didn't exit")
+	}
+
+	// set_ready(false)
+	cmd = exec.Command(bin, addr, admin)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	get(addr, "/unready")
+	if c, b := get(admin, "/readyz"); c != 503 || b != "not ready\n" {
+		t.Errorf("/readyz after set_ready(false): %d %q", c, b)
+	}
+}

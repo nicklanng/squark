@@ -1,0 +1,33 @@
+same counter: 4 4
+# HELP app_queue_length Jobs waiting.
+# TYPE app_queue_length gauge
+app_queue_length 5
+# HELP app_requests_total Requests served.
+# TYPE app_requests_total counter
+app_requests_total{code="2xx"} 4
+app_requests_total{code="5xx"} 1
+# HELP squark_pool_goroutines Goroutines running in a task's pool.
+# TYPE squark_pool_goroutines gauge
+squark_pool_goroutines{task="main.main"} 1
+squark_pool_goroutines{task="main.job"} 2
+# HELP squark_pool_capacity Goroutines a task's pool can run at once (every thread's).
+# TYPE squark_pool_capacity gauge
+squark_pool_capacity{task="main.main"} 1
+squark_pool_capacity{task="main.job"} 3
+# HELP squark_pool_peak The most goroutines that ran at once in a task's pool, on one thread.
+# TYPE squark_pool_peak gauge
+squark_pool_peak{task="main.main"} 1
+squark_pool_peak{task="main.job"} 2
+# HELP squark_pool_started_total Goroutines a task's pool has started.
+# TYPE squark_pool_started_total counter
+squark_pool_started_total{task="main.main"} 1
+squark_pool_started_total{task="main.job"} 2
+# HELP squark_idle_connections Keep-alive connections parked in the idle set.
+# TYPE squark_idle_connections gauge
+squark_idle_connections 0
+# HELP squark_threads Scheduler threads.
+# TYPE squark_threads gauge
+squark_threads 1
+# HELP squark_stopping 1 once a graceful stop has begun.
+# TYPE squark_stopping gauge
+squark_stopping 0

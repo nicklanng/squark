@@ -3,7 +3,7 @@
 // request. The client (Dial, Client) reads responses into a buffer the caller provides.
 module http
 
-use json, net, runtime, strconv, strings, time
+use json, metrics, net, runtime, strconv, strings, time
 
 const (
 	// read_buffer_size bounds request line + headers + body.
@@ -375,6 +375,129 @@ thread waker_started bool
 // active counts this thread's connections being served (not those in the idle set).
 thread active int
 
+// The server's metrics (see metrics.write_text and handle_metrics): requests by status class, and
+// handlers that panicked.
+thread requests = Counter5{
+	c1: metrics.counter("http_requests_total", `code="1xx"`, "HTTP requests answered, by status class."),
+	c2: metrics.counter("http_requests_total", `code="2xx"`, "HTTP requests answered, by status class."),
+	c3: metrics.counter("http_requests_total", `code="3xx"`, "HTTP requests answered, by status class."),
+	c4: metrics.counter("http_requests_total", `code="4xx"`, "HTTP requests answered, by status class."),
+	c5: metrics.counter("http_requests_total", `code="5xx"`, "HTTP requests answered, by status class."),
+}
+thread handler_panics = metrics.counter("http_handler_panics_total", "", "HTTP handlers that panicked (the connection is closed).")
+
+struct Counter5 {
+	c1, c2, c3, c4, c5 metrics.Counter
+}
+
+fn count_status(code int) {
+	switch code / 100 {
+	case 1:
+		requests.c1.inc()
+	case 2:
+		requests.c2.inc()
+	case 3:
+		requests.c3.inc()
+	case 4:
+		requests.c4.inc()
+	default:
+		requests.c5.inc()
+	}
+}
+
+// handle_metrics serves metrics.write_text at pattern ("GET /metrics"): the program's metrics, the
+// server's and the runtime's, in Prometheus' text format.
+pub fn handle_metrics(pattern str in static) {
+	handle_func(pattern, serve_metrics)
+}
+
+fn serve_metrics(w *ResponseWriter, r *Request) {
+	w.content_type("text/plain; version=0.0.4; charset=utf-8")
+	metrics.write_text(w)
+}
+
+// not_ready is what /readyz on the admin port says, besides a graceful stop: a gauge, so every
+// thread (threads N) sees the same one.
+thread not_ready = metrics.gauge("http_not_ready", "", "1 while the program says it isn't ready (http.set_ready(false)).")
+
+// set_ready sets what the admin port's /readyz reports (true at start): false while the program
+// can't serve (warming a cache, a dependency down), so a load balancer sends it nothing. During a
+// graceful stop /readyz is 503 whatever this says.
+pub fn set_ready(r bool) {
+	if r {
+		not_ready.set(0)
+	} else {
+		not_ready.set(1)
+	}
+}
+
+// serve_admin listens on addr and serves, from a small pool of its own (so a full serve_conn pool
+// can't make probes fail): GET /healthz (200 while the program runs), GET /readyz (200, or 503
+// during a graceful stop or after set_ready(false)) and GET /metrics (handle_metrics). It keeps
+// answering during a graceful stop, until the program exits. It returns once listening; call it
+// before listen_and_serve. Kubernetes: point livenessProbe at /healthz, readinessProbe at /readyz.
+pub fn serve_admin(addr str) -> ! {
+	l := net.listen(addr)!
+	start admin_accept(l)
+	return nil
+}
+
+task admin_accept(l net.Listener) pool 1 {
+	loop {
+		c, err := l.accept_always()
+		if err != nil {
+			if err.code() == 24 or err.code() == 23 or err.code() == 53 or err.code() == 54 {
+				continue
+			}
+			return
+		}
+		start admin_conn(c) else {
+			c.close() // two probes at once already: this one can try again
+		}
+	}
+}
+
+task admin_conn(c net.Conn) pool 2 isolate {
+	var rbuf u8[4K]
+	var wbuf u8[8K]
+	n := 0
+	loop {
+		if n == 0 and not c.wait_readable(5 * time.second) {
+			c.close()
+			return
+		}
+		ok := false
+		n, ok = serve_request(c, admin_handle, rbuf[:], n, wbuf[:])
+		if not ok {
+			c.close()
+			return
+		}
+	}
+}
+
+fn admin_handle(w *ResponseWriter, r *Request) {
+	if r.method != "GET" and r.method != "HEAD" {
+		send_error(w, 405)
+		return
+	}
+	switch r.path {
+	case "/healthz":
+		w.text(200, "ok\n")
+	case "/readyz":
+		if runtime.stopping() {
+			w.text(503, "stopping\n")
+		} else if not_ready.value() != 0 {
+			w.text(503, "not ready\n")
+		} else {
+			w.text(200, "ready\n")
+		}
+	case "/metrics":
+		serve_metrics(w, r)
+	default:
+		send_error(w, 404)
+	}
+}
+
 // shed_load (false by default) makes a server answer a new connection that finds every
 // serve_conn slot busy with 503 Service Unavailable and Retry-After: 1, then close it, instead of
 // leaving it to wait for a slot. Shedding suits a service with replicas behind a load balancer,
@@ -516,6 +639,7 @@ fn conn_done(c net.Conn, open *bool) {
 	active--
 	if *open {
 		c.close() // a handler panicked
+		handler_panics.inc()
 	}
 }
 
@@ -593,6 +717,7 @@ fn serve_request(c net.Conn, h HandlerFunc, rbuf u8[], n int, wbuf u8[]) -> (int
 			h(&w, &req)
 		}
 		w.finish()
+		count_status(w.status_code)
 		if not w.keep_alive or w.failed {
 			return 0, false
 		}

@@ -1,0 +1,244 @@
+// Package log writes structured logs: one JSON object per line on stdout, which is what container
+// log collectors expect.
+//
+//    e := log.info("served")
+//    e.str("path", r.path)
+//    e.int("status", 200)
+//    e.duration("took", time.since(start))
+//    e.send()
+//
+// writes {"time":"2026-10-17T09:30:00.123Z","level":"info","msg":"served","path":"/x",
+// "status":200,"took":0.0021}. An entry is a value on the caller's stack (up to 1 KiB of JSON), so
+// goroutines that log at the same time can't mix their lines; it never allocates, and a line too
+// long for the entry keeps the fields that fit and ends with "truncated":true. Entries below
+// log.level cost a branch per call.
+module log
+
+use json, os, strconv, time
+
+pub enum Level { debug, info, warn, error }
+
+// level is the least severe level written (info by default; each thread has its own under
+// threads N, so set it in main).
+pub thread level = Level.info
+
+const max_line = 1024
+
+// Entry is a line being built: add fields, then send it.
+pub struct Entry {
+	buf       u8[..max_line]
+	on        bool // at or above level
+	truncated bool
+}
+
+// parse_level reads "debug", "info", "warn" or "error" (from an environment variable, say).
+pub fn parse_level(s str) -> (Level, bool) {
+	switch s {
+	case "debug":
+		return .debug, true
+	case "info":
+		return .info, true
+	case "warn", "warning":
+		return .warn, true
+	case "error":
+		return .error, true
+	}
+	return .info, false
+}
+
+pub fn debug(msg str) -> Entry { return entry(.debug, msg) }
+pub fn info(msg str) -> Entry  { return entry(.info, msg) }
+pub fn warn(msg str) -> Entry  { return entry(.warn, msg) }
+// err starts an entry at level error (`error` is a type, so it can't be the function's name).
+pub fn err(msg str) -> Entry   { return entry(.error, msg) }
+
+// entry starts a line at level l with the time and the message.
+pub fn entry(l Level, msg str) -> Entry {
+	var e Entry
+	if int(l) < int(level) {
+		return e
+	}
+	e.on = true
+	var t u8[32]
+	e.buf.append(`{"time":"`)
+	e.buf.append(str(append_time(t[:0], time.now().unix_nano())))
+	e.buf.append(`","level":"`)
+	names := str[4]{"debug", "info", "warn", "error"}
+	e.buf.append(names[int(l)])
+	e.buf.push('"')
+	e.str("msg", msg)
+	return e
+}
+
+impl Entry {
+	// room reports whether n more bytes fit, leaving space for the closing `,"truncated":true}`
+	// and newline; when they don't, the entry is marked truncated.
+	fn room(&self, n int) -> bool {
+		if not self.on or self.truncated {
+			return false
+		}
+		if len(self.buf)+n+20 > cap(self.buf) {
+			self.truncated = true
+			return false
+		}
+		return true
+	}
+
+	fn key(&self, k str) {
+		var tmp u8[128]
+		self.buf.push(',')
+		self.buf.append(json.append_string(tmp[:0], k[:min(len(k), 20)]))
+		self.buf.push(':')
+	}
+
+	// str adds a string field. A value too long for the line is cut short (and the line marked).
+	pub fn str(&self, k, v str) {
+		if not self.on or self.truncated {
+			return
+		}
+		left := cap(self.buf) - len(self.buf) - 20 - 24 - len(k)
+		if left < 8 {
+			self.truncated = true
+			return
+		}
+		if n := fits(v, left-2); n < len(v) {
+			v = v[:n]
+			self.truncated = true
+		}
+		self.key(k)
+		var tmp u8[max_line]
+		self.buf.append(json.append_string(tmp[:0], v))
+	}
+
+	pub fn int(&self, k str, v int) {
+		if self.room(len(k)*6 + 24) {
+			var tmp u8[24]
+			self.key(k)
+			self.buf.append(strconv.append_int(tmp[:0], v))
+		}
+	}
+
+	pub fn bool(&self, k str, v bool) {
+		if self.room(len(k)*6 + 8) {
+			self.key(k)
+			if v {
+				self.buf.append("true")
+			} else {
+				self.buf.append("false")
+			}
+		}
+	}
+
+	// f64 adds a number; NaN and infinities, which JSON has no form for, become null.
+	pub fn f64(&self, k str, v f64) {
+		if self.room(len(k)*6 + 32) {
+			var tmp u8[32]
+			self.key(k)
+			if v != v or v > 1.7976931348623157e308 or v < -1.7976931348623157e308 {
+				self.buf.append("null")
+			} else {
+				self.buf.append(strconv.append_float(tmp[:0], v, -1))
+			}
+		}
+	}
+
+	// duration adds d in seconds, as a number.
+	pub fn duration(&self, k str, d time.Duration) { self.f64(k, d.seconds()) }
+
+	// err adds an error's message (null for nil) and, if it has one, its code as k_code.
+	pub fn err(&self, k str, e error) {
+		if e == nil {
+			if self.room(len(k)*6 + 8) {
+				self.key(k)
+				self.buf.append("null")
+			}
+			return
+		}
+		self.str(k, e.message())
+		if e.code() != 0 {
+			var kb u8[32]
+			kc := append(append(kb[:0], k[:min(len(k), 20)]...), "_code"...)
+			self.int(str(kc), e.code())
+		}
+	}
+
+	// send writes the line to stdout in one write (nothing for an entry below level). An entry is
+	// sent once.
+	pub fn send(&self) {
+		if not self.on {
+			return
+		}
+		if self.truncated {
+			self.buf.append(`,"truncated":true`)
+		}
+		self.buf.append("}\n")
+		os.stdout.write(self.buf[:])
+		self.on = false
+	}
+}
+
+// fits returns how many bytes of s can be written as a JSON string's contents in n bytes: an
+// escaped quote or backslash takes 2, a control character up to 6, a byte of a multibyte rune (or
+// an invalid one, written as U+FFFD) up to 3, the rest 1.
+fn fits(s str, n int) -> int {
+	used := 0
+	for i in 0..len(s) {
+		c := s[i]
+		cost := 1
+		if c == '"' or c == '\\' {
+			cost = 2
+		} else if c < 0x20 {
+			cost = 6
+		} else if c >= 0x80 {
+			cost = 3
+		}
+		if used+cost > n {
+			return i
+		}
+		used += cost
+	}
+	return len(s)
+}
+
+// append_time appends unix nanoseconds as RFC 3339 UTC with milliseconds:
+// 2026-10-17T09:30:00.123Z (Howard Hinnant's civil_from_days).
+fn append_time(dst u8[], ns int) -> u8[] in dst {
+	secs := ns / 1000000000
+	ms := ns % 1000000000 / 1000000
+	if ns < 0 and ns%1000000000 != 0 {
+		secs--
+		ms = (ns%1000000000 + 1000000000) / 1000000
+	}
+	days := secs / 86400
+	rem := secs % 86400
+	if rem < 0 {
+		rem += 86400
+		days--
+	}
+	z := days + 719468
+	era := z / 146097
+	if z < 0 and z%146097 != 0 {
+		era--
+	}
+	doe := z - era*146097
+	yoe := (doe - doe/1460 + doe/36524 - doe/146096) / 365
+	y := yoe + era*400
+	doy := doe - (365*yoe + yoe/4 - yoe/100)
+	mp := (5*doy + 2) / 153
+	d := doy - (153*mp+2)/5 + 1
+	m := mp + 3
+	if mp >= 10 {
+		m = mp - 9
+	}
+	if m <= 2 {
+		y++
+	}
+	dst = strconv.append_int_pad(dst, y, 4, '0')
+	dst = strconv.append_int_pad(append(dst, '-'), m, 2, '0')
+	dst = strconv.append_int_pad(append(dst, '-'), d, 2, '0')
+	dst = strconv.append_int_pad(append(dst, 'T'), rem/3600, 2, '0')
+	dst = strconv.append_int_pad(append(dst, ':'), rem%3600/60, 2, '0')
+	dst = strconv.append_int_pad(append(dst, ':'), rem%60, 2, '0')
+	dst = strconv.append_int_pad(append(dst, '.'), ms, 3, '0')
+	return append(dst, 'Z')
+}

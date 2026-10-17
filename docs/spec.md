@@ -832,6 +832,24 @@ for k, ok := d.key(); ok; k, ok = d.key() {
 }
 // json.new_encoder(buf) / new_encoder_in(nil, a) build JSON outside a handler the same way
 
+// a service: an admin port with probes and metrics, structured logs, a deadline on calls out
+thread served = metrics.counter("app_orders_total", "", "Orders placed.")   // process-wide
+fn place(w *http.ResponseWriter, r *http.Request) {
+    with deadline 2 * time.second {
+        // ... calls to other services return net.Timeout after 2s
+    }
+    served.inc()
+    e := log.info("placed")          // {"time":...,"level":"info","msg":"placed","id":7}
+    e.int("id", 7)
+    e.send()
+}
+fn serve() -> ! {
+    http.handle_func("POST /orders", place)
+    http.handle_metrics("GET /metrics")
+    http.serve_admin(":9090")!       // /healthz, /readyz, /metrics on their own small pool
+    return http.listen_and_serve(":8080", nil)   // nil after a graceful stop
+}
+
 // HTTP client: responses are read into the caller's buffer, and the connection is kept alive
 var buf u8[64K]
 c := http.dial("127.0.0.1:8080", buf[:])!

@@ -360,9 +360,10 @@ void sq_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize) 
 	}
 	if (stackcheck) memset(g->stack_lo, 0xA5, (size_t)(g->stack_hi - g->stack_lo));
 	g_prepare(g, entry, args, argsize);
-	p->live++;
-	p->started++;
-	if (p->live > p->peak) p->peak = p->live;
+	// relaxed stores: metrics read every shard's counters from any thread (sq_pool_stat)
+	__atomic_store_n(&p->live, p->live + 1, __ATOMIC_RELAXED);
+	__atomic_store_n(&p->started, p->started + 1, __ATOMIC_RELAXED);
+	if (p->live > p->peak) __atomic_store_n(&p->peak, p->live, __ATOMIC_RELAXED);
 	runq_push(g);
 }
 
@@ -392,7 +393,7 @@ static void g_release(sq_g *g) {
 	g->state = G_FREE;
 	g->next = p->free;
 	p->free = g;
-	p->live--;
+	__atomic_store_n(&p->live, p->live - 1, __ATOMIC_RELAXED);
 	if (p->waitq_head) {
 		sq_g *w = p->waitq_head;
 		p->waitq_head = w->next;
@@ -2005,7 +2006,7 @@ int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 // queue entries hold tag<<24 | fd.
 
 static void idle_event(int fd, int tag) {
-	sq_self->idle_parked--;
+	__atomic_store_n(&sq_self->idle_parked, sq_self->idle_parked - 1, __ATOMIC_RELAXED);
 	if (sq_self->idle_len == (int64_t)(sizeof sq_self->idle_ready / sizeof sq_self->idle_ready[0])) {
 		sq_panic_cstr("idle connection queue overflow", __FILE__, __LINE__);
 	}
@@ -2040,7 +2041,7 @@ void sq_park_idle(int64_t fd, int64_t tag) {
 	}
 	g->wait_fd = -1;
 	g->release_stack = true;
-	sq_self->idle_parked++;
+	__atomic_store_n(&sq_self->idle_parked, sq_self->idle_parked + 1, __ATOMIC_RELAXED);
 }
 
 // sq_next_idle returns the next idle connection that has become readable, parking until one does,
@@ -2555,9 +2556,17 @@ static void listener_closed(int fd) {
 	}
 }
 
-int64_t sq_accept(int64_t lfd) {
+static int64_t accept_conn(int64_t lfd, bool through_stop);
+
+int64_t sq_accept(int64_t lfd) { return accept_conn(lfd, false); }
+
+// sq_accept_always is sq_accept that goes on during a graceful stop: an admin port answers probes
+// (readiness: not ready) until the program exits.
+int64_t sq_accept_always(int64_t lfd) { return accept_conn(lfd, true); }
+
+static int64_t accept_conn(int64_t lfd, bool through_stop) {
 	for (;;) {
-		if (sq_self->stop_seen) return -SQ_ESTOP;
+		if (sq_self->stop_seen && !through_stop) return -SQ_ESTOP;
 		// connections N: wait (leaving the connection queued) until one is closed
 		if (!sock_reserve(1)) {
 			int64_t dl = sq_self->cur_g ? effective_deadline(sq_self->cur_g) : 0;
@@ -2589,7 +2598,10 @@ int64_t sq_accept(int64_t lfd) {
 					break;
 				}
 			}
-			if (w == -EBADF && sq_self->stop_seen) return -SQ_ESTOP; // woken for a graceful stop
+			if (w == -EBADF && sq_self->stop_seen) {
+				if (through_stop && fcntl((int)lfd, F_GETFD) >= 0) continue; // woken for the stop, not closed
+				return -SQ_ESTOP; // woken for a graceful stop
+			}
 			if (w) return w; // the listener was closed, or the deadline passed
 			continue;
 		}
@@ -2722,22 +2734,6 @@ int64_t sq_cputime(void) {
 int64_t sq_shard_id(void) { return sq_self->id; }
 int64_t sq_shard_total(void) { return sq_shard_count; }
 
-int64_t sq_pool_count(void) { return sq_npools; }
-sq_string sq_pool_name(int64_t i) {
-	const char *n = sq_self->pools[i]->name;
-	return (sq_string){(const uint8_t *)n, (int64_t)strlen(n)};
-}
-int64_t sq_pool_stat(int64_t i, int64_t which) {
-	sq_pool *p = sq_self->pools[i]; // this shard's
-	switch (which) {
-	case 0: return p->count;
-	case 1: return p->stack_size;
-	case 2: return p->live;
-	case 3: return p->peak;
-	case 4: return p->started;
-	}
-	return 0;
-}
 
 // ---------------------------------------------------------------------------
 // scheduler
@@ -3391,6 +3387,122 @@ static void stop_watch(void) {
 		err_write("squark: still running at the end of the shutdown grace period (SQUARK_SHUTDOWN); exiting\n");
 		_exit(1);
 	}
+}
+
+// Metrics. The pools' counters are summed over every shard (a scrape lands on one shard, and
+// reports the process); programs' own counters and gauges live in a table of atomic cells the
+// runtime owns, so every shard can update them without sharing squark memory.
+int64_t sq_pool_count(void) { return sq_npools; }
+sq_string sq_pool_name(int64_t i) {
+	if (i < 0 || i >= sq_npools) return (sq_string){NULL, 0};
+	const char *n = sq_pools[i]->name;
+	return (sq_string){(const uint8_t *)n, (int64_t)strlen(n)};
+}
+
+// sq_pool_stat returns pool i's: 0 capacity (every shard's slots), 1 proven stack, 2 goroutines
+// running, 3 the most that ran at once on one shard, 4 goroutines started.
+int64_t sq_pool_stat(int64_t i, int64_t which) {
+	if (i < 0 || i >= sq_npools) return 0;
+	int64_t v = 0;
+	for (int64_t k = 0; k < sq_shard_count; k++) {
+		sq_shard *s = atomic_load(&all_shards[k]);
+		if (!s) continue;
+		sq_pool *p = s->pools[i];
+		switch (which) {
+		case 0: v += p->count; break;
+		case 1: v = p->stack_size; break;
+		case 2: v += __atomic_load_n(&p->live, __ATOMIC_RELAXED); break;
+		case 3: {
+			int64_t pk = __atomic_load_n(&p->peak, __ATOMIC_RELAXED);
+			if (pk > v) v = pk;
+			break;
+		}
+		case 4: v += __atomic_load_n(&p->started, __ATOMIC_RELAXED); break;
+		}
+	}
+	return v;
+}
+
+// sq_runtime_stat returns: 0 open sockets (connections N), 1 the connections limit, 2 idle
+// connections, 3 the proven worst-case memory (0: not known), 4 scheduler threads, 5 whether a
+// graceful stop has begun, 6 CPU time used (ns).
+int64_t sq_runtime_stat(int64_t which) {
+	switch (which) {
+	case 0: return atomic_load(&sock_open);
+	case 1: return sq_max_conns;
+	case 2: {
+		int64_t n = 0;
+		for (int64_t k = 0; k < sq_shard_count; k++) {
+			sq_shard *s = atomic_load(&all_shards[k]);
+			if (s) n += __atomic_load_n(&s->idle_parked, __ATOMIC_RELAXED);
+		}
+		return n;
+	}
+	case 3: return sq_worst_case;
+	case 4: return sq_shard_count;
+	case 5: return sq_stopping();
+	case 6: return sq_cputime();
+	}
+	return 0;
+}
+
+#define SQ_MAX_METRICS 64 // static data every program has: kept small
+typedef struct metric {
+	char name[48], labels[80], help[80];
+	int64_t kind; // 1 counter, 2 gauge
+	_Atomic int64_t v;
+} metric;
+static metric metrics[SQ_MAX_METRICS];
+static _Atomic int64_t nmetrics;
+static pthread_mutex_t metrics_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void copy_cstr(char *dst, size_t n, sq_string s) {
+	size_t k = (size_t)s.len < n - 1 ? (size_t)s.len : n - 1;
+	memcpy(dst, s.p, k);
+	dst[k] = 0;
+}
+
+// sq_metric_register returns the id of the metric named name with these labels (the same id
+// for every call, so each shard's main can register it), or -1 if the table is full, or -2 if
+// it exists with another kind.
+int64_t sq_metric_register(sq_string name, sq_string labels, sq_string help, int64_t kind) {
+	char n[48], l[80];
+	copy_cstr(n, sizeof n, name);
+	copy_cstr(l, sizeof l, labels);
+	pthread_mutex_lock(&metrics_mu);
+	int64_t count = atomic_load(&nmetrics), id = -1;
+	for (int64_t i = 0; i < count; i++) {
+		if (strcmp(metrics[i].name, n) == 0 && strcmp(metrics[i].labels, l) == 0) {
+			id = metrics[i].kind == kind ? i : -2;
+			break;
+		}
+	}
+	if (id == -1 && count < SQ_MAX_METRICS) {
+		metric *m = &metrics[count];
+		memcpy(m->name, n, sizeof n);
+		memcpy(m->labels, l, sizeof l);
+		copy_cstr(m->help, sizeof m->help, help);
+		m->kind = kind;
+		id = count;
+		atomic_store(&nmetrics, count + 1); // published after the entry is complete
+	}
+	pthread_mutex_unlock(&metrics_mu);
+	return id;
+}
+
+void sq_metric_add(int64_t id, int64_t n) {
+	if (id >= 0 && id < SQ_MAX_METRICS) atomic_fetch_add_explicit(&metrics[id].v, n, memory_order_relaxed);
+}
+void sq_metric_set(int64_t id, int64_t v) {
+	if (id >= 0 && id < SQ_MAX_METRICS) atomic_store_explicit(&metrics[id].v, v, memory_order_relaxed);
+}
+int64_t sq_metric_count(void) { return atomic_load(&nmetrics); }
+int64_t sq_metric_value(int64_t id) { return id >= 0 && id < SQ_MAX_METRICS ? atomic_load_explicit(&metrics[id].v, memory_order_relaxed) : 0; }
+int64_t sq_metric_kind(int64_t id) { return id >= 0 && id < atomic_load(&nmetrics) ? metrics[id].kind : 0; }
+static sq_string cstr(const char *c) { return (sq_string){(const uint8_t *)c, (int64_t)strlen(c)}; }
+sq_string sq_metric_text(int64_t id, int64_t which) {
+	if (id < 0 || id >= atomic_load(&nmetrics)) return (sq_string){NULL, 0};
+	return cstr(which == 0 ? metrics[id].name : which == 1 ? metrics[id].labels : metrics[id].help);
 }
 
 static void *watchdog(void *arg) {

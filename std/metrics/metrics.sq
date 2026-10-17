@@ -1,0 +1,188 @@
+// Package metrics counts things for monitoring: counters and gauges a program defines, and the
+// runtime's own (task pools, sockets, memory), written in Prometheus' text format. The values
+// live in a table the runtime owns, so under threads N every scheduler thread updates the same
+// ones and a scrape, whichever thread serves it, reports the whole process.
+module metrics
+
+use strconv
+
+extern fn sys_register(name str, labels str, help str, kind int) -> int stack 8K c"sq_metric_register"
+
+extern fn sys_add(id int, n int) stack 1K c"sq_metric_add"
+
+extern fn sys_set(id int, v int) stack 1K c"sq_metric_set"
+
+extern fn sys_count() -> int stack 1K c"sq_metric_count"
+
+extern fn sys_value(id int) -> int stack 1K c"sq_metric_value"
+
+extern fn sys_kind(id int) -> int stack 1K c"sq_metric_kind"
+
+extern fn sys_text(id int, which int) -> str stack 1K c"sq_metric_text"
+
+extern fn pool_count() -> int stack 1K c"sq_pool_count"
+
+extern fn pool_name(i int) -> str stack 1K c"sq_pool_name"
+
+extern fn pool_stat(i int, which int) -> int stack 8K c"sq_pool_stat"
+
+extern fn runtime_stat(which int) -> int stack 8K c"sq_runtime_stat"
+
+
+const kind_counter = 1
+const kind_gauge = 2
+
+// Counter is a value that only goes up (requests served, errors). Its zero value counts nothing.
+pub struct Counter {
+	id int // the table's index + 1; 0 for none
+}
+
+// Gauge is a value that goes up and down (connections open, queue length).
+pub struct Gauge {
+	id int
+}
+
+fn register(name, labels, help str, kind int) -> int {
+	id := sys_register(name, labels, help, kind)
+	if id == -1 {
+		panic("metrics: the table of 64 metrics is full")
+	}
+	if id == -2 {
+		panic("metrics: a name and labels registered already as the other kind (counter, gauge)")
+	}
+	return id + 1
+}
+
+// counter registers a counter and returns it: `thread served = metrics.counter(...)` at package
+// level, or in main. labels is "" or Prometheus labels without the braces:
+// `code="2xx",method="GET"`; each set of labels is its own counter. Names are up to 47 bytes,
+// labels and help up to 79 (longer ones are cut). Registering the same name and labels again
+// (each thread's package variables do, under threads N) returns the same counter. It panics if
+// the table of 64 metrics is full, or the name and labels are a gauge.
+pub fn counter(name, labels, help str) -> Counter { return Counter{id: register(name, labels, help, kind_counter)} }
+
+// gauge registers a gauge; see counter.
+pub fn gauge(name, labels, help str) -> Gauge { return Gauge{id: register(name, labels, help, kind_gauge)} }
+
+impl Counter {
+	pub fn add(self, n int) {
+		if self.id > 0 {
+			sys_add(self.id-1, n)
+		}
+	}
+	pub fn inc(self) { self.add(1) }
+	pub fn value(self) -> int {
+		if self.id == 0 {
+			return 0
+		}
+		return sys_value(self.id - 1)
+	}
+}
+
+impl Gauge {
+	pub fn set(self, v int) {
+		if self.id > 0 {
+			sys_set(self.id-1, v)
+		}
+	}
+	pub fn add(self, n int) {
+		if self.id > 0 {
+			sys_add(self.id-1, n)
+		}
+	}
+	pub fn value(self) -> int {
+		if self.id == 0 {
+			return 0
+		}
+		return sys_value(self.id - 1)
+	}
+}
+
+// write_text writes every metric in Prometheus' text format (version 0.0.4) to w, anything with a
+// write(u8[]) method (an http.ResponseWriter, a bytes.Buffer, a net.Conn), one line at a time:
+// the program's metrics, then the runtime's: squark_pool_goroutines, _capacity, _peak and
+// _started_total for each task pool, squark_sockets_open and _limit (with connections N),
+// squark_idle_connections, squark_memory_worst_case_bytes, squark_threads, squark_stopping, and
+// process_cpu_seconds_total.
+pub fn write_text(w anytype) {
+	var line u8[512]
+	// the program's, sorted by name so each name's HELP and TYPE come once
+	var order int[..64]
+	n := sys_count()
+	for i in 0..min(n, 64) {
+		order.push(i)
+	}
+	for i in 1..len(order) {
+		for j := i; j > 0 and sys_text(order[j], 0) < sys_text(order[j-1], 0); j-- {
+			order[j], order[j-1] = order[j-1], order[j]
+		}
+	}
+	prev := ""
+	for id in order {
+		name := sys_text(id, 0)
+		if name != prev {
+			typ := "counter"
+			if sys_kind(id) == kind_gauge {
+				typ = "gauge"
+			}
+			w.write(header(line[:0], name, sys_text(id, 2), typ))
+			prev = name
+		}
+		w.write(sample(line[:0], name, sys_text(id, 1), sys_value(id)))
+	}
+	// the runtime's
+	pools := pool_count()
+	const p_capacity, p_live, p_peak, p_started = 0, 2, 3, 4
+	families := str[4]{"squark_pool_goroutines", "squark_pool_capacity", "squark_pool_peak", "squark_pool_started_total"}
+	helps := str[4]{"Goroutines running in a task's pool.", "Goroutines a task's pool can run at once (every thread's).", "The most goroutines that ran at once in a task's pool, on one thread.", "Goroutines a task's pool has started."}
+	stats := int[4]{p_live, p_capacity, p_peak, p_started}
+	for f in 0..4 {
+		typ := "gauge"
+		if f == 3 {
+			typ = "counter"
+		}
+		w.write(header(line[:0], families[f], helps[f], typ))
+		for i in 0..pools {
+			var lb u8[96]
+			labels := append(append(append(lb[:0], "task=\""...), pool_name(i)...), '"')
+			w.write(sample(line[:0], families[f], str(labels), pool_stat(i, stats[f])))
+		}
+	}
+	if limit := runtime_stat(1); limit > 0 { // only connections N counts sockets
+		gauge_line(w, line[:], "squark_sockets_open", "Sockets open, of the connections limit.", runtime_stat(0))
+		gauge_line(w, line[:], "squark_sockets_limit", "The most sockets the program may have open (connections N).", limit)
+	}
+	gauge_line(w, line[:], "squark_idle_connections", "Keep-alive connections parked in the idle set.", runtime_stat(2))
+	if worst := runtime_stat(3); worst > 0 {
+		gauge_line(w, line[:], "squark_memory_worst_case_bytes", "The proven worst-case memory.", worst)
+	}
+	gauge_line(w, line[:], "squark_threads", "Scheduler threads.", runtime_stat(4))
+	gauge_line(w, line[:], "squark_stopping", "1 once a graceful stop has begun.", runtime_stat(5))
+	b := header(line[:0], "process_cpu_seconds_total", "CPU time used, in seconds.", "counter")
+	b = append(b, "process_cpu_seconds_total "...)
+	b = strconv.append_float(b, f64(runtime_stat(6))/1e9, -1)
+	w.write(append(b, '\n'))
+}
+
+fn gauge_line(w anytype, line u8[], name, help str, v int) {
+	b := header(line[:0], name, help, "gauge")
+	b = append(append(b, name...), ' ')
+	b = strconv.append_int(b, v)
+	w.write(append(b, '\n'))
+}
+
+fn header(dst u8[], name, help, typ str) -> u8[] in dst {
+	dst = append(append(append(dst, "# HELP "...), name...), ' ')
+	dst = append(append(dst, help...), '\n')
+	dst = append(append(append(dst, "# TYPE "...), name...), ' ')
+	return append(append(dst, typ...), '\n')
+}
+
+fn sample(dst u8[], name, labels str, v int) -> u8[] in dst {
+	dst = append(dst, name...)
+	if labels != "" {
+		dst = append(append(append(dst, '{'), labels...), '}')
+	}
+	dst = strconv.append_int(append(dst, ' '), v)
+	return append(dst, '\n')
+}

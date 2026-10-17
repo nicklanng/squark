@@ -283,6 +283,26 @@ are no closures or method values, which would need captured state somewhere. The
 interfaces or generic types; for code over several types, a parameter can be `anytype` (Zig-style:
 each call makes a copy of the function for its argument types, as `sort.slice` does).
 
+## Running in containers
+
+squark is built for services that run under resource limits (a Kubernetes pod, `docker run
+--memory`, a systemd unit with `MemoryMax=`), though nothing in it is specific to one:
+
+- **Limits it can prove.** The memory report covers stacks, static data, the kernel's socket
+  buffers (`connections N`, `sockbuf N`) and C heaps (`heap sqlite3 N`). The binary refuses to
+  start in a cgroup whose memory limit is lower, and `squark build -manifest k8s` prints matching
+  `resources`. `threads auto` follows the CPU limit.
+- **Stops that drop nothing.** SIGTERM drains an HTTP server (`shutdown 20s`); `with deadline`
+  bounds calls to other services, and during a stop every call is cut off before the grace period
+  ends.
+- **Overload that degrades.** `start f() else { }`, `v, ok := x in a`, `http.shed_load`, and
+  `isolate` tasks: a handler that panics ends only its own connection.
+- **What operators expect.** Names resolve through resolv.conf like C programs (search domains,
+  `ndots`), `http.serve_admin(":9090")` serves `/healthz`, `/readyz` and `/metrics` (Prometheus) on
+  a pool of its own, and `std/log` writes JSON lines.
+
+ROADMAP.md tracks what's done and what's next (static builds, TLS, Postgres, a showcase).
+
 ## How the checking works
 
 **Lifetimes.** This is region inference in the style of Rust's borrow checker, without ownership.

@@ -21,6 +21,8 @@ extern fn close_write(fd int) -> int stack 8K c"sq_close_write"
 
 extern fn accept(fd int) -> int stack 8K c"sq_accept"
 
+extern fn accept_always(fd int) -> int stack 8K c"sq_accept_always"
+
 extern fn sys_dial(ip u8[], port int, udp int) -> int stack 8K c"sq_dial"
 
 extern fn sys_read(fd int, b u8[]) -> int stack 8K c"sq_read"
@@ -147,6 +149,16 @@ impl Listener {
 		}
 		if fd < 0 {
 			return Conn{sysfd: -1}, os.errno(-fd)
+		}
+		return Conn{sysfd: fd}, nil
+	}
+
+	// accept_always is accept that goes on during a graceful stop, for a port that must keep
+	// answering until the program exits (http.serve_admin's probes).
+	pub fn accept_always(self) -> Conn ! {
+		fd := accept_always(self.sysfd)
+		if fd < 0 {
+			return Conn{sysfd: -1}, fd_error(fd)
 		}
 		return Conn{sysfd: fd}, nil
 	}

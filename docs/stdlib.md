@@ -655,6 +655,50 @@ fn new_decoder(data u8[]) -> json.Decoder in data
 // a package variable. String and field work as with new_decoder.
 fn new_decoder_in(data u8[], a arena) -> json.Decoder in data, a
 
+// Package metrics counts things for monitoring: counters and gauges a program defines, and the
+// runtime's own (task pools, sockets, memory), written in Prometheus' text format. The values
+// live in a table the runtime owns, so under threads N every scheduler thread updates the same
+// ones and a scrape, whichever thread serves it, reports the whole process.
+module metrics
+
+// Counter is a value that only goes up (requests served, errors). Its zero value counts nothing.
+struct Counter {
+	// fields that aren't pub
+}
+
+impl Counter {
+	fn add(self, n int)
+	fn inc(self)
+	fn value(self) -> int
+}
+// Gauge is a value that goes up and down (connections open, queue length).
+struct Gauge {
+	// fields that aren't pub
+}
+
+impl Gauge {
+	fn set(self, v int)
+	fn add(self, n int)
+	fn value(self) -> int
+}
+
+// counter registers a counter and returns it: `thread served = metrics.counter(...)` at package
+// level, or in main. labels is "" or Prometheus labels without the braces:
+// `code="2xx",method="GET"`; each set of labels is its own counter. Names are up to 47 bytes,
+// labels and help up to 79 (longer ones are cut). Registering the same name and labels again
+// (each thread's package variables do, under threads N) returns the same counter. It panics if
+// the table of 64 metrics is full, or the name and labels are a gauge.
+fn counter(name str, labels str, help str) -> metrics.Counter
+// gauge registers a gauge; see counter.
+fn gauge(name str, labels str, help str) -> metrics.Gauge
+// write_text writes every metric in Prometheus' text format (version 0.0.4) to w, anything with a
+// write(u8[]) method (an http.ResponseWriter, a bytes.Buffer, a net.Conn), one line at a time:
+// the program's metrics, then the runtime's: squark_pool_goroutines, _capacity, _peak and
+// _started_total for each task pool, squark_sockets_open and _limit (with connections N),
+// squark_idle_connections, squark_memory_worst_case_bytes, squark_threads, squark_stopping, and
+// process_cpu_seconds_total.
+fn write_text(w anytype)
+
 // Package net provides TCP listeners and connections over IPv4 and IPv6, and name lookup
 // (lookup_ip: the hosts file, then DNS as resolv.conf says). Blocking calls park only the calling
 // goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
@@ -693,6 +737,10 @@ struct Listener {
 impl Listener {
 	// accept waits for the next connection. During a graceful stop it returns Stopping.
 	fn accept(self) -> net.Conn !
+
+	// accept_always is accept that goes on during a graceful stop, for a port that must keep
+	// answering until the program exits (http.serve_admin's probes).
+	fn accept_always(self) -> net.Conn !
 
 	// port returns the port l listens on: the one the system chose, after listen(":0").
 	fn port(self) -> int
@@ -1029,6 +1077,19 @@ impl JSON {
 // dispatches to the patterns registered with handle_func. It returns nil after a graceful stop
 // (see serve).
 fn listen_and_serve(addr str, h http.HandlerFunc) -> !
+// handle_metrics serves metrics.write_text at pattern ("GET /metrics"): the program's metrics, the
+// server's and the runtime's, in Prometheus' text format.
+fn handle_metrics(pattern str in static)
+// set_ready sets what the admin port's /readyz reports (true at start): false while the program
+// can't serve (warming a cache, a dependency down), so a load balancer sends it nothing. During a
+// graceful stop /readyz is 503 whatever this says.
+fn set_ready(r bool)
+// serve_admin listens on addr and serves, from a small pool of its own (so a full serve_conn pool
+// can't make probes fail): GET /healthz (200 while the program runs), GET /readyz (200, or 503
+// during a graceful stop or after set_ready(false)) and GET /metrics (handle_metrics). It keeps
+// answering during a graceful stop, until the program exits. It returns once listening; call it
+// before listen_and_serve. Kubernetes: point livenessProbe at /healthz, readinessProbe at /readyz.
+fn serve_admin(addr str) -> !
 // serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
 // Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
@@ -1076,6 +1137,65 @@ fn send_error(w *http.ResponseWriter, code int)
 // port returns the listen address ":n" for listen_and_serve(http.port(8080), nil). The string is in
 // a buffer the next call reuses.
 fn port(n int) -> str in static
+
+// Package log writes structured logs: one JSON object per line on stdout, which is what container
+// log collectors expect.
+//
+//    e := log.info("served")
+//    e.str("path", r.path)
+//    e.int("status", 200)
+//    e.duration("took", time.since(start))
+//    e.send()
+//
+// writes {"time":"2026-10-17T09:30:00.123Z","level":"info","msg":"served","path":"/x",
+// "status":200,"took":0.0021}. An entry is a value on the caller's stack (up to 1 KiB of JSON), so
+// goroutines that log at the same time can't mix their lines; it never allocates, and a line too
+// long for the entry keeps the fields that fit and ends with "truncated":true. Entries below
+// log.level cost a branch per call.
+module log
+
+thread level log.Level
+
+enum Level {
+	debug = 0
+	info = 1
+	warn = 2
+	error = 3
+}
+// Entry is a line being built: add fields, then send it.
+struct Entry {
+	// fields that aren't pub
+}
+
+impl Entry {
+	// str adds a string field. A value too long for the line is cut short (and the line marked).
+	fn str(&self, k str, v str)
+	fn int(&self, k str, v int)
+	fn bool(&self, k str, v bool)
+
+	// f64 adds a number; NaN and infinities, which JSON has no form for, become null.
+	fn f64(&self, k str, v f64)
+
+	// duration adds d in seconds, as a number.
+	fn duration(&self, k str, d time.Duration)
+
+	// err adds an error's message (null for nil) and, if it has one, its code as k_code.
+	fn err(&self, k str, e error)
+
+	// send writes the line to stdout in one write (nothing for an entry below level). An entry is
+	// sent once.
+	fn send(&self)
+}
+
+// parse_level reads "debug", "info", "warn" or "error" (from an environment variable, say).
+fn parse_level(s str) -> (log.Level, bool)
+fn debug(msg str) -> log.Entry
+fn info(msg str) -> log.Entry
+fn warn(msg str) -> log.Entry
+// err starts an entry at level error (`error` is a type, so it can't be the function's name).
+fn err(msg str) -> log.Entry
+// entry starts a line at level l with the time and the message.
+fn entry(l log.Level, msg str) -> log.Entry
 
 // Package rand generates pseudo-random numbers with xoshiro256** (Blackman and Vigna), seeded
 // through splitmix64. It is fast and statistically good, but predictable: not for keys, tokens
