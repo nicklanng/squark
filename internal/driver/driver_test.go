@@ -958,9 +958,10 @@ func TestWorkers(t *testing.T) {
 	if runtime.GOOS == "linux" && len(pids) < 2 {
 		t.Errorf("200 connections all reached one worker: %v", pids)
 	}
+	// the supervisor passes SIGTERM on, and each worker's http server stops gracefully (status 0)
 	cmd.Process.Signal(syscall.SIGTERM)
-	if code := wait(cmd); code != 128+int(syscall.SIGTERM) {
-		t.Errorf("after SIGTERM: exit status %d, want %d", code, 128+int(syscall.SIGTERM))
+	if code := wait(cmd); code != 0 {
+		t.Errorf("after SIGTERM: exit status %d, want 0 (a graceful stop)", code)
 	}
 	gone(kids)
 
@@ -1128,9 +1129,9 @@ func TestThreads(t *testing.T) {
 	if total != 200+64*100 {
 		t.Errorf("%d responses, want %d", total, 200+64*100)
 	}
-	cmd.Process.Signal(syscall.SIGTERM)
-	if code := wait(cmd); code != 128+int(syscall.SIGTERM) {
-		t.Errorf("after SIGTERM: exit status %d", code)
+	cmd.Process.Signal(syscall.SIGTERM) // every shard's http server stops gracefully
+	if code := wait(cmd); code != 0 {
+		t.Errorf("after SIGTERM: exit status %d, want 0 (a graceful stop)", code)
 	}
 
 	// each shard listens on an address once; a second Listen from the same shard is "in use"

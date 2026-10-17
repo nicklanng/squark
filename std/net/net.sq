@@ -1,4 +1,5 @@
-// Package net provides TCP listeners and connections. Blocking calls park only the calling
+// Package net provides TCP listeners and connections over IPv4 and IPv6, and name lookup
+// (lookup_ip: the hosts file, then DNS as resolv.conf says). Blocking calls park only the calling
 // goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
 module net
 
@@ -20,7 +21,7 @@ extern fn close_write(fd int) -> int stack 8K c"sq_close_write"
 
 extern fn accept(fd int) -> int stack 8K c"sq_accept"
 
-extern fn dial_tcp(host str, port int) -> int stack 8K c"sq_dial_tcp"
+extern fn sys_dial(ip u8[], port int, udp int) -> int stack 8K c"sq_dial"
 
 extern fn sys_read(fd int, b u8[]) -> int stack 8K c"sq_read"
 
@@ -49,6 +50,12 @@ pub fault Timeout -20 "i/o timeout"
 
 const sq_e_timeout = 65536 // sq_read_timeout returns -sq_e_timeout for a timeout
 
+// Stopping is returned by accept once a graceful stop has begun (runtime.stop_gracefully).
+pub fault Stopping -23 "stopping: the program got a stop signal"
+
+const sq_e_stop = 65537 // sq_accept returns -sq_e_stop during a graceful stop
+
+// split_host_port splits "host:port", "[ipv6]:port" or ":port".
 fn split_host_port(addr str) -> (str, int) ! {
 	i := strings.last_index_byte(addr, ':')
 	if i < 0 {
@@ -59,15 +66,22 @@ fn split_host_port(addr str) -> (str, int) ! {
 		return "", 0, BadAddress
 	}
 	host := addr[:i]
-	if host == "localhost" {
-		host = "127.0.0.1"
+	if strings.has_prefix(host, "[") {
+		h, ok := strings.cut_suffix(host[1:], "]")
+		if not ok or strings.index_byte(h, ':') < 0 {
+			return "", 0, BadAddress
+		}
+		return h, port, nil
+	}
+	if strings.index_byte(host, ':') >= 0 or strings.index_byte(host, ']') >= 0 {
+		return "", 0, BadAddress // an IPv6 address needs its brackets: "[::1]:80"
 	}
 	return host, port, nil
 }
 
 // append_host_port appends "host:port" to dst, as Go's JoinHostPort: a host containing ':' (an IPv6
 // literal) is put in brackets, "[::1]:80". An empty host gives ":port", which listen takes as
-// every interface. (Listen and dial take IPv4 addresses and "localhost" only.)
+// every interface.
 pub fn append_host_port(dst u8[], host str, port int) -> u8[] in dst {
 	if strings.index_byte(host, ':') >= 0 {
 		dst = append(append(append(dst, '['), host...), ']')
@@ -77,11 +91,24 @@ pub fn append_host_port(dst u8[], host str, port int) -> u8[] in dst {
 	return strconv.append_int(append(dst, ':'), port)
 }
 
-// listen opens a TCP listener on addr ("host:port" or ":port").
+// listen opens a TCP listener on addr: "host:port", "[ipv6]:port" or ":port". An empty host is
+// every interface, IPv6 and IPv4 (IPv4 alone where the system has no IPv6); "localhost" is
+// 127.0.0.1, and another name is its first address (lookup_ip).
 pub fn listen(addr str) -> Listener ! {
 	host, port, err := split_host_port(addr)
 	if err != nil {
 		return Listener{sysfd: -1}, err
+	}
+	var text u8[46]
+	if strings.equal_fold(host, "localhost") {
+		host = "127.0.0.1"
+	} else if _, ok := parse_ip(host); not ok and host != "" {
+		var ips IP[1]
+		found, err := lookup_ip(host, ips[:])
+		if err != nil {
+			return Listener{sysfd: -1}, err
+		}
+		host = found[0].string(text[:])
 	}
 	fd := listen_tcp(host, port, 4096)
 	if fd < 0 {
@@ -91,8 +118,12 @@ pub fn listen(addr str) -> Listener ! {
 }
 
 impl Listener {
+	// accept waits for the next connection. During a graceful stop it returns Stopping.
 	pub fn accept(self) -> Conn ! {
 		fd := accept(self.sysfd)
+		if fd == -sq_e_stop {
+			return Conn{sysfd: -1}, Stopping
+		}
 		if fd < 0 {
 			return Conn{sysfd: -1}, os.errno(-fd)
 		}
@@ -110,13 +141,44 @@ impl Listener {
 	}
 }
 
-// dial connects to a TCP address.
+// dial connects to a TCP address: "host:port" or "[ipv6]:port". A name is looked up with
+// lookup_ip and its addresses are tried in turn, IPv4 first, until one connects; an empty host is
+// the local system (127.0.0.1).
 pub fn dial(addr str) -> Conn ! {
 	host, port, err := split_host_port(addr)
 	if err != nil {
 		return Conn{sysfd: -1}, err
 	}
-	fd := dial_tcp(host, port)
+	var ips IP[8]
+	list := ips[:0]
+	if host == "" {
+		list = append(list, ipv4(127, 0, 0, 1))
+	} else {
+		list, err = lookup_ip(host, ips[:])
+		if err != nil {
+			return Conn{sysfd: -1}, err
+		}
+	}
+	for ip in list {
+		c, e := dial_ip(ip, port)
+		if e == nil {
+			return c, nil
+		}
+		err = e
+	}
+	return Conn{sysfd: -1}, err
+}
+
+// dial_ip connects to port at ip over TCP.
+pub fn dial_ip(ip IP, port int) -> Conn ! { return dial_proto(ip, port, 0) }
+
+// dial_proto connects over TCP (udp 0) or makes a connected UDP socket (udp 1), whose reads and
+// writes are single datagrams from and to ip:port.
+fn dial_proto(ip IP, port int, udp int) -> Conn ! {
+	if ip.n == 0 or port < 0 or port > 65535 {
+		return Conn{sysfd: -1}, BadAddress
+	}
+	fd := sys_dial(ip.b[:ip.n], port, udp)
 	if fd < 0 {
 		return Conn{sysfd: -1}, os.errno(-fd)
 	}

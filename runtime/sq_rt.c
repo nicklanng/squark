@@ -35,6 +35,8 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/prctl.h>
+#include <sys/random.h>
+#include <sched.h>
 #endif
 
 // ---------------------------------------------------------------------------
@@ -186,6 +188,9 @@ typedef struct sq_shard {
 		int entry; // in listen_table
 	} listeners[32];   // this shard's listening sockets
 	int nlisteners;
+	int accepting[64]; // listening fds a goroutine of this shard waits in accept on
+	int naccepting;
+	bool stop_seen;    // this shard has acted on a graceful stop (sq_stop_gracefully)
 	void *globals;     // this shard's package variables (shard 0: the generated static copy)
 	void *tsan_sched;  // ThreadSanitizer builds only: the scheduler's own fiber
 	uint8_t *sigstack; // this thread's signal stack (for stack-overflow reports)
@@ -198,6 +203,8 @@ extern sq_g *sq_timer_heap[];
 static sq_shard sq_shard0;
 static _Thread_local sq_shard *sq_self = &sq_shard0;
 static atomic_int_fast64_t live_shards;
+static atomic_int graceful_signal; // the signal that started a graceful stop (sq_stop_gracefully), or 0
+static void stop_shard(void);
 
 static void heap_remove(sq_g *g);
 static void heap_up(int64_t i);
@@ -792,6 +799,7 @@ static void ready_shared(sq_g *g) {
 
 // drain_remote moves goroutines other shards have woken onto this shard's run queue.
 static void drain_remote(void) {
+	if (atomic_load_explicit(&graceful_signal, memory_order_relaxed) && !sq_self->stop_seen) stop_shard();
 	if (!atomic_load_explicit(&sq_self->remote_pending, memory_order_acquire)) return;
 	atomic_store(&sq_self->remote_pending, false);
 #if !SQ_KQUEUE
@@ -1726,24 +1734,26 @@ static void fd_ready(int fd, uint32_t events) {
 
 // fd_closed wakes the goroutines waiting on fd, which another goroutine of this shard just closed;
 // their wait_fd returns false.
+// wake_closed wakes g if it waits on fd, as if fd had been closed: its wait_fd returns false.
+static void wake_closed(sq_g *g, int fd) {
+	if (!g || g->state != G_WAITING || g->wait_fd != fd) return;
+	if (g->armed) {
+		g->armed = false;
+		sq_self->fd_waiters--;
+	}
+	g->wait_fd = -1;
+	g->wake = WAKE_CLOSED;
+	heap_remove(g);
+	sq_ready(g);
+}
+
 static void fd_closed(int fd) {
 	fd_slot *s = slot(fd);
 	if (!s) return;
 	s->read_kind = 0; // the number may be reused
 	sq_g *ws[2] = {s->rd, s->wr};
 	s->rd = s->wr = NULL;
-	for (int i = 0; i < 2; i++) {
-		sq_g *g = ws[i];
-		if (!g || g->state != G_WAITING || g->wait_fd != fd) continue;
-		if (g->armed) {
-			g->armed = false;
-			sq_self->fd_waiters--;
-		}
-		g->wait_fd = -1;
-		g->wake = WAKE_CLOSED;
-		heap_remove(g);
-		sq_ready(g);
-	}
+	for (int i = 0; i < 2; i++) wake_closed(ws[i], fd);
 }
 
 static void netpoll(int64_t timeout_ns) {
@@ -1972,6 +1982,7 @@ int64_t sq_read(int64_t fd, sq_bytes b) {
 // sq_read_timeout is sq_read that waits at most timeout_ns for input: it returns -SQ_ETIMEOUT if
 // none arrived by then. (SQ_ETIMEOUT is above every errno, so the caller can tell it apart.)
 #define SQ_ETIMEOUT 65536
+#define SQ_ESTOP 65537 // sq_accept during a graceful stop
 int64_t sq_read_timeout(int64_t fd, sq_bytes b, int64_t timeout_ns) {
 	int64_t deadline = sq_nanotime() + timeout_ns;
 	if (sq_self->cur_g && read_needs_poll((int)fd)) {
@@ -2124,34 +2135,88 @@ int64_t sq_open(sq_string path, int64_t flags, int64_t mode) {
 	return fd < 0 ? -errno : fd;
 }
 
-// parse_addr fills sa from a host (empty: any) and port.
-static int parse_addr(sq_string host, int64_t port, struct sockaddr_in *sa) {
-	memset(sa, 0, sizeof *sa);
-	sa->sin_family = AF_INET;
-	sa->sin_port = htons((uint16_t)port);
-	if (host.len == 0) {
-		sa->sin_addr.s_addr = htonl(INADDR_ANY);
-		return 0;
-	}
+// sq_ip_parse reads an IPv4 ("10.0.0.1") or IPv6 ("::1") literal into out (16 bytes) and returns
+// its length, 4 or 16, or 0 if s isn't one.
+int64_t sq_ip_parse(sq_string s, sq_bytes out) {
 	char hb[64];
-	if (host.len >= (int64_t)sizeof hb) return -EINVAL;
-	memcpy(hb, host.p, (size_t)host.len);
-	hb[host.len] = 0;
-	return inet_pton(AF_INET, hb, &sa->sin_addr) == 1 ? 0 : -EINVAL;
+	if (s.len == 0 || s.len >= (int64_t)sizeof hb || out.len < 16) return 0;
+	memcpy(hb, s.p, (size_t)s.len);
+	hb[s.len] = 0;
+	if (memchr(hb, 0, (size_t)s.len)) return 0;
+	if (inet_pton(AF_INET, hb, out.p) == 1) return 4;
+	if (inet_pton(AF_INET6, hb, out.p) == 1) return 16;
+	return 0;
 }
 
-static int64_t listen_new(const struct sockaddr_in *sa, int64_t backlog, bool reuseport) {
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
+// sq_ip_format writes the text form of a 4- or 16-byte address into dst and returns its length.
+int64_t sq_ip_format(sq_bytes ip, sq_bytes dst) {
+	char b[INET6_ADDRSTRLEN];
+	if (!inet_ntop(ip.len == 4 ? AF_INET : AF_INET6, ip.p, b, sizeof b)) return 0;
+	int64_t n = (int64_t)strlen(b);
+	if (n > dst.len) n = dst.len;
+	memcpy(dst.p, b, (size_t)n);
+	return n;
+}
+
+// make_sa fills sa from a 4- or 16-byte address and a port.
+static socklen_t make_sa(const uint8_t *ip, int64_t iplen, int64_t port, struct sockaddr_storage *sa) {
+	memset(sa, 0, sizeof *sa);
+	if (iplen == 4) {
+		struct sockaddr_in *s4 = (struct sockaddr_in *)sa;
+		s4->sin_family = AF_INET;
+		s4->sin_port = htons((uint16_t)port);
+		memcpy(&s4->sin_addr, ip, 4);
+		return sizeof *s4;
+	}
+	struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)sa;
+	s6->sin6_family = AF_INET6;
+	s6->sin6_port = htons((uint16_t)port);
+	memcpy(&s6->sin6_addr, ip, 16);
+	return sizeof *s6;
+}
+
+// A listening address: family 0 is the empty host, every interface of both families.
+typedef struct listen_addr {
+	int family; // 0, AF_INET or AF_INET6
+	uint8_t ip[16];
+	uint16_t port; // host order
+} listen_addr;
+
+// parse_addr reads a host (empty: any, or an IP literal) and port.
+static int parse_addr(sq_string host, int64_t port, listen_addr *la) {
+	memset(la, 0, sizeof *la);
+	la->port = (uint16_t)port;
+	if (host.len == 0) return 0;
+	int64_t n = sq_ip_parse(host, (sq_bytes){la->ip, 16, 16});
+	if (n == 0) return -EINVAL;
+	la->family = n == 4 ? AF_INET : AF_INET6;
+	return 0;
+}
+
+static int64_t listen_family(int family, const listen_addr *la, int64_t backlog, bool reuseport) {
+	struct sockaddr_storage sa;
+	socklen_t salen = make_sa(la->ip, family == AF_INET ? 4 : 16, la->port, &sa); // ip is zero for any
+	int fd = socket(family, SOCK_STREAM, 0);
 	if (fd < 0) return -errno;
-	int one = 1;
+	int one = 1, zero = 0;
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
 	if (reuseport) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
-	if (bind(fd, (const struct sockaddr *)sa, sizeof *sa) < 0 || listen(fd, (int)backlog) < 0) {
+	// every interface: one socket for IPv6 and (as mapped addresses) IPv4, as Go listens on ":port"
+	if (family == AF_INET6 && la->family == 0) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);
+	if (bind(fd, (const struct sockaddr *)&sa, salen) < 0 || listen(fd, (int)backlog) < 0) {
 		int e = errno;
 		close(fd);
 		return -e;
 	}
 	set_nonblock(fd);
+	return fd;
+}
+
+static int64_t listen_new(const listen_addr *la, int64_t backlog, bool reuseport) {
+	if (la->family) return listen_family(la->family, la, backlog, reuseport);
+	int64_t fd = listen_family(AF_INET6, la, backlog, reuseport);
+	// no IPv6 here (a kernel or container with it turned off): IPv4 only
+	if (fd == -EAFNOSUPPORT || fd == -EADDRNOTAVAIL || fd == -EPROTONOSUPPORT) fd = listen_family(AF_INET, la, backlog, reuseport);
 	return fd;
 }
 
@@ -2166,9 +2231,8 @@ static int64_t listen_new(const struct sockaddr_in *sa, int64_t backlog, bool re
 #define SQ_MAX_LISTEN 64
 static pthread_mutex_t listen_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct {
-	uint32_t addr;
-	uint16_t port;      // network order
-	int shared_fd;      // macOS with threads: the shards' socket for this address (the table's own copy), or -1
+	listen_addr addr;
+	int shared_fd;     // macOS with threads: the shards' socket for this address (the table's own copy), or -1
 	uint64_t shards[SQ_MAX_SHARDS / 64]; // which shards listen on it
 } listen_table[SQ_MAX_LISTEN];
 static int nlisten;
@@ -2178,21 +2242,22 @@ int64_t sq_close_write(int64_t fd) { return shutdown((int)fd, SHUT_WR) < 0 ? -er
 
 // sq_local_port returns the port a socket is bound to (e.g. after listening on port 0).
 int64_t sq_local_port(int64_t fd) {
-	struct sockaddr_in sa;
+	struct sockaddr_storage sa;
 	socklen_t n = sizeof sa;
 	if (getsockname((int)fd, (struct sockaddr *)&sa, &n) < 0) return -errno;
-	return ntohs(sa.sin_port);
+	if (sa.ss_family == AF_INET6) return ntohs(((struct sockaddr_in6 *)&sa)->sin6_port);
+	return ntohs(((struct sockaddr_in *)&sa)->sin_port);
 }
 
 int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
-	struct sockaddr_in sa;
-	if (parse_addr(host, port, &sa) < 0) return -EINVAL;
+	listen_addr la;
+	if (parse_addr(host, port, &la) < 0) return -EINVAL;
 	bool shared = sq_worker_count > 1 || sq_shard_count > 1;
-	if (!shared || port == 0) return listen_new(&sa, backlog, false);
+	if (!shared || port == 0) return listen_new(&la, backlog, false);
 	pthread_mutex_lock(&listen_mu);
 	int e = -1;
 	for (int i = 0; i < nlisten; i++)
-		if (listen_table[i].addr == sa.sin_addr.s_addr && listen_table[i].port == sa.sin_port) e = i;
+		if (listen_table[i].addr.family == la.family && listen_table[i].addr.port == la.port && memcmp(listen_table[i].addr.ip, la.ip, 16) == 0) e = i;
 	int64_t me = sq_self->id;
 	if (e >= 0 && (listen_table[e].shards[me / 64] >> (me % 64) & 1)) {
 		pthread_mutex_unlock(&listen_mu);
@@ -2205,12 +2270,11 @@ int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
 		if (fd < 0) fd = -errno;
 	} else
 #endif
-	fd = listen_new(&sa, backlog, true);
+	fd = listen_new(&la, backlog, true);
 	if (fd >= 0 && e < 0 && nlisten < SQ_MAX_LISTEN) {
 		e = nlisten++;
 		memset(&listen_table[e], 0, sizeof listen_table[e]);
-		listen_table[e].addr = sa.sin_addr.s_addr;
-		listen_table[e].port = sa.sin_port;
+		listen_table[e].addr = la;
 		listen_table[e].shared_fd = -1;
 	}
 #if SQ_KQUEUE
@@ -2256,6 +2320,7 @@ static void listener_closed(int fd) {
 
 int64_t sq_accept(int64_t lfd) {
 	for (;;) {
+		if (sq_self->stop_seen) return -SQ_ESTOP;
 		int fd = accept((int)lfd, NULL, NULL);
 		if (fd >= 0) {
 			set_nonblock(fd);
@@ -2268,32 +2333,37 @@ int64_t sq_accept(int64_t lfd) {
 		}
 		if (errno == EINTR || errno == ECONNABORTED) continue;
 		if (errno == EAGAIN && sq_self->cur_g) {
-			if (!wait_fd((int)lfd, 'r')) return -EBADF; // the listener was closed
+			if (sq_self->naccepting < (int)(sizeof sq_self->accepting / sizeof sq_self->accepting[0]))
+				sq_self->accepting[sq_self->naccepting++] = (int)lfd;
+			bool woken = wait_fd((int)lfd, 'r');
+			for (int i = 0; i < sq_self->naccepting; i++) {
+				if (sq_self->accepting[i] == (int)lfd) {
+					sq_self->accepting[i] = sq_self->accepting[--sq_self->naccepting];
+					break;
+				}
+			}
+			if (!woken) return sq_self->stop_seen ? -SQ_ESTOP : -EBADF; // stopping, or the listener was closed
 			continue;
 		}
 		return -errno;
 	}
 }
 
-int64_t sq_dial_tcp(sq_string host, int64_t port) {
-	char hb[64];
-	if (host.len >= (int64_t)sizeof hb) return -EINVAL;
-	memcpy(hb, host.p, (size_t)host.len);
-	hb[host.len] = 0;
-	struct sockaddr_in sa;
-	memset(&sa, 0, sizeof sa);
-	sa.sin_family = AF_INET;
-	sa.sin_port = htons((uint16_t)port);
-	if (inet_pton(AF_INET, hb, &sa.sin_addr) != 1) return -EINVAL;
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
+// sq_dial connects to a 4- or 16-byte address: a TCP stream (udp false) or a connected UDP socket,
+// whose reads and writes are single datagrams from and to that address only.
+int64_t sq_dial(sq_bytes ip, int64_t port, int64_t udp) {
+	if (ip.len != 4 && ip.len != 16) return -EINVAL;
+	struct sockaddr_storage sa;
+	socklen_t salen = make_sa(ip.p, ip.len, port, &sa);
+	int fd = socket(sa.ss_family, udp ? SOCK_DGRAM : SOCK_STREAM, 0);
 	if (fd < 0) return -errno;
 	set_nonblock(fd);
 	int one = 1;
-	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+	if (!udp) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 #ifdef SO_NOSIGPIPE
 	setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
-	if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
+	if (connect(fd, (struct sockaddr *)&sa, salen) < 0) {
 		if (errno != EINPROGRESS) {
 			int e = errno;
 			close(fd);
@@ -2309,6 +2379,18 @@ int64_t sq_dial_tcp(sq_string host, int64_t port) {
 		}
 	}
 	return fd;
+}
+
+// sq_random_u64 returns 64 bits from the operating system's random source (for DNS query IDs).
+uint64_t sq_random_u64(void) {
+	uint64_t v = 0;
+#if SQ_KQUEUE // macOS and FreeBSD
+	arc4random_buf(&v, sizeof v);
+#else
+	while (getrandom(&v, sizeof v, 0) < 0 && errno == EINTR) {
+	}
+#endif
+	return v;
 }
 
 static int g_argc;
@@ -2534,12 +2616,143 @@ static void err_num(int64_t v) {
 	err_write(b);
 }
 
+// cpu_count is what threads auto and workers auto use: the CPUs this process may use. On Linux that
+// is the smaller of the CPUs it may run on (its affinity: taskset, cpusets) and its cgroup's CPU
+// limit (a container's --cpus, a Kubernetes pod's limits.cpu), rounded up, much as Go 1.25 sets
+// GOMAXPROCS; elsewhere the CPUs online.
+#if defined(__linux__)
+// read_small reads a small proc or cgroup file into buf, NUL-terminated; false if it can't.
+static bool read_small(const char *path, char *buf, size_t n) {
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return false;
+	size_t got = 0;
+	for (;;) {
+		ssize_t r = read(fd, buf + got, n - 1 - got);
+		if (r > 0 && (got += (size_t)r) < n - 1) continue;
+		if (r < 0 && errno == EINTR) continue;
+		break;
+	}
+	close(fd);
+	buf[got] = 0;
+	return true;
+}
+
+static int64_t parse_num(const char **p) {
+	int64_t v = 0;
+	bool any = false;
+	while (**p >= '0' && **p <= '9' && v < ((int64_t)1 << 50)) {
+		v = v * 10 + (*(*p)++ - '0');
+		any = true;
+	}
+	return any ? v : -1;
+}
+
+// quota_cpus is quota/period rounded up (at least 1), or 0 for no limit.
+static int64_t quota_cpus(int64_t quota, int64_t period) {
+	if (quota <= 0 || period <= 0) return 0;
+	int64_t n = (quota + period - 1) / period;
+	return n < 1 ? 1 : n;
+}
+
+static int64_t min_limit(int64_t a, int64_t b) { return a == 0 ? b : b == 0 ? a : (a < b ? a : b); }
+
+// cgroup_dir_limit reads the CPU limit set in one cgroup directory: v2's cpu.max ("max 100000",
+// "150000 100000") or v1's cpu.cfs_quota_us and cpu.cfs_period_us; 0 for none.
+static int64_t cgroup_dir_limit(const char *dir, bool v2) {
+	char path[4200], buf[128];
+	if (v2) {
+		snprintf(path, sizeof path, "%s/cpu.max", dir);
+		if (!read_small(path, buf, sizeof buf) || strncmp(buf, "max", 3) == 0) return 0;
+		const char *p = buf;
+		int64_t quota = parse_num(&p);
+		while (*p == ' ') p++;
+		return quota_cpus(quota, parse_num(&p));
+	}
+	snprintf(path, sizeof path, "%s/cpu.cfs_quota_us", dir);
+	if (!read_small(path, buf, sizeof buf) || buf[0] == '-') return 0; // -1: no limit
+	const char *p = buf;
+	int64_t quota = parse_num(&p);
+	snprintf(path, sizeof path, "%s/cpu.cfs_period_us", dir);
+	if (!read_small(path, buf, sizeof buf)) return 0;
+	p = buf;
+	return quota_cpus(quota, parse_num(&p));
+}
+
+// cgroup_tree_limit is the smallest limit from mount+path up to mount: a parent's limit applies
+// to its children. Without a cgroup namespace the path names the host's hierarchy, which a
+// container doesn't see; then only the mount itself (the container's own cgroup) is read.
+static int64_t cgroup_tree_limit(const char *mount, const char *path, bool v2) {
+	char dir[4096];
+	int n = snprintf(dir, sizeof dir, "%s%s", mount, path);
+	if (n <= 0 || n >= (int)sizeof dir) return cgroup_dir_limit(mount, v2);
+	size_t base = strlen(mount);
+	int64_t best = 0;
+	for (;;) {
+		size_t len = strlen(dir);
+		while (len > base && dir[len - 1] == '/') dir[--len] = 0;
+		best = min_limit(best, cgroup_dir_limit(dir, v2));
+		if (len <= base) break;
+		char *slash = strrchr(dir + base, '/');
+		if (!slash) break;
+		*slash = 0;
+	}
+	return best;
+}
+
+static bool has_controller(const char *list, const char *name) {
+	size_t n = strlen(name);
+	for (const char *p = list; *p;) {
+		const char *e = strchr(p, ',');
+		size_t len = e ? (size_t)(e - p) : strlen(p);
+		if (len == n && strncmp(p, name, n) == 0) return true;
+		if (!e) break;
+		p = e + 1;
+	}
+	return false;
+}
+
+// cgroup_cpu_limit reads /proc/self/cgroup and the limits of the cgroups it names.
+static int64_t cgroup_cpu_limit(void) {
+	char cg[4096];
+	if (!read_small("/proc/self/cgroup", cg, sizeof cg)) return 0;
+	int64_t best = 0;
+	for (char *line = cg; line && *line;) {
+		char *next = strchr(line, '\n');
+		if (next) *next++ = 0;
+		char *c1 = strchr(line, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+		if (c2) {
+			*c2 = 0;
+			if (strcmp(line, "0:") == 0) {
+				best = min_limit(best, cgroup_tree_limit("/sys/fs/cgroup", c2 + 1, true)); // v2: "0::/path"
+			} else if (has_controller(c1 + 1, "cpu")) { // v1: "4:cpu,cpuacct:/path"
+				char mount[256];
+				snprintf(mount, sizeof mount, "/sys/fs/cgroup/%s", c1 + 1);
+				int64_t l = cgroup_tree_limit(mount, c2 + 1, false);
+				if (l == 0) l = cgroup_tree_limit("/sys/fs/cgroup/cpu", c2 + 1, false);
+				best = min_limit(best, l);
+			}
+		}
+		line = next;
+	}
+	return best;
+}
+#endif
+
+static int64_t cpu_count(void) {
+	long c = sysconf(_SC_NPROCESSORS_ONLN);
+	int64_t n = c > 0 ? c : 1;
+#if defined(__linux__)
+	cpu_set_t set;
+	if (sched_getaffinity(0, sizeof set, &set) == 0 && CPU_COUNT(&set) > 0) n = CPU_COUNT(&set);
+	int64_t limit = cgroup_cpu_limit();
+	if (limit > 0 && limit < n) n = limit;
+#endif
+	return n;
+}
+
 static void run_workers(void) {
 	int64_t n = sq_workers;
-	if (n == 0) { // workers auto
-		long c = sysconf(_SC_NPROCESSORS_ONLN);
-		n = c > 0 ? c : 1;
-	}
+	if (n == 0) n = cpu_count(); // workers auto
 	if (n > SQ_MAX_WORKERS) n = SQ_MAX_WORKERS;
 	sq_worker_count = n;
 	if (n <= 1) return;
@@ -2737,6 +2950,89 @@ static int64_t thread_cpu_ms(sq_shard *s) {
 // watchdog asks a goroutine that has used its thread for a time slice (10ms of CPU) to yield, and
 // warns once it has used 100ms while others waited. It reads only the shards' atomic fields and
 // their threads' CPU clocks.
+// Graceful stop. sq_stop_gracefully (the http server calls it) makes SIGTERM and SIGINT start a
+// stop instead of ending the program: the handler records the signal, the watchdog wakes every
+// shard, and each shard wakes its goroutines blocked in accept, whose accept (and every later
+// one) returns SQ_ESTOP. The program then finishes its work and returns from main. If it hasn't
+// within the grace period (SQUARK_SHUTDOWN, default 10s), the watchdog ends it with status 1. A
+// second signal ends it at once, as the signal would by default.
+static atomic_bool stop_handlers;
+static int64_t stop_grace_ns = 10 * (int64_t)1000000000;
+
+static void on_stop_signal(int sig) {
+	int none = 0;
+	if (!atomic_compare_exchange_strong(&graceful_signal, &none, sig)) {
+		signal(sig, SIG_DFL); // the second one: what it does by default (once this handler returns)
+		raise(sig);
+	}
+}
+
+// parse_grace reads SQUARK_SHUTDOWN: a whole number with ms, s or m after it ("20s").
+static int64_t parse_grace(const char *e) {
+	int64_t v = 0;
+	const char *p = e;
+	while (*p >= '0' && *p <= '9' && v < 1000000000) v = v * 10 + (*p++ - '0');
+	if (p == e) return -1;
+	if (strcmp(p, "ms") == 0) return v * 1000000;
+	if (strcmp(p, "s") == 0) return v * 1000000000;
+	if (strcmp(p, "m") == 0) return v * 60 * 1000000000;
+	return -1;
+}
+
+void sq_stop_gracefully(void) {
+	if (atomic_exchange(&stop_handlers, true)) return;
+	const char *e = getenv("SQUARK_SHUTDOWN");
+	if (e && *e) {
+		int64_t g = parse_grace(e);
+		if (g < 0) err_write("squark: ignoring SQUARK_SHUTDOWN (want a duration such as 20s or 500ms)\n");
+		else stop_grace_ns = g;
+	}
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = on_stop_signal;
+	sa.sa_flags = SA_RESTART;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
+}
+
+int64_t sq_stopping(void) { return atomic_load_explicit(&graceful_signal, memory_order_relaxed) != 0; }
+
+// stop_shard runs on each shard once it sees the stop: its goroutines blocked in accept return.
+static void stop_shard(void) {
+	sq_self->stop_seen = true;
+	while (sq_self->naccepting > 0) {
+		int fd = sq_self->accepting[--sq_self->naccepting];
+		fd_slot *sl = slot(fd);
+		if (sl) {
+			sq_g *g = sl->rd;
+			sl->rd = NULL;
+			wake_closed(g, fd);
+		}
+	}
+}
+
+// stop_watch is the watchdog's part, every tick: wake the shards when a stop begins, and end the
+// program when its grace period is over.
+static void stop_watch(void) {
+	static int64_t began;
+	if (!atomic_load_explicit(&graceful_signal, memory_order_relaxed)) return;
+	int64_t now = sq_nanotime();
+	if (!began) {
+		began = now;
+		for (int64_t i = 0; i < sq_shard_count; i++) {
+			sq_shard *s = atomic_load(&all_shards[i]);
+			if (s) wake_shard(s);
+		}
+		return;
+	}
+	if (now - began >= stop_grace_ns) {
+		exit_flush();
+		err_write("squark: still running at the end of the shutdown grace period (SQUARK_SHUTDOWN); exiting\n");
+		_exit(1);
+	}
+}
+
 static void *watchdog(void *arg) {
 	(void)arg;
 	static uint64_t last[SQ_MAX_SHARDS];
@@ -2746,6 +3042,7 @@ static void *watchdog(void *arg) {
 	for (;;) {
 		struct timespec ts = {0, tick * 1000000};
 		nanosleep(&ts, NULL);
+		stop_watch();
 		for (int64_t i = 0; i < sq_shard_count; i++) {
 			sq_shard *s = atomic_load(&all_shards[i]);
 			if (!s) continue;
@@ -2929,10 +3226,7 @@ int main(int argc, char **argv) {
 		signal(SIGINT, on_term);
 	}
 	int64_t n = sq_threads;
-	if (n == 0) { // threads auto
-		long c = sysconf(_SC_NPROCESSORS_ONLN);
-		n = c > 0 ? c : 1;
-	}
+	if (n == 0) n = cpu_count(); // threads auto
 	if (sq_threads_env) n = threads_from_env(n);
 	if (n > SQ_MAX_SHARDS) n = SQ_MAX_SHARDS;
 	sq_shard_count = n;

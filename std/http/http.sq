@@ -3,7 +3,7 @@
 // request. The client (Dial, Client) reads responses into a buffer the caller provides.
 module http
 
-use json, net, strconv, strings, time
+use json, net, runtime, strconv, strings, time
 
 const (
 	// read_buffer_size bounds request line + headers + body.
@@ -221,6 +221,9 @@ impl ResponseWriter {
 		n := http_date(date[:])
 		dst = append(dst, date[:n]...)
 		dst = append(dst, "\r\n"...)
+		if runtime.stopping() {
+			self.keep_alive = false // a graceful stop began while the handler ran
+		}
 		if not self.keep_alive {
 			dst = append(dst, "Connection: close\r\n"...)
 		} else if self.http10 {
@@ -350,7 +353,8 @@ fn append_hex(dst u8[], v int) -> u8[] {
 pub HandlerFunc: fn(w *ResponseWriter, r *Request)
 
 // listen_and_serve listens on addr and serves each connection in its own goroutine. With a nil h it
-// dispatches to the patterns registered with handle_func.
+// dispatches to the patterns registered with handle_func. It returns nil after a graceful stop
+// (see serve).
 pub fn listen_and_serve(addr str, h HandlerFunc) -> ! {
 	l, err := net.listen(addr)
 	if err != nil {
@@ -368,6 +372,9 @@ pub fault TooManyServers 503 "http: too many servers in one process"
 thread handlers HandlerFunc[..max_servers]
 thread waker_started bool
 
+// active counts this thread's connections being served (not those in the idle set).
+thread active int
+
 // serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
 // Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
@@ -375,10 +382,16 @@ thread waker_started bool
 // other expectations get a 417. HTTP/1.0 clients get `Connection: keep-alive` when they ask for it,
 // and a body too long to buffer is sent unframed, ending with the connection, since HTTP/1.0 has
 // no chunked encoding.
+//
+// SIGTERM and SIGINT stop it gracefully (runtime.stop_gracefully): it stops accepting and closes
+// l, requests in progress are finished and answered with `Connection: close`, idle keep-alive
+// connections are closed (with the process), and serve returns nil once no request is left, so
+// main can return. SQUARK_SHUTDOWN (10s by default) limits how long that may take.
 pub fn serve(l net.Listener, h HandlerFunc) -> ! {
 	if len(handlers) == max_servers {
 		return TooManyServers
 	}
+	runtime.stop_gracefully()
 	id := len(handlers)
 	handlers.push(h)
 	if not waker_started {
@@ -387,6 +400,13 @@ pub fn serve(l net.Listener, h HandlerFunc) -> ! {
 	}
 	loop {
 		c, err := l.accept()
+		if err == net.Stopping {
+			l.close()
+			while active > 0 {
+				time.sleep(5 * time.millisecond)
+			}
+			return nil
+		}
 		if err != nil {
 			if err.code() == 24 or err.code() == 23 or err.code() == 53 or err.code() == 54 {
 				continue // EMFILE / ENFILE / ECONNABORTED / ECONNRESET: keep serving
@@ -438,14 +458,21 @@ task wake_idle() pool 1 {
 // serve_conn runs one keep-alive connection while it is busy. At most 10000 run at once; further
 // connections wait for a slot. A connection that stays quiet for idle_release is parked in the
 // runtime's idle set and this goroutine exits, returning its whole stack to the OS.
+// During a graceful stop it closes the connection once no request is pending.
 task serve_conn(c net.Conn, id int) pool 10000 {
+	active++
+	defer conn_done()
 	h := handlers[id]
 	var rbuf u8[read_buffer_size]
 	var wbuf u8[write_buffer_size]
 	n := 0
 	loop {
-		if n == 0 and not c.wait_readable(idle_release) {
-			c.park_idle(id)
+		if n == 0 and (runtime.stopping() or not c.wait_readable(idle_release)) {
+			if runtime.stopping() {
+				c.close()
+			} else {
+				c.park_idle(id)
+			}
 			return
 		}
 		ok := false
@@ -456,6 +483,8 @@ task serve_conn(c net.Conn, id int) pool 10000 {
 		}
 	}
 }
+
+fn conn_done() { active-- }
 
 // read_more reads into rbuf[n:] until start+limit. It returns how many bytes it read, or 0 if the
 // connection is done (an error, EOF, or the deadline, which gets a 408).

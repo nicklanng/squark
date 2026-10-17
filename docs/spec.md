@@ -74,8 +74,8 @@ always current.
 program {                     // the main package; a library file starts with `module name`
     budget 128M               // program only: fail the build if worst-case memory exceeds this
     pool http.serve_conn 512  // program only: resize a task's pool (pkg.task or task)
-    workers 4                 // program only: run 4 processes (or auto: one per core); see §9
-    threads auto              // program only: a scheduler thread per core (or N); see §9
+    workers 4                 // program only: run 4 processes (or auto: one per CPU); see §9
+    threads auto              // program only: a scheduler thread per CPU (or N); see §9
     link "sqlite3"            // link a C library (any package)
     cflags "-I/opt/include"   // C compiler flags for this package's .c files
     ldflags "-L/opt/lib"      // linker flags
@@ -813,14 +813,20 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   goroutines of the same thread blocked on it, whose `read`, `write` or `accept` returns an error
   (`bad file descriptor`); a goroutine of another thread blocked on it isn't woken, so close a
   descriptor on the thread that uses it.
+- Addresses are `host:port`, `[ipv6]:port` or `:port`. `net.listen(":port")` takes IPv6 and IPv4
+  connections on one socket (IPv4 alone where the system has no IPv6). `net.dial` looks names up
+  itself, without the C library (whose resolver allocates and blocks its thread): the hosts file,
+  then DNS over UDP (TCP for a long reply) on the poller, with resolv.conf's name servers, search
+  domains, `ndots`, `timeout` and `attempts`, so a Kubernetes service name resolves as it does for
+  C programs. It then tries each address, IPv4 first, until one connects.
 - A watchdog thread asks a goroutine that has run for a time slice to yield (only preemptible
   tasks do), and prints a warning naming the task when a goroutine has held its thread for 100ms
   while other goroutines waited on it. Both count the CPU time the thread actually got, so an
   overloaded machine that doesn't run the thread doesn't make its goroutine look slow. A program
   with nothing else to run isn't warned about. `runtime.gosched()` yields by hand.
-- `threads N` (1 to 1024, or `auto` for one per core) runs N scheduler threads (shards) in one
-  process. The directive says the program is written for threads; without it a program runs one
-  thread. `threads auto` is the usual choice: one thread per core, and `SQUARK_THREADS=N` in the
+- `threads N` (1 to 1024, or `auto` for one per CPU, below) runs N scheduler threads (shards) in
+  one process. The directive says the program is written for threads; without it a program runs one
+  thread. `threads auto` is the usual choice: one thread per CPU, and `SQUARK_THREADS=N` in the
   environment overrides the count at run time (like `GOMAXPROCS`). `SQUARK_THREADS` also
   overrides `threads N`, except that with a `budget` it can't go above N, the count the budget
   was proven for. It has no effect on programs without the directive. Each shard runs `main`
@@ -844,7 +850,11 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   whichever shard runs the goroutine (or a helper thread, for `blocking` externs), so C libraries
   must be thread-safe (libc and SQLite are; each shard opens its own SQLite connection:
   `thread db sqlite.DB`).
-- `workers N` (1 to 1024, or `auto` for one per core) starts N processes before any squark code
+- **CPUs for `auto`:** `threads auto` and `workers auto` count the CPUs the process may use. On
+  Linux that is the smaller of the CPUs it may run on (its affinity: `taskset`, cpusets) and its
+  cgroup's CPU limit rounded up (a container's `--cpus 1.5` or a Kubernetes pod's `limits.cpu:
+  1500m` gives 2), much as Go 1.25 sets `GOMAXPROCS`; elsewhere it is the CPUs online.
+- `workers N` (1 to 1024, or `auto` for one per CPU) starts N processes before any squark code
   runs; each has its own package variables, goroutines and connections. Listening sockets use
   `SO_REUSEPORT`, so the kernel spreads connections across the workers (on Linux; macOS sends them
   all to one). The starting process supervises: SIGINT, SIGTERM and SIGHUP are passed on to every
@@ -873,6 +883,15 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 - Panics print `panic: <message>` with the goroutine and source position, then exit with status 2.
   There is no `recover`. A nil dereference becomes `panic: runtime error: invalid memory address or
   nil pointer dereference`.
+- **Graceful stop.** SIGTERM and SIGINT end a program at once, unless it has called
+  `runtime.stop_gracefully()`, as `http.serve` does. Then the first one starts a stop:
+  `runtime.stopping()` becomes true, `accept` returns `net.Stopping`, and the program has a grace
+  period (`SQUARK_SHUTDOWN`, such as `20s` or `500ms`; 10s by default) to finish and return from
+  main, after which it exits with status 1. A second signal ends it at once. An HTTP server stops
+  accepting, finishes the requests in progress (answering `Connection: close`), closes its idle
+  keep-alive connections and returns nil from `serve`, so a container's stop (Kubernetes,
+  `docker stop`, systemd) drops no request. With `workers N` the supervisor passes the signal on
+  and each worker stops this way.
 - When every goroutine is blocked with nothing to wake it: `fatal error: all goroutines are asleep -
   deadlock!`.
 - `SQ_STACKCHECK=1` reports, per pool, the proven and the deepest observed stack use at exit.

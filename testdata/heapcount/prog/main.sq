@@ -189,6 +189,19 @@ fn main() {
 	if _, err := net.dial(os.arg(4)); err != nil { // nothing listens there: connection refused
 		sum += len(err.message())
 	}
+	// name lookups: the hosts file, a DNS query (UDP; with no resolv.conf the servers are the
+	// loopback addresses, where nothing listens), IPv6 literals and their text form
+	var ips net.IP[4]
+	net.resolv_conf = "/nonexistent/resolv.conf"
+	if res, err := net.lookup_ip("localhost", ips[:]); err == nil {
+		sum += len(res[0].string(buf[:]))
+	}
+	if _, err := net.lookup_ip("nothing.invalid.", ips[:]); err != nil {
+		sum += len(err.message())
+	}
+	if ip, ok := net.parse_ip("2001:db8::1"); ok {
+		sum += len(ip.string(buf[:]))
+	}
 	if _, err := net.listen(os.arg(2)); err != nil { // already in use
 		sum += len(err.message())
 	}

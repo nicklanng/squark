@@ -96,7 +96,7 @@ pub struct Client {
 	w      int // the end of the body read so far
 }
 
-// dial connects to addr ("host:port"; host is an IPv4 address or localhost) and returns a Client
+// dial connects to addr ("host:port"; see net.dial for names and IPv6) and returns a Client
 // for it that reads responses into buf. Requests carry addr as their Host header. When the
 // connection closes, the next request dials again.
 pub fn dial(addr str, buf u8[]) -> Client ! {

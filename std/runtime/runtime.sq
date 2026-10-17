@@ -11,3 +11,16 @@ pub extern fn shards() -> int stack 1K c"sq_shard_total"
 // gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
 // Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
 pub extern fn gosched() stack 1K c"sq_gosched"
+
+// stop_gracefully makes SIGTERM and SIGINT start a graceful stop instead of ending the program at
+// once: stopping() becomes true, every goroutine blocked in net.Listener.accept (and every later
+// accept) gets net.Stopping, and the program has a grace period (SQUARK_SHUTDOWN, such as 20s or
+// 500ms; 10s by default) to finish its work and return from main. After that it ends with status
+// 1; a second signal ends it at once. http.serve calls it, so a server drains its requests when a
+// container is stopped. Calling it again does nothing.
+pub extern fn stop_gracefully() stack 1K c"sq_stop_gracefully"
+
+extern fn sys_stopping() -> int stack 1K c"sq_stopping"
+
+// stopping reports whether a graceful stop has begun (see stop_gracefully).
+pub fn stopping() -> bool { return sys_stopping() != 0 }

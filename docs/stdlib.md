@@ -310,6 +310,15 @@ extern fn shards() -> int stack 1024 c"sq_shard_total"
 // gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
 // Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
 extern fn gosched() stack 1024 c"sq_gosched"
+// stop_gracefully makes SIGTERM and SIGINT start a graceful stop instead of ending the program at
+// once: stopping() becomes true, every goroutine blocked in net.Listener.accept (and every later
+// accept) gets net.Stopping, and the program has a grace period (SQUARK_SHUTDOWN, such as 20s or
+// 500ms; 10s by default) to finish its work and return from main. After that it ends with status
+// 1; a second signal ends it at once. http.serve calls it, so a server drains its requests when a
+// container is stopped. Calling it again does nothing.
+extern fn stop_gracefully() stack 1024 c"sq_stop_gracefully"
+// stopping reports whether a graceful stop has begun (see stop_gracefully).
+fn stopping() -> bool
 
 // Package time measures and waits.
 module time
@@ -642,18 +651,42 @@ fn new_decoder(data u8[]) -> json.Decoder in data
 // a package variable. String and field work as with new_decoder.
 fn new_decoder_in(data u8[], a arena) -> json.Decoder in data, a
 
-// Package net provides TCP listeners and connections. Blocking calls park only the calling
+// Package net provides TCP listeners and connections over IPv4 and IPv6, and name lookup
+// (lookup_ip: the hosts file, then DNS as resolv.conf says). Blocking calls park only the calling
 // goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
 module net
 
+fault NoSuchHost -21 "no such host"
+fault NameServer -22 "dns: no usable answer from the name servers"
+thread resolv_conf str
+thread hosts_file str
 fault BadAddress 22 "invalid address (want host:port)"
 fault Timeout -20 "i/o timeout"
+fault Stopping -23 "stopping: the program got a stop signal"
 
+// IP is an IPv4 or IPv6 address, held by value. The zero IP is no address.
+struct IP {
+	// fields that aren't pub
+}
+
+impl IP {
+	fn is_v4(self) -> bool
+	fn is_v6(self) -> bool
+
+	// equal reports whether ip and o are the same address (an IPv4 address never equals an IPv6
+	// one, not even ::ffff:a.b.c.d).
+	fn equal(self, o net.IP) -> bool
+
+	// string writes ip's text form ("10.0.0.1", "2001:db8::7") into buf and returns it as a view of
+	// buf; the zero IP gives "". 46 bytes hold any address; a shorter buf gets the beginning.
+	fn string(self, buf u8[]) -> str in buf
+}
 struct Listener {
 	// fields that aren't pub
 }
 
 impl Listener {
+	// accept waits for the next connection. During a graceful stop it returns Stopping.
 	fn accept(self) -> net.Conn !
 
 	// port returns the port l listens on: the one the system chose, after listen(":0").
@@ -709,14 +742,36 @@ impl TimedConn {
 	fn read(self, p u8[]) -> int !
 }
 
+// lookup_ip returns host's addresses as a view of out, IPv4 ones first. An IP literal is itself.
+// A name is looked up in hosts_file, and then through the name servers of resolv_conf with its
+// search domains, as the C library does: a name with fewer than ndots dots is tried with each
+// search domain before it is tried alone, and one ending in "." is only tried alone. Each server
+// gets timeout per attempt (resolv.conf's options ndots, timeout and attempts; the defaults are
+// 1, 5s and 2); a reply too long for UDP is asked for again over TCP. "localhost" and names
+// ending in ".localhost" are the loopback addresses if the hosts file doesn't say otherwise.
+// Errors: NoSuchHost, NameServer, Timeout, or io.ShortBuffer for an out with no capacity.
+fn lookup_ip(host str, out net.IP[]) -> net.IP[] ! in out
+// parse_ip reads an IPv4 ("10.0.0.1") or IPv6 ("::1", "2001:db8::7") literal; ok is false for
+// anything else (a name, brackets, a port, a zone).
+fn parse_ip(s str) -> (net.IP, bool)
+// ipv4 returns the IPv4 address a.b.c.d.
+fn ipv4(a u8, b u8, c u8, d u8) -> net.IP
+// ipv6_loopback returns ::1.
+fn ipv6_loopback() -> net.IP
 // append_host_port appends "host:port" to dst, as Go's JoinHostPort: a host containing ':' (an IPv6
 // literal) is put in brackets, "[::1]:80". An empty host gives ":port", which listen takes as
-// every interface. (Listen and dial take IPv4 addresses and "localhost" only.)
+// every interface.
 fn append_host_port(dst u8[], host str, port int) -> u8[] in dst
-// listen opens a TCP listener on addr ("host:port" or ":port").
+// listen opens a TCP listener on addr: "host:port", "[ipv6]:port" or ":port". An empty host is
+// every interface, IPv6 and IPv4 (IPv4 alone where the system has no IPv6); "localhost" is
+// 127.0.0.1, and another name is its first address (lookup_ip).
 fn listen(addr str) -> net.Listener !
-// dial connects to a TCP address.
+// dial connects to a TCP address: "host:port" or "[ipv6]:port". A name is looked up with
+// lookup_ip and its addresses are tried in turn, IPv4 first, until one connects; an empty host is
+// the local system (127.0.0.1).
 fn dial(addr str) -> net.Conn !
+// dial_ip connects to port at ip over TCP.
+fn dial_ip(ip net.IP, port int) -> net.Conn !
 // next_idle blocks until a parked connection becomes readable and returns it with its tag.
 // Only one goroutine may call next_idle at a time.
 fn next_idle() -> (net.Conn, int)
@@ -962,7 +1017,8 @@ impl JSON {
 }
 
 // listen_and_serve listens on addr and serves each connection in its own goroutine. With a nil h it
-// dispatches to the patterns registered with handle_func.
+// dispatches to the patterns registered with handle_func. It returns nil after a graceful stop
+// (see serve).
 fn listen_and_serve(addr str, h http.HandlerFunc) -> !
 // serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
@@ -971,10 +1027,15 @@ fn listen_and_serve(addr str, h http.HandlerFunc) -> !
 // other expectations get a 417. HTTP/1.0 clients get `Connection: keep-alive` when they ask for it,
 // and a body too long to buffer is sent unframed, ending with the connection, since HTTP/1.0 has
 // no chunked encoding.
+//
+// SIGTERM and SIGINT stop it gracefully (runtime.stop_gracefully): it stops accepting and closes
+// l, requests in progress are finished and answered with `Connection: close`, idle keep-alive
+// connections are closed (with the process), and serve returns nil once no request is left, so
+// main can return. SQUARK_SHUTDOWN (10s by default) limits how long that may take.
 fn serve(l net.Listener, h http.HandlerFunc) -> !
 // status_text returns the reason phrase for a status code.
 fn status_text(code int) -> str in static
-// dial connects to addr ("host:port"; host is an IPv4 address or localhost) and returns a Client
+// dial connects to addr ("host:port"; see net.dial for names and IPv6) and returns a Client
 // for it that reads responses into buf. Requests carry addr as their Host header. When the
 // connection closes, the next request dials again.
 fn dial(addr str, buf u8[]) -> http.Client ! in addr, buf

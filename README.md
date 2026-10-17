@@ -192,7 +192,7 @@ and a program can resize a library's pool with `pool http.serve_conn 512`.
 
 ```squark
 program {
-    threads auto   // this program is written for threads: one scheduler per core
+    threads auto   // this program is written for threads: one scheduler per CPU it may use
 }
 ```
 
@@ -301,6 +301,11 @@ every index the counter can reach is in range, so a loop that would panic still 
 same iteration. It also reads slice headers into locals: a 24-byte slice parameter is passed in
 memory, and clang can't otherwise tell that a store through its pointer leaves its length alone.
 `TestVectorize` checks clang's remarks for the loops in `testdata/vectorize`.
+
+**Stopping drops no request.** An HTTP server catches SIGTERM and SIGINT: it stops accepting,
+finishes the requests in progress and returns from `serve`, within a grace period
+(`SQUARK_SHUTDOWN`, 10s by default). That's what a container stop expects. Other programs
+still end at once unless they call `runtime.stop_gracefully()`.
 
 **Idle connections cost nothing.** A keep-alive connection that is quiet for 100 ms moves to the
 runtime's idle set: it stays registered with kqueue, its task exits, and the stack pages go back to

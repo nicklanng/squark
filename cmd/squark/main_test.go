@@ -33,7 +33,7 @@ func writeProgram(t *testing.T, dir, src string) {
 	}
 }
 
-const sleeper = "package main\n\nimport (\n\t\"os\"\n\t\"time\"\n)\n\nfunc main() {\n\tprintln(\"ready\", os.Getpid())\n\ttime.Sleep(time.Hour)\n}\n"
+const sleeper = "program\n\nuse os, time\n\nfn main() {\n\tprintln(\"ready\", os.getpid())\n\ttime.sleep(time.hour)\n}\n"
 
 // TestRunSignals: a signal to `squark run` reaches the program, the exit status says which signal
 // (128+n, as a shell reports it), the program doesn't outlive squark, and the temporary binary is
@@ -154,7 +154,7 @@ func TestCLIArgs(t *testing.T) {
 	squark := squarkBin(t)
 	root := t.TempDir()
 	prog := filepath.Join(root, "hello")
-	writeProgram(t, prog, "package main\n\nfunc main() { println(1) }\n")
+	writeProgram(t, prog, "program\n\nfn main() { println(1) }\n")
 
 	// flags after the directory are not silently ignored
 	out, err := exec.Command(squark, "build", prog, "-o", filepath.Join(root, "x")).CombinedOutput()
