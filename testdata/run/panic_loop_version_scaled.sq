@@ -1,0 +1,16 @@
+package main
+
+// dst holds 5 of the 6 values, so the checked copy of the loop runs: the first iterations
+// happen and it panics at dst[5], in the last one, as without versioning.
+func interleave(dst []int, a []int, b []int) {
+	for i := range a {
+		println(i)
+		dst[2*i] = a[i]
+		dst[2*i+1] = b[i]
+	}
+}
+
+func main() {
+	var d [5]int
+	interleave(d[:], []int{1, 2, 3}, []int{4, 5, 6})
+}

@@ -59,6 +59,46 @@ static inline int64_t sq_last16(sq_int8x16 m) {
 	return b ? (int64_t)(15 - (__builtin_clzll(b) >> 2)) : -1;
 }
 
+// sq_lookup16 is Lookup (spec §3): lane k is t[i[k]], or 0 where i[k] >= 16. arm64's tbl does
+// exactly that; x86's pshufb (SSSE3) zeroes lanes whose index has the top bit set and otherwise
+// uses the low 4 bits, so indexes of 16 or more get the top bit set first. Only programs that
+// use Lookup define SQ_LOOKUP: arm_neon.h adds 50 ms to every compile.
+#ifdef SQ_LOOKUP
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+typedef char sq_c8x16 __attribute__((vector_size(16)));
+typedef char sq_c8x32 __attribute__((vector_size(32)));
+static inline sq_uint8x16 sq_lookup16(sq_uint8x16 t, sq_uint8x16 i) {
+#if defined(__aarch64__)
+	return (sq_uint8x16)vqtbl1q_u8((uint8x16_t)t, (uint8x16_t)i);
+#elif defined(__SSSE3__)
+	return (sq_uint8x16)__builtin_ia32_pshufb128((sq_c8x16)t, (sq_c8x16)(i | (sq_uint8x16)(i > 15)));
+#else
+	sq_uint8x16 r;
+	for (int k = 0; k < 16; k++) r[k] = i[k] < 16 ? t[i[k] & 15] : 0;
+	return r;
+#endif
+}
+static inline sq_uint8x32 sq_lookup32(sq_uint8x16 t, sq_uint8x32 i) {
+#if defined(__AVX2__)
+	// vpshufb looks up each 128-bit half in its own half of the table: put t in both
+	sq_uint8x32 tt;
+	memcpy(&tt, &t, 16);
+	memcpy((char *)&tt + 16, &t, 16);
+	return (sq_uint8x32)__builtin_ia32_pshufb256((sq_c8x32)tt, (sq_c8x32)(i | (sq_uint8x32)(i > 15)));
+#else
+	sq_uint8x16 h[2];
+	memcpy(h, &i, 32);
+	h[0] = sq_lookup16(t, h[0]);
+	h[1] = sq_lookup16(t, h[1]);
+	sq_uint8x32 r;
+	memcpy(&r, h, 32);
+	return r;
+#endif
+}
+#endif
+
 // ---- panics ----
 SQ_NORETURN void sq_panic_cstr(const char *msg, const char *file, int line);
 SQ_NORETURN void sq_panic_str(sq_string msg, const char *file, int line);
@@ -75,33 +115,34 @@ static inline int64_t sq_idx(int64_t i, int64_t n, const char *file, int line) {
 }
 #define SQ_IDX(i, n) sq_idx((i), (n), __FILE__, __LINE__)
 
-// sq_inrange reports whether i + off is an index into n elements for every i from lo up to hi
-// (excluded), so a loop over them can run a copy without bounds checks. It says no when the sum
-// overflows. sq_inrange_incl is the same with hi included; it also says no for hi = INT64_MAX,
-// where the counter would wrap.
-static inline bool sq_inrange(int64_t lo, int64_t hi, int64_t off, int64_t n) {
-	int64_t a, b;
-	if (lo >= hi) return true;
-	if (__builtin_add_overflow(lo, off, &a) || __builtin_add_overflow(hi, off, &b)) return false;
-	return a >= 0 && b <= n;
+// sq_inrange reports whether k*i + off (k > 0) is an index into n elements for every i from lo up
+// to hi (excluded), so a loop over them can run a copy without bounds checks. k*i + off grows
+// with i, so that is whether it is at both ends; it says no when either end overflows.
+// sq_inrange_incl is the same with hi included; it also says no for hi = INT64_MAX, where the
+// counter would wrap.
+static inline bool sq_span(int64_t a, int64_t b, int64_t k, int64_t off, int64_t n) {
+	int64_t x, y;
+	if (__builtin_mul_overflow(a, k, &x) || __builtin_add_overflow(x, off, &x) ||
+	    __builtin_mul_overflow(b, k, &y) || __builtin_add_overflow(y, off, &y)) return false;
+	return x >= 0 && y < n;
 }
-static inline bool sq_inrange_incl(int64_t lo, int64_t hi, int64_t off, int64_t n) {
-	int64_t a, b;
+static inline bool sq_inrange(int64_t lo, int64_t hi, int64_t k, int64_t off, int64_t n) {
+	if (lo >= hi) return true;
+	return sq_span(lo, hi - 1, k, off, n);
+}
+static inline bool sq_inrange_incl(int64_t lo, int64_t hi, int64_t k, int64_t off, int64_t n) {
 	if (lo > hi) return true;
-	if (hi == INT64_MAX || __builtin_add_overflow(lo, off, &a) || __builtin_add_overflow(hi, off, &b)) return false;
-	return a >= 0 && b < n;
+	return hi != INT64_MAX && sq_span(lo, hi, k, off, n);
 }
 // The same for a counter counting down from hi: sq_inrange_down stops at lo, included (and says
 // no for lo = INT64_MIN, where the counter would wrap), sq_inrange_above stops above lo.
-static inline bool sq_inrange_down(int64_t lo, int64_t hi, int64_t off, int64_t n) {
-	int64_t a, b;
+static inline bool sq_inrange_down(int64_t lo, int64_t hi, int64_t k, int64_t off, int64_t n) {
 	if (lo > hi) return true;
-	if (lo == INT64_MIN || __builtin_add_overflow(lo, off, &a) || __builtin_add_overflow(hi, off, &b)) return false;
-	return a >= 0 && b < n;
+	return lo != INT64_MIN && sq_span(lo, hi, k, off, n);
 }
-static inline bool sq_inrange_above(int64_t lo, int64_t hi, int64_t off, int64_t n) {
+static inline bool sq_inrange_above(int64_t lo, int64_t hi, int64_t k, int64_t off, int64_t n) {
 	if (lo >= hi) return true;
-	return sq_inrange_down(lo + 1, hi, off, n);
+	return sq_span(lo + 1, hi, k, off, n);
 }
 
 // SQ_NN checks a pointer before it is dereferenced. A fault would catch most nil dereferences,

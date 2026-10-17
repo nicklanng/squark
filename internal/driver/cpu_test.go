@@ -63,7 +63,7 @@ func TestCPU(t *testing.T) {
 			out, err := exec.Command(bin).CombinedOutput()
 			runs := cpu == "native" || (cpu == "x86-64-v2" && has("sse4_2")) || (cpu == "x86-64-v3" && has("avx2") && has("fma"))
 			if runs {
-				if err != nil || string(out) != "0 0 0 64 64\n" {
+				if err != nil || string(out) != "0 0 0 64 64 0\n" {
 					t.Fatalf("got %q, %v", out, err)
 				}
 				return

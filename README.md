@@ -236,7 +236,8 @@ func sum(xs []float64) float64 {
 ```
 
 `float32x4`, `uint8x16`, `float64x4` and the other SIMD types take operators lane by lane;
-comparisons give masks (`(v == c).Any()`, `m.Select(a, b)`). Plain loops over slices are
+comparisons give masks (`(v == c).Any()`, `m.Select(a, b)`), and `t.Lookup(idx)` reads a 16-byte
+table at 16 indexes at once (hex digits of 16 bytes in two lookups). Plain loops over slices are
 vectorized by clang already (see Loops below); SIMD types are for what it can't do, such as float
 sums, which it keeps in source order, and searches that stop early. Both run 6 to 7 times faster
 than scalar code in `bench/squark/kernels`. On x86-64, `squark build -cpu x86-64-v3` (or
@@ -271,7 +272,7 @@ page, and the build fails if any squark-compiled object references `malloc` or `
 
 **Loops.** clang vectorizes loops, but a bounds check that can panic mid-loop stops it. For an
 innermost loop that counts by one (up or down), the C generator emits a second copy of the loop
-without the checks on indexes like `x[i+k]`. It runs that copy only when a test before the loop shows
+without the checks on indexes like `x[i+k]` and `x[2*i+1]`. It runs that copy only when a test before the loop shows
 every index the counter can reach is in range, so a loop that would panic still panics at the
 same iteration. It also reads slice headers into locals: a 24-byte slice parameter is passed in
 memory, and clang can't otherwise tell that a store through its pointer leaves its length alone.

@@ -31,6 +31,18 @@ func saxpy(a float32, x []float32, y []float32) {
 	}
 }
 
+const hexDigits = "0123456789abcdef"
+
+var hexOut [2 * kn]byte
+
+//go:noinline
+func hexEncode(dst []byte, src []byte) {
+	for i, c := range src {
+		dst[2*i] = hexDigits[c>>4]
+		dst[2*i+1] = hexDigits[c&15]
+	}
+}
+
 //go:noinline
 func dotInt32(a []int32, b []int32) int32 {
 	var s int32
@@ -240,6 +252,12 @@ func kernel(name string, reps int) {
 			json.Unmarshal(u8c[:], &s)
 			check += int64(len(s))
 			u8c[1+r%(kn-80)] = 'a' + byte(r%26)
+		}
+	case "hex":
+		for r := 0; r < reps; r++ {
+			hexEncode(hexOut[:], u8a[:])
+			check += int64(hexOut[(r*7)%(2*kn)])
+			u8a[r%kn] = byte(r)
 		}
 	case "index-byte":
 		u8c[kn-5] = 255

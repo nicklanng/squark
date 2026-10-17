@@ -1,0 +1,69 @@
+package main
+
+// Lookup reads a 16-byte table at 16 or 32 indexes at once: lane i is t[idx[i]], 0 where idx[i]
+// is 16 or more.
+
+type Table uint8x16
+
+const digits = "0123456789abcdef"
+
+// hex writes the 32 hex digits of 16 bytes: a lookup of each byte's high and low nibbles.
+func hex(src []byte, dst []byte) {
+	t := uint8x16(digits)
+	b := uint8x16(src)
+	hi := t.Lookup(b >> 4)
+	lo := t.Lookup(b & 15)
+	for i := range 16 {
+		dst[2*i] = hi[i]
+		dst[2*i+1] = lo[i]
+	}
+}
+
+func main() {
+	t := uint8x16{100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115}
+	println(t.Lookup(uint8x16{15, 0, 1, 16, 17, 128, 255, 3, 3, 3, 14, 13, 12, 32, 64, 2}))
+
+	// every index, against the table read one lane at a time
+	bad := 0
+	for base := 0; base < 256; base += 16 {
+		var idx uint8x16
+		for k := range 16 {
+			idx[k] = byte(base + k)
+		}
+		r := t.Lookup(idx)
+		for k := range 16 {
+			want := byte(0)
+			if base+k < 16 {
+				want = t[base+k]
+			}
+			if r[k] != want {
+				bad++
+			}
+		}
+	}
+	println("mismatches:", bad)
+
+	// a signed table, and signed indexes: a negative index is 128 or more, so 0
+	s := int8x16{-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7}
+	println(s.Lookup(int8x16{0, 15, -1, -128, 8, 7, 127, 1}))
+
+	// 32 indexes into the same 16-byte table
+	var wide uint8x32
+	for k := range 32 {
+		wide[k] = byte(31 - k)
+	}
+	w := t.Lookup(wide)
+	println(w)
+	println(len(w), w.Sum())
+
+	// a named table keeps its type
+	var n Table = Table(t)
+	m := n.Lookup(uint8x16(1))
+	var back Table = m
+	println(back[0], back[15])
+
+	src := [16]byte{'s', 'q', 'u', 'a', 'r', 'k', ':', ' ', 'S', 'I', 'M', 'D', '!', 0, 0x7f, 0xff}
+	var out [32]byte
+	hex(src[:], out[:])
+	println(string(out[:]))
+}

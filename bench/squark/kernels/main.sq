@@ -66,6 +66,18 @@ func countByte(b []byte, c byte) int {
 	return k
 }
 
+const hexDigits = "0123456789abcdef"
+
+var hexOut [2 * n]byte
+
+//squark:noinline
+func hexEncode(dst []byte, src []byte) {
+	for i, c := range src {
+		dst[2*i] = hexDigits[c>>4]
+		dst[2*i+1] = hexDigits[c&15]
+	}
+}
+
 //squark:noinline
 func maxInt32(x []int32) int32 {
 	m := x[0]
@@ -272,6 +284,12 @@ func main() {
 			s, _ := d.String(out[:])
 			check += int64(len(s))
 			u8c[1+r%(n-80)] = 'a' + byte(r%26)
+		}
+	case "hex":
+		for r := 0; r < reps; r++ {
+			hexEncode(hexOut[:], u8a[:])
+			check += int64(hexOut[(r*7)%(2*n)])
+			u8a[r%n] = byte(r)
 		}
 	case "index-byte":
 		setupIndex()

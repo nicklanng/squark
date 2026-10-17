@@ -11,7 +11,7 @@ import (
 // See spec §3.
 
 // simdMethods are the methods every SIMD vector has; the mask ones only on integer vectors.
-var simdMethods = map[string]bool{"Store": true, "Sum": true, "Min": true, "Max": true, "Any": true, "All": true, "Select": true, "Shuffle": true, "Swizzle": true, "First": true, "Last": true}
+var simdMethods = map[string]bool{"Store": true, "Sum": true, "Min": true, "Max": true, "Any": true, "All": true, "Select": true, "Shuffle": true, "Swizzle": true, "First": true, "Last": true, "Lookup": true}
 
 func isSIMDMaskMethod(name string) bool {
 	switch name {
@@ -109,6 +109,16 @@ func (c *Checker) simdConversion(e *CallExpr, t Type) {
 	e.T, e.Mode = t, ModeValue
 	xi := x.info()
 	if isUntyped(xi.T) {
+		if basicKind(xi.T) == UntypedString && s.Elem.Kind == Uint8 && xi.Const != nil {
+			// a load of a constant's bytes, which must be enough
+			if n := int64(len(constant.StringVal(xi.Const))); n < s.Lanes {
+				c.errorf(x.Pos(), "cannot load %s from %s: it has %d bytes, %s needs %d", t, exprString(x), n, t, s.Lanes)
+				c.invalid(e)
+				return
+			}
+			c.convertUntyped(x, tString, "conversion")
+			return
+		}
 		if xi.Const != nil && c.convertUntyped(x, s.Elem, "conversion") {
 			return
 		}
@@ -160,10 +170,44 @@ func (c *Checker) simdMethod(e *SelectorExpr, s *SIMD, name string) *Signature {
 		return &Signature{Results: []*Var{{Type: tBool}}}
 	case "First", "Last":
 		return &Signature{Results: []*Var{{Type: tInt}}}
-	case "Select", "Shuffle", "Swizzle": // checked at the call (simdSelect, simdShuffle)
+	case "Select", "Shuffle", "Swizzle", "Lookup": // checked at the call (simdSelect, simdShuffle, simdLookup)
+		if name == "Lookup" && !isByteTable(s) {
+			c.errorf(e.Sel.P, "%s.Lookup undefined (Lookup is defined on 16-lane byte vectors, int8x16 and uint8x16: the table)", exprString(e.X))
+			return nil
+		}
 		return &Signature{Variadic: true}
 	}
 	return nil
+}
+
+// isByteTable says whether s can be Lookup's table: 16 lanes of 8 bits.
+func isByteTable(s *SIMD) bool { return s.Lanes == 16 && sizeofBasic(s.Elem.Kind) == 1 }
+
+// simdLookup checks t.Lookup(idx): lane i of the result is t[idx[i]], or 0 where idx[i] is 16 or
+// more (idx's lanes read as unsigned bytes). idx is a vector of 16 or 32 bytes; the result has
+// t's type, or for 32 indexes the 32-lane vector of t's element type.
+func (c *Checker) simdLookup(e *CallExpr, recv Type) {
+	t := simdOf(recv)
+	if len(e.Args) != 1 {
+		c.errorf(e.P, "wrong number of arguments for Lookup (expected 1, found %d)", len(e.Args))
+		c.invalid(e)
+		return
+	}
+	x := e.Args[0]
+	if !c.valueExpr(x, nil) {
+		c.invalid(e)
+		return
+	}
+	s := simdOf(x.info().T)
+	if s == nil || sizeofBasic(s.Elem.Kind) != 1 || !isInteger(s.Elem) {
+		c.errorf(x.Pos(), "cannot use %s (type %s) as the indexes of Lookup: they are a vector of bytes (uint8x16 or uint8x32)", exprString(x), x.info().T)
+		c.invalid(e)
+		return
+	}
+	e.T, e.Mode = recv, ModeValue
+	if s.Lanes != t.Lanes {
+		e.T = simdType(t.Elem.Kind, s.Lanes)
+	}
 }
 
 // simdShuffle checks a.Shuffle(b, i0, …) and a.Swizzle(i0, …): one constant lane index per lane
@@ -469,6 +513,10 @@ func (g *gen) simdBuiltin(e *CallExpr) string {
 			}
 		}
 		return fmt.Sprintf("({ %s(%s){%s}; })", recv, ct, strings.Join(lanes, ", "))
+	case "simd.Lookup":
+		g.usesLookup = true
+		r := simdOf(e.T)
+		return fmt.Sprintf("({ %s(%s)sq_lookup%d((sq_uint8x16)%s, (sq_uint8x%d)(%s)); })", recv, simdC(r), r.Lanes, v, r.Lanes, g.expr(e.Args[0]))
 	case "simd.Select":
 		t := e.T
 		vt := simdC(simdOf(t))

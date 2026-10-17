@@ -212,6 +212,8 @@ a.Store(ys[i:])                  // write the lanes to ys[i:]; panics if len(ys[
 a[2]; a[2] = 7; len(a)           // a lane (bounds-checked); len is the constant 4
 a.Swizzle(3, 2, 1, 0)            // rearrange lanes: lane i of the result is a[index i]
 a.Shuffle(b, 0, 4, 1, 5)         // the same from a and b: indexes 0-3 are a's, 4-7 are b's
+t := uint8x16("0123456789abcdef") // a table, loaded from a constant
+t.Lookup(x >> 4)                 // lane i is t[(x>>4)[i]]: x a uint8x16 (or uint8x32)
 ```
 
 - Operators: `+ - *` on all vectors, `/` on float vectors only (no CPU divides integer vectors:
@@ -228,6 +230,13 @@ a.Shuffle(b, 0, 4, 1, 5)         // the same from a and b: indexes 0-3 are a's, 
   (`&v[i]` is an error). A pointer to a SIMD vector works like the vector (`p[i]`, `p.Sum()`).
 - `Swizzle` and `Shuffle` take one constant index per lane; they compile to the CPU's shuffle
   instructions (reversing a `int32x4` is two arm64 instructions).
+- `Lookup` is a table lookup with variable indexes, on a 16-lane byte vector (`uint8x16` or
+  `int8x16`), the table. It takes 16 or 32 byte indexes (`uint8x16`, `uint8x32` or the signed
+  ones) and gives as many lanes of the table's type: lane `i` is `t[idx[i]]`, or 0 where
+  `idx[i]` is 16 or more (a negative signed index is 128 or more). It is one instruction on
+  arm64 (`tbl`) and x86-64 from `-cpu x86-64-v2` (`pshufb`); baseline x86-64 has none and looks
+  the lanes up one at a time. Decoders use it to map nibbles to classes or digits (hex, base64,
+  UTF-8 validation).
 - `Sum` adds the upper half of the lanes to the lower half until one lane is left, so the order of
   float additions is fixed, the same on every CPU. `Min` and `Max` pick lanes the way the builtin
   `min` and `max` do.
@@ -697,9 +706,10 @@ resp := try c.Get("/notes/1")    // resp.Body and resp.HeaderValue(...) view buf
   `for i := range n`, `for i := a; i < b; i++` with `<=` too, or `for i := a; i >= b; i--` with
   `>` too). Its body must be at most 40 statements, with no loop, `switch`, `select`, `defer`,
   `go`, `try`, channel operation or allocation (`make`, `new`, `append`, `in`). The copy drops
-  the bounds checks of indexes of the form `x[i]`, `x[i+k]` and `x[i-k]`, where `x` is an array, a
-  pointer to an array, or a slice or string that the loop can't change, and `k` is an `int`
-  expression of locals and constants that the loop doesn't change. A slice in a local variable
+  the bounds checks of indexes of the form `x[i]`, `x[i+k]` and `x[i-k]`, or with `c*i` in place
+  of `i` for a positive constant `c` (`x[2*i+1]`), where `x` is an array, a pointer to an array,
+  or a slice or string that the loop can't change, and `k` is an `int` expression of locals and
+  constants that the loop doesn't change. A slice in a local variable
   qualifies if the loop doesn't assign it and its address isn't taken. A slice in a field of a
   local (`p.data` in a method on `*T`, `s.data`) or in a package variable qualifies if the loop
   calls no functions (builtins are fine) and stores only into local variables or values without

@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// Loop versioning: an innermost loop whose indexes are the counter plus an amount that
-// doesn't change in the loop, into slices, strings and arrays whose length doesn't change in it,
+// Loop versioning: an innermost loop whose indexes are the counter (times a positive constant)
+// plus an amount that doesn't change in the loop, into slices, strings and arrays whose length doesn't change in it,
 // gets a second copy without bounds checks. Before the loop, one test (sq_inrange per index) shows
 // whether every index the counter can reach is in range; if so the unchecked copy runs, otherwise
 // the checked one, so a loop that would panic still panics at the same iteration. Without the
@@ -28,12 +28,13 @@ type loopPlan struct {
 	headers []*loopHeader // slices in fields and package variables, read before the loop
 }
 
-// loopIndex is x[iv + off] (off nil: x[iv]), with x read from hdr if it is a field or package
-// variable.
+// loopIndex is x[scale*iv + off] (off nil: x[scale*iv]), with x read from hdr if it is a field or
+// package variable.
 type loopIndex struct {
-	e   *IndexExpr
-	off Expr
-	hdr *loopHeader
+	e     *IndexExpr
+	scale int64
+	off   Expr
+	hdr   *loopHeader
 }
 
 // loopHeader is a field or package slice (p.data, s.data, pkgSlice) copied before the loop.
@@ -382,6 +383,25 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, bounds ...Expr) *loopPlan {
 		id, ok := unparen(x).(*Ident)
 		return ok && id.Obj != nil && id.Obj.Var == iv
 	}
+	// scaled: x is iv or k*iv (iv*k) for a constant k > 0, and its k
+	scaled := func(x Expr) int64 {
+		if isIV(x) {
+			return 1
+		}
+		if b, ok := unparen(x).(*BinaryExpr); ok && b.Op == MUL {
+			k, ok := constInt(b.X)
+			if !isIV(b.Y) {
+				k, ok = constInt(b.Y)
+				if !isIV(b.X) {
+					return 0
+				}
+			}
+			if ok && k > 0 {
+				return k
+			}
+		}
+		return 0
+	}
 	p := &loopPlan{iv: iv}
 	copied := map[*Var]bool{}
 	headers := map[hdrKey]*loopHeader{} // p.data in two indexes is one header
@@ -418,26 +438,21 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, bounds ...Expr) *loopPlan {
 			return true // maps
 		}
 		var off Expr
-		switch ix := unparen(e.Index).(type) {
-		case *Ident:
-			if !isIV(ix) {
-				return true
-			}
-		case *BinaryExpr:
+		k := scaled(e.Index)
+		if ix, ok := unparen(e.Index).(*BinaryExpr); ok && k == 0 {
 			switch {
-			case ix.Op == ADD && isIV(ix.X) && invariant(ix.Y):
-				off = ix.Y
-			case ix.Op == ADD && isIV(ix.Y) && invariant(ix.X):
-				off = ix.X
-			case ix.Op == SUB && isIV(ix.X) && invariant(ix.Y):
-				off = ix // iv - y: the offset is -y, emitted by offsetC
-			default:
-				return true
+			case ix.Op == ADD && scaled(ix.X) > 0 && invariant(ix.Y):
+				k, off = scaled(ix.X), ix.Y
+			case ix.Op == ADD && scaled(ix.Y) > 0 && invariant(ix.X):
+				k, off = scaled(ix.Y), ix.X
+			case ix.Op == SUB && scaled(ix.X) > 0 && invariant(ix.Y):
+				k, off = scaled(ix.X), ix // k*iv - y: the offset is -y, emitted by offsetC
 			}
-		default:
+		}
+		if k == 0 {
 			return true
 		}
-		p.indexes = append(p.indexes, loopIndex{e, off, hdr})
+		p.indexes = append(p.indexes, loopIndex{e, k, off, hdr})
 		return true
 	})
 	if len(p.indexes) == 0 {
@@ -504,7 +519,7 @@ func (g *gen) versioned(s Stmt, p *loopPlan, b func() loopBound, loop func()) {
 				n = "(" + g.expr(ix.e.X) + ").len"
 			}
 		}
-		add(fmt.Sprintf("%s(%s, %s, %s, %s)", bound.fn, bound.a, bound.b, g.offsetC(ix.off), n))
+		add(fmt.Sprintf("%s(%s, %s, %d, %s, %s)", bound.fn, bound.a, bound.b, ix.scale, g.offsetC(ix.off), n))
 	}
 	g.line("if (%s) {", strings.Join(list, " && "))
 	g.ind++

@@ -81,6 +81,9 @@ func (c *Checker) call(e *CallExpr) {
 				case "Shuffle", "Swizzle":
 					c.simdShuffle(e, f.X.info().T, f.Sel.Name)
 					return
+				case "Lookup":
+					c.simdLookup(e, f.X.info().T)
+					return
 				}
 			default:
 				e.Builtin = "error." + f.Sel.Name

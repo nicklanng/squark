@@ -1,6 +1,6 @@
 package main
 
-// Loops whose indexes are the counter plus a fixed offset run a copy without bounds checks when
+// Loops whose indexes are the counter (times a constant) plus a fixed offset run a copy without bounds checks when
 // a test before the loop shows every index is in range (cgen_loop.go). These check that both
 // copies compute the same thing.
 
@@ -99,7 +99,61 @@ func bytesOf(s string, n int) int {
 	return t
 }
 
+// indexes that are the counter times a constant, plus an offset
+func interleave(dst []int, a []int, b []int) {
+	for i := range a {
+		dst[2*i] = a[i]
+		dst[i*2+1] = b[i]
+	}
+}
+
+const stride = 3
+
+func strided(a []int, n int) int {
+	s := 0
+	for i := 0; i < n; i++ {
+		s += a[stride*i+1]
+	}
+	return s
+}
+
+func evensDown(a []int) int {
+	s := 0
+	for i := len(a)/2 - 1; i >= 0; i-- {
+		s = s*10 + a[2*i]
+	}
+	return s
+}
+
+func oddsBack(a []int, n int) int {
+	s := 0
+	for i := 1; i <= n; i++ {
+		s += a[2*i-1]
+	}
+	return s
+}
+
+// k*i wraps around to 0 at i = 4: the range test must reject the loop (the product overflows),
+// and the checked copy reads a[0] as the index wraps
+func wrapped(a []int) int {
+	s := 0
+	for i := 4; i < 5; i++ {
+		s += a[(1<<62)*i]
+	}
+	return s
+}
+
 func main() {
+	x := []int{1, 2, 3}
+	y := []int{10, 20, 30}
+	var z [6]int
+	interleave(z[:], x, y)
+	println(z[0], z[1], z[2], z[3], z[4], z[5])
+	println(strided([]int{0, 1, 0, 0, 2, 0, 0, 3}, 3), strided(x, 0))
+	println(evensDown([]int{1, 0, 2, 0, 3, 0}))
+	println(oddsBack([]int{0, 1, 0, 2, 0, 3}, 3))
+	println(wrapped(y))
+
 	a := []int{1, 2, 3, 4, 5, 6, 7, 8}
 	var b [8]int
 	neighbours(a, b[:])

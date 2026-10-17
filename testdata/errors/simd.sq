@@ -36,6 +36,14 @@ func main() {
 	_ = a.Swizzle(0, 1, 2, 4) // ERROR "out of range [0:4]"
 	_ = a.Shuffle(a, 0, 1, 2, 8) // ERROR "out of range [0:8]"
 	_ = a.Shuffle(i, 0, 1, 2, 3) // ERROR "cannot use i"
+	t := uint8x16("0123456789abcdef")
+	_ = uint8x16("0123") // ERROR "it has 4 bytes, uint8x16 needs 16"
+	var w uint8x32 = t.Lookup(uint8x32{})
+	_ = w
+	_ = t.Lookup(i) // ERROR "the indexes of Lookup"
+	_ = t.Lookup(t, t) // ERROR "wrong number of arguments for Lookup"
+	_ = uint8x32{}.Lookup(t) // ERROR "Lookup is defined on 16-lane byte vectors"
+	_ = a.Lookup(t) // ERROR "Lookup is defined on 16-lane byte vectors"
 	var m map[float32x4]int cap 4 // ERROR "float32x4"
 	_ = m
 	const n = len(a)

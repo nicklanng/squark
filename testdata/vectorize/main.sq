@@ -172,6 +172,16 @@ func countIn(s string, c byte, n int) int {
 	return k
 }
 
+// want: vectorized
+//
+//squark:noinline
+func interleave(dst []int32, a []int32, b []int32) {
+	for i := range a {
+		dst[2*i] = a[i]
+		dst[2*i+1] = b[i]
+	}
+}
+
 // The sizes come from the command line (64 with no arguments) so clang can't specialize the
 // functions for constant lengths, which unrolls the loops instead.
 func main() {
@@ -194,6 +204,8 @@ func main() {
 	fb.add(&hb)
 	fb.scale(2)
 	reverse(y[:n], x[:n])
+	var z [128]int32
+	interleave(z[:2*n], x[:n], y[:n])
 	pkg = pkgArr[:n]
-	println(sumPkg(n), maxInt32(x[:n]), dot(x[:n], y[:n]), countByte(p[:n], 0), countIn(string(q[:n]), 0, n))
+	println(sumPkg(n), maxInt32(x[:n]), dot(x[:n], y[:n]), countByte(p[:n], 0), countIn(string(q[:n]), 0, n), z[1])
 }
