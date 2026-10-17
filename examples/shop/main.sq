@@ -1,0 +1,227 @@
+// shop is two small services built to run under resource limits: stock keeps item counts, and
+// orders takes an item from stock for each order, calling it by name. Run them apart, as
+// containers would:
+//
+//    squark run examples/shop -role stock -port 8081 -admin 9091
+//    squark run examples/shop -role orders -port 8080 -admin 9090 -stock localhost:8081
+//    curl -X POST localhost:8080/orders -d '{"item":"apple"}'
+//    curl localhost:9090/metrics
+//
+// With no flags it runs its self-test (selftest.sq). docker-compose.yml and k8s.yaml run it as
+// containers (see README.md there).
+//
+// It shows:
+//   - a call to another service by name (net resolves names through resolv.conf), under a deadline
+//   - an admin port with /healthz, /readyz and /metrics, and JSON logs
+//   - SIGTERM draining requests (shutdown 20s), and limits the build proves: squark build
+//     -manifest k8s examples/shop prints the pod resources that fit
+program {
+	budget 128M
+	pool http.serve_conn 256
+	connections 512
+	sockbuf 16K
+	shutdown 20s
+}
+
+use flag, http, json, log, metrics, net, os, time
+
+// stock_call_limit bounds a call from orders to stock.
+const stock_call_limit = 300 * time.millisecond
+
+thread stock_addr str
+thread next_order int
+
+// the items stock keeps, by index: a map keyed by the request's text would keep a view of the
+// connection's buffer in a package variable, which the compiler rejects
+const item_names = str[...]{"apple", "pear", "slow"}
+
+thread counts int[3]
+
+fn item_index(name str) -> int {
+	for i, n in item_names {
+		if n == name {
+			return i
+		}
+	}
+	return -1
+}
+
+thread placed = metrics.counter("shop_orders_total", `result="placed"`, "Orders, by result.")
+thread refused = metrics.counter("shop_orders_total", `result="out_of_stock"`, "Orders, by result.")
+thread failed = metrics.counter("shop_orders_total", `result="failed"`, "Orders, by result.")
+
+// ---- stock ----
+
+fn stock_routes() {
+	counts = int[3]{3, 1, 100} // apple, pear, and slow, whose handler takes longer than orders waits
+	http.handle_func("GET /stock/{item}", get_stock)
+	http.handle_func("POST /stock/{item}/take", take_stock)
+}
+
+// GET /stock/{item}: {"item":"apple","count":3}
+fn get_stock(w *http.ResponseWriter, r *http.Request) {
+	item := r.path_value("item")
+	i := item_index(item)
+	if i < 0 {
+		reply_error(w, 404, "no such item")
+		return
+	}
+	j := w.json()
+	j.object()
+	j.key("item")
+	j.string(item)
+	j.key("count")
+	j.int(counts[i])
+	j.end()
+}
+
+// POST /stock/{item}/take: takes one, answering {"item":"apple","left":2}, or 409 if none is left
+fn take_stock(w *http.ResponseWriter, r *http.Request) {
+	item := r.path_value("item")
+	i := item_index(item)
+	if i < 0 {
+		reply_error(w, 404, "no such item")
+		return
+	}
+	if item == "slow" {
+		time.sleep(5 * time.second)
+	}
+	n := counts[i]
+	if n == 0 {
+		reply_error(w, 409, "out of stock")
+		return
+	}
+	counts[i] = n - 1
+	j := w.json()
+	j.object()
+	j.key("item")
+	j.string(item)
+	j.key("left")
+	j.int(n - 1)
+	j.end()
+}
+
+// ---- orders ----
+
+fn order_routes() {
+	http.handle_func("POST /orders", place_order)
+}
+
+// POST /orders {"item":"apple"}: takes the item from stock and answers 201 {"order":1,"item":...};
+// 409 if stock has none, 404 for an unknown item, 504 if stock doesn't answer in time.
+fn place_order(w *http.ResponseWriter, r *http.Request) {
+	start := time.now()
+	d := json.new_decoder_in(r.body, r.arena)
+	item := ""
+	if d.begin_object() {
+		for k, ok := d.key(); ok; k, ok = d.key() {
+			if k == "item" {
+				item, _ = d.text_max(32)
+			} else {
+				d.skip()
+			}
+		}
+	}
+	if d.err != nil or item == "" {
+		reply_error(w, 400, `want {"item": "..."}`)
+		return
+	}
+	status, err := take_from_stock(item, r.arena)
+	e := log.info("order")
+	e.str("item", item)
+	e.duration("took", time.since(start))
+	switch {
+	case err == net.Timeout:
+		failed.inc()
+		e.str("result", "stock timed out")
+		reply_error(w, 504, "stock timed out")
+	case err != nil:
+		failed.inc()
+		e.err("error", err)
+		reply_error(w, 502, "stock failed")
+	case status == 409:
+		refused.inc()
+		e.str("result", "out of stock")
+		reply_error(w, 409, "out of stock")
+	case status == 404:
+		e.str("result", "no such item")
+		reply_error(w, 404, "no such item")
+	case status != 200:
+		failed.inc()
+		e.int("stock_status", status)
+		reply_error(w, 502, "stock failed")
+	default:
+		placed.inc()
+		next_order++
+		e.int("order", next_order)
+		w.write_header(201)
+		j := w.json()
+		j.object()
+		j.key("order")
+		j.int(next_order)
+		j.key("item")
+		j.string(item)
+		j.end()
+	}
+	e.send()
+}
+
+// take_from_stock asks stock to take one of item, within stock_call_limit (dialing, the name
+// lookup included), and returns its status.
+fn take_from_stock(item str, a arena) -> int ! {
+	var buf u8[4K]
+	with deadline stock_call_limit {
+		c := http.dial(stock_addr, buf[:])!
+		resp, err := c.post("/stock/" + item + "/take" in a, "application/json", buf[:0])
+		c.close()
+		return resp.status_code, err
+	}
+}
+
+// ---- serving ----
+
+fn reply_error(w *http.ResponseWriter, code int, msg str) {
+	w.write_header(code)
+	j := w.json()
+	j.object()
+	j.key("error")
+	j.string(msg)
+	j.end()
+}
+
+fn serve(port, admin int) -> ! {
+	http.handle_metrics("GET /metrics")
+	http.serve_admin(http.port(admin))!
+	e := log.info("listening")
+	e.int("port", port)
+	e.int("admin", admin)
+	e.send()
+	return http.listen_and_serve(http.port(port), nil) // nil after a graceful stop
+}
+
+fn main() {
+	role := flag.str_flag("role", "", "stock or orders (none: the self-test)")
+	port := flag.int_flag("port", 8080, "port to serve on")
+	admin := flag.int_flag("admin", 9090, "port for /healthz, /readyz and /metrics")
+	stock := flag.str_flag("stock", "stock:8080", "the stock service's host:port (orders)")
+	flag.parse()
+	stock_addr = *stock
+	switch *role {
+	case "stock":
+		stock_routes()
+	case "orders":
+		order_routes()
+	case "":
+		self_test()
+		return
+	default:
+		println("shop: -role is stock or orders")
+		os.exit(2)
+	}
+	if err := serve(*port, *admin); err != nil {
+		e := log.err("serving")
+		e.err("error", err)
+		e.send()
+		os.exit(1)
+	}
+}

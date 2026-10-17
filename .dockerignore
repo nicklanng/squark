@@ -1,0 +1,6 @@
+# for image builds from the repository root (examples/shop/Dockerfile)
+.git
+.claude
+bin
+bench/bin
+editors/vscode/node_modules

@@ -43,6 +43,9 @@ type Options struct {
 	Remarks io.Writer
 	// CPU is the CPU to build for (see cpuFlags); "" means $SQUARK_CPU, or else the baseline.
 	CPU string
+	// Static links everything into the binary, C libraries (and libc) included, so it runs in an
+	// empty container image (FROM scratch). Linux only: macOS has no static libc.
+	Static bool
 }
 
 // cpuFlags returns the C compiler flags for building for cpu on goarch:
@@ -189,6 +192,9 @@ func satMul(a, b int64) int64 {
 var heapSymbols = []string{"malloc", "calloc", "realloc", "free", "posix_memalign", "aligned_alloc", "valloc", "strdup", "strndup", "asprintf", "vasprintf"}
 
 func Build(opt Options) (*Result, error) {
+	if opt.Static && runtime.GOOS != "linux" {
+		return nil, fmt.Errorf("-static builds are for Linux: macOS has no static C library (build in a Linux container; see examples/shop)")
+	}
 	if opt.CC == "" {
 		opt.CC = os.Getenv("CC")
 		if opt.CC == "" {
@@ -499,6 +505,11 @@ func Build(opt Options) (*Result, error) {
 	}
 	objs = append(objs, "limits.o")
 	args := append(append([]string{opt.OptFlag, "-pthread", "-o", absOut}, objs...), ldflags...)
+	if opt.Static {
+		// glibc's static build works here: the runtime doesn't use getaddrinfo or the other NSS
+		// lookups that need shared libraries at run time (net resolves names itself)
+		args = append(args, "-static")
+	}
 	if runtime.GOOS == "darwin" {
 		args = append(args, "-Wl,-dead_strip")
 	} else {

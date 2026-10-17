@@ -15,6 +15,7 @@ Each directory is one program: `squark run examples/<name> [args]`.
 | `jobs` | a job runner over scheduler threads: shared channels, preemptible and blocking work |
 | `jsonq` | a report over a JSON array of orders: decoding, validation, sorting, arenas |
 | `life` | Game of Life and a Mandelbrot set: pure computation |
+| `shop` | two services calling each other by name, built for containers: deadlines, an admin port with probes and metrics, JSON logs, graceful stops, proven resource limits, a `FROM scratch` image, Compose and Kubernetes files |
 
 Examples with an `expected.out` are also tests: run with no arguments, they drive themselves
 (scripted clients, fixed input) and `go test ./internal/...` compares their output.

@@ -231,14 +231,21 @@ Each needs a design pass first: the open questions below are decided in this fil
   stop, so the endpoint is removed before the server stops accepting, and while the program says
   `http.set_ready(false)`) and `/metrics`, from its own listener and a small task pool of its
   own, so a full `serve_conn` pool can't fail liveness.
-- [ ] **3.4 Static builds.** `squark build -static` links statically (musl on Linux; libsqlite3
+- [x] **3.4 Static builds.** — done: `squark build -static` (Linux; an error on macOS, which has no
+  static libc); glibc static works because `net` never calls getaddrinfo/NSS. musl wasn't needed.
+  test: `TestStatic` (no PT_INTERP, no shared libraries, SQLite included; it runs). Plan: `squark build -static` links statically (musl on Linux; libsqlite3
   static too), so the image can be `FROM scratch`. `examples/` gets a Dockerfile.
 - [ ] **3.5 TLS for outbound calls.** BearSSL (no malloc, caller-provided buffers) vendored as a
   C library with a declared stack; `http.dial_tls`. Inbound TLS later; inside a cluster a mesh
   often terminates it.
 - [ ] **3.6 Postgres client.** The wire protocol in squark, over `net`, with fixed buffers and a
   per-thread connection like `sqlite`.
-- [ ] **3.7 A showcase service.** `examples/svc`: two services calling each other by name, with
+- [x] **3.7 A showcase service.** — done: `examples/shop` (one program, roles stock and orders;
+  self-test in the suite), Dockerfile (static, `FROM scratch`, 1.5 MB image), docker-compose.yml,
+  k8s.yaml. **Checked in Docker Compose:** orders reached stock by name through Docker's DNS,
+  `slow` answered 504 at 309 ms, probes and metrics on :9090, JSON logs, `--memory 32m` refused
+  (worst case 60 MiB), `docker compose stop` exited 0 for both. k8s.yaml was only parsed, not
+  applied: there was no local cluster (and the default kube context is a real one). Plan: `examples/svc`: two services calling each other by name, with
   deadlines, metrics, probes, `-manifest` output and Kubernetes manifests; a script that runs it
   in kind.
 
@@ -262,3 +269,4 @@ Each needs a design pass first: the open questions below are decided in this fil
 - 2026-10-17: 3.1-3.3 done (suite on macOS and Linux, fuzz 3000 clean). Order from here: 3.4
   static builds, then 3.7 the showcase (it exercises everything so far), then 3.5 TLS and 3.6
   Postgres, the two largest.
+- 2026-10-17: 3.4 and 3.7 done.

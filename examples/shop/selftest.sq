@@ -1,0 +1,63 @@
+// The self-test, run when shop has no -role: both services in one process on a port the system
+// picks, with orders calling stock by name (localhost, from the hosts file), and a scripted
+// client printing each exchange.
+program
+
+use bytes, http, log, metrics, net, strconv, strings
+
+thread client_buf u8[8K]
+thread addr_buf u8[32]
+
+task server(l net.Listener) pool 1 {
+	http.serve(l, nil)
+}
+
+fn self_test() {
+	log.level = .error // the info lines carry times: leave them out of the expected output
+	stock_routes()
+	order_routes()
+	http.handle_metrics("GET /metrics")
+	l, err := net.listen("127.0.0.1:0")
+	if err != nil {
+		panic(err)
+	}
+	stock_addr = str(net.append_host_port(addr_buf[:0], "localhost", l.port()))
+	start server(l)
+	ask("GET", "/stock/apple", "")
+	ask("POST", "/orders", `{"item": "apple"}`)
+	ask("POST", "/orders", `{"item": "pear"}`)
+	ask("POST", "/orders", `{"item": "pear"}`)
+	ask("POST", "/orders", `{"item": "plum"}`)
+	ask("POST", "/orders", `{"item": "slow"}`)
+	ask("POST", "/orders", `{"size": 2}`)
+	ask("GET", "/stock/apple", "")
+	var mb u8[8K]
+	b := bytes.new_buffer(mb[:0])
+	metrics.write_text(&b)
+	var lines str[128]
+	for line in strings.split(b.string(), "\n", lines[:]) {
+		shop := strings.has_prefix(line, "shop_orders_total{")
+		if shop or strings.has_prefix(line, "http_requests_total{") {
+			println("metric", line)
+		}
+	}
+}
+
+fn ask(method, path, body str) {
+	c, err := http.dial(stock_addr, client_buf[:])
+	if err != nil {
+		println(method, path, "-> dial:", err.message())
+		return
+	}
+	defer c.close()
+	var bb u8[256]
+	copy(bb[:], body)
+	resp, err := c.do(method, path, nil, bb[:len(body)])
+	if err != nil {
+		println(method, path, "->", err.message())
+		return
+	}
+	var sb u8[8]
+	code := str(strconv.append_int(sb[:0], resp.status_code))
+	println(method, path, body, "->", code, str(resp.body))
+}

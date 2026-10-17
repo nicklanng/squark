@@ -17,7 +17,7 @@ import (
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
-  squark build [-o output] [-v] [-work dir] [-cpu c] [-manifest k8s|systemd] [dir]   compile a program
+  squark build [-o output] [-v] [-work dir] [-cpu c] [-static] [-manifest k8s|systemd] [dir]   compile a program
   squark run [-v] [-cpu c] dir [args...]                     compile and run
   squark check [dir]                                type and lifetime check only
   squark doc [dir] [pkg]                            list functions with their reference provenance
@@ -84,6 +84,7 @@ func main() {
 	opt := fs.String("opt", "-O3", "C optimization flag")
 	cpu := fs.String("cpu", "", "CPU to build for: baseline, native, x86-64-v3, ... (default $SQUARK_CPU, or baseline)")
 	manifest := fs.String("manifest", "", "build: also print resource settings that fit the program: k8s or systemd")
+	static := fs.Bool("static", false, "link statically, C libraries included, for an empty container image (Linux)")
 	fs.Parse(os.Args[2:])
 	dir := "."
 	if fs.NArg() > 0 {
@@ -97,7 +98,7 @@ func main() {
 	}
 	switch cmd {
 	case "build":
-		res, err := driver.Build(driver.Options{Dir: dir, Output: *output, WorkDir: *work, Verbose: *verbose, OptFlag: *opt, CPU: *cpu})
+		res, err := driver.Build(driver.Options{Dir: dir, Output: *output, WorkDir: *work, Verbose: *verbose, OptFlag: *opt, CPU: *cpu, Static: *static})
 		if err != nil && res != nil {
 			// budget exceeded: the binary was built but is rejected
 			os.Remove(res.Binary)

@@ -973,12 +973,17 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 ## 10. Toolchain
 
 ```sh
-squark build [-o out] [-v] [-work dir] [-cpu c] [-manifest k8s|systemd] [dir]   # -v prints the memory breakdown (always printed with a budget)
+squark build [-o out] [-v] [-work dir] [-cpu c] [-static] [-manifest k8s|systemd] [dir]   # -v prints the memory breakdown (always printed with a budget)
 squark run [-v] [-cpu c] dir [args...]
 squark check [dir]                              # type and lifetime check only
 squark doc [dir] [pkg]                          # API with provenance; `squark doc std` for the stdlib
 squark emit-c [dir]                             # the generated C
 ```
+
+`-static` (Linux) links everything into the binary, libc and C libraries such as SQLite included,
+so it runs in an empty image (`FROM scratch`): the runtime needs nothing from the system at run
+time, and `net` resolves names without the C library's NSS. macOS has no static libc, so there
+it is an error; build in a Linux container (`examples/shop/Dockerfile`).
 
 `-manifest k8s` prints, on stdout, a pod spec's `resources` (requests equal to limits, so the
 pod is in the Guaranteed QoS class) and `terminationGracePeriodSeconds`; `-manifest systemd`

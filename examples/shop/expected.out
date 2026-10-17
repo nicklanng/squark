@@ -1,0 +1,16 @@
+GET /stock/apple  -> 200 {"item":"apple","count":3}
+POST /orders {"item": "apple"} -> 201 {"order":1,"item":"apple"}
+POST /orders {"item": "pear"} -> 201 {"order":2,"item":"pear"}
+POST /orders {"item": "pear"} -> 409 {"error":"out of stock"}
+POST /orders {"item": "plum"} -> 404 {"error":"no such item"}
+POST /orders {"item": "slow"} -> 504 {"error":"stock timed out"}
+POST /orders {"size": 2} -> 400 {"error":"want {\"item\": \"...\"}"}
+GET /stock/apple  -> 200 {"item":"apple","count":2}
+metric http_requests_total{code="1xx"} 0
+metric http_requests_total{code="2xx"} 6
+metric http_requests_total{code="3xx"} 0
+metric http_requests_total{code="4xx"} 5
+metric http_requests_total{code="5xx"} 1
+metric shop_orders_total{result="placed"} 2
+metric shop_orders_total{result="out_of_stock"} 1
+metric shop_orders_total{result="failed"} 1

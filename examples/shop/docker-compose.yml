@@ -1,0 +1,27 @@
+# Both services as containers, orders calling stock by its name (Docker's DNS). From the
+# repository root:
+#
+#    docker compose -f examples/shop/docker-compose.yml up --build
+#    curl -X POST localhost:8080/orders -d '{"item":"apple"}'
+#    curl localhost:9090/metrics
+#
+# The limits are what `squark build -manifest k8s examples/shop` prints; the program refuses to
+# start if its memory limit is below its proven worst case.
+services:
+  stock:
+    build:
+      context: ../..
+      dockerfile: examples/shop/Dockerfile
+    image: squark-shop
+    command: ["-role", "stock", "-port", "8080", "-admin", "9090"]
+    mem_limit: 68m
+    cpus: 1
+    stop_grace_period: 25s
+  orders:
+    image: squark-shop
+    depends_on: [stock]
+    command: ["-role", "orders", "-port", "8080", "-admin", "9090", "-stock", "stock:8080"]
+    ports: ["8080:8080", "9090:9090"]
+    mem_limit: 68m
+    cpus: 1
+    stop_grace_period: 25s

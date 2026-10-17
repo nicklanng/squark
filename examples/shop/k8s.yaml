@@ -1,0 +1,91 @@
+# shop on Kubernetes: two Deployments and their Services. Build the image and load it into the
+# cluster first (minikube: `minikube image build -t squark-shop -f examples/shop/Dockerfile .`
+# from the repository root), then:
+#
+#    kubectl apply -f examples/shop/k8s.yaml
+#    kubectl port-forward svc/orders 8080:8080
+#    curl -X POST localhost:8080/orders -d '{"item":"apple"}'
+#
+# resources and terminationGracePeriodSeconds are what `squark build -manifest k8s examples/shop`
+# prints. orders reaches stock as "stock:8080": net applies the pod's resolv.conf search domains,
+# as the C library would. Each replica keeps its own counts: this is a demo, not a database.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: stock}
+  template:
+    metadata:
+      labels: {app: stock}
+    spec:
+      terminationGracePeriodSeconds: 25
+      containers:
+        - name: stock
+          image: squark-shop
+          imagePullPolicy: IfNotPresent
+          args: ["-role", "stock", "-port", "8080", "-admin", "9090"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: admin, containerPort: 9090}
+          resources:
+            requests: {cpu: "1", memory: "68Mi"}
+            limits: {cpu: "1", memory: "68Mi"}
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stock
+spec:
+  selector: {app: stock}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: orders}
+  template:
+    metadata:
+      labels: {app: orders}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      terminationGracePeriodSeconds: 25
+      containers:
+        - name: orders
+          image: squark-shop
+          imagePullPolicy: IfNotPresent
+          args: ["-role", "orders", "-port", "8080", "-admin", "9090", "-stock", "stock:8080"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: admin, containerPort: 9090}
+          resources:
+            requests: {cpu: "1", memory: "68Mi"}
+            limits: {cpu: "1", memory: "68Mi"}
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+spec:
+  selector: {app: orders}
+  ports:
+    - {name: http, port: 8080, targetPort: http}

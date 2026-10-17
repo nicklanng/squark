@@ -297,11 +297,15 @@ squark is built for services that run under resource limits (a Kubernetes pod, `
   ends.
 - **Overload that degrades.** `start f() else { }`, `v, ok := x in a`, `http.shed_load`, and
   `isolate` tasks: a handler that panics ends only its own connection.
+- **A one-file image.** `squark build -static` links everything, SQLite included, so the image
+  can be `FROM scratch`: `examples/shop` builds one of 1.5 MB.
 - **What operators expect.** Names resolve through resolv.conf like C programs (search domains,
   `ndots`), `http.serve_admin(":9090")` serves `/healthz`, `/readyz` and `/metrics` (Prometheus) on
   a pool of its own, and `std/log` writes JSON lines.
 
-ROADMAP.md tracks what's done and what's next (static builds, TLS, Postgres, a showcase).
+`examples/shop` puts it together: two services calling each other by name, with a Dockerfile,
+a Compose file and Kubernetes manifests. ROADMAP.md tracks what's done and what's next (TLS,
+Postgres).
 
 ## How the checking works
 
