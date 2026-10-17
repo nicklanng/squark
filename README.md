@@ -301,11 +301,11 @@ squark is built for services that run under resource limits (a Kubernetes pod, `
   can be `FROM scratch`: `examples/shop` builds one of 1.5 MB.
 - **What operators expect.** Names resolve through resolv.conf like C programs (search domains,
   `ndots`), `http.serve_admin(":9090")` serves `/healthz`, `/readyz` and `/metrics` (Prometheus) on
-  a pool of its own, and `std/log` writes JSON lines.
+  a pool of its own, `std/log` writes JSON lines, and `std/postgres` talks to PostgreSQL
+  (SCRAM-SHA-256 authentication, parameters, a pool) in squark itself.
 
 `examples/shop` puts it together: two services calling each other by name, with a Dockerfile,
-a Compose file and Kubernetes manifests. ROADMAP.md tracks what's done and what's next (TLS,
-Postgres).
+a Compose file and Kubernetes manifests. ROADMAP.md tracks what's done and what's next (TLS).
 
 ## How the checking works
 

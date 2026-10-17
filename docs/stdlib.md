@@ -235,6 +235,36 @@ fn index(s u8[], sep u8[]) -> int
 // has_prefix reports whether s begins with prefix.
 fn has_prefix(s u8[], prefix u8[]) -> bool
 
+// Package sha256 computes SHA-256 (FIPS 180-4) and HMAC-SHA-256 (RFC 2104), for protocols such as
+// Postgres' SCRAM authentication. Digests are values: nothing is allocated.
+module sha256 // use crypto/sha256
+
+const size = 32
+const block_size = 64
+
+// Digest is a SHA-256 computation in progress: write data, then sum.
+struct Digest {
+	// fields that aren't pub
+}
+
+impl Digest {
+	// write adds p to the data.
+	fn write(&self, p u8[])
+
+	// write_string adds s to the data.
+	fn write_string(&self, s str)
+
+	// sum returns the digest of the data written so far (d can take more data afterwards).
+	fn sum(self) -> u8[32]
+}
+
+// new returns a Digest ready for data.
+fn new() -> sha256.Digest
+// sum returns the SHA-256 digest of data.
+fn sum(data u8[]) -> u8[32]
+// hmac returns HMAC-SHA-256(key, data) (RFC 2104).
+fn hmac(key u8[], data u8[]) -> u8[32]
+
 // Package errors creates error values. A squark error is a value (code + static message),
 // so creating one never allocates.
 module errors
@@ -1254,6 +1284,124 @@ fn float64() -> f64
 fn perm(dst int[]) -> int[] in dst
 // shuffle puts the elements of s (T[] for any T) in a random order, from this thread's generator.
 fn shuffle(s anytype)
+
+// Package postgres is a PostgreSQL client, written in squark over net: the v3 wire protocol,
+// authentication by trust, password or SCRAM-SHA-256 (Postgres' default since 14), and queries
+// with parameters (the extended protocol: values are sent apart from the SQL, never spliced
+// into it). It doesn't do TLS: use it inside a cluster, or over a sidecar or mesh that does.
+//
+//    c := postgres.connect("postgres://app:secret@db:5432/shop", buf[:])!
+//    var p postgres.Params
+//    p.int(7)
+//    rows := c.query("SELECT id, title FROM notes WHERE owner = $1", &p)!
+//    while rows.next() {
+//        println(rows.int(0), rows.text(1))
+//    }
+//    rows.err()!
+//
+// A Conn is used by one goroutine at a time; a Pool shares a few between a thread's goroutines.
+// Every call is blocking I/O on the poller, so with deadline bounds it, and a graceful stop's cap
+// cuts it off.
+module postgres
+
+fault ServerError -70 "postgres: the server reported an error (see Conn.error_message)"
+fault Protocol -71 "postgres: unexpected reply from the server"
+fault Auth -72 "postgres: authentication failed or not supported (trust, password, SCRAM-SHA-256)"
+fault TooLarge -73 "postgres: a message larger than the connection's buffer"
+fault BadURL -74 "postgres: invalid URL (want postgres://user:password@host:port/database)"
+fault Closed -75 "postgres: connection closed"
+fault Busy -76 "postgres: the previous query's rows haven't been read (or closed)"
+fault TooManyParams -77 "postgres: more parameters than Params holds (32, 2 KiB of text)"
+
+// Conn is a connection. The buffer given to connect holds what it reads (rows are views of it,
+// valid until the next row) and what it writes (a query and its parameters).
+struct Conn {
+	// fields that aren't pub
+}
+
+impl Conn {
+	// error_code returns the SQLSTATE of the last ServerError ("23505"), error_message its text.
+	fn error_code(&self) -> str in self
+	fn error_message(&self) -> str in self
+	fn close(&self)
+
+	// query sends sql with p's parameters ($1, $2, ...; p may be nil) and returns its rows. They
+	// must be read to the end (or closed) before the connection's next query.
+	fn query(&self, sql str, p *postgres.Params) -> postgres.Rows ! in self
+
+	// exec runs sql (with p's parameters; p may be nil) and returns how many rows it changed.
+	fn exec(&self, sql str, p *postgres.Params) -> int !
+}
+// Params holds a query's parameters, $1, $2, ... in order, as text: the server converts each to
+// its column's type, as it does a quoted literal. Up to 32, with 2 KiB of text in all.
+struct Params {
+	// fields that aren't pub
+}
+
+impl Params {
+	fn str(&self, s str)
+	fn int(&self, v int)
+	fn f64(&self, v f64)
+	fn bool(&self, v bool)
+	fn null(&self)
+	fn clear(&self)
+}
+// Rows is a query's result, read a row at a time with next. Its views (text) are valid until the
+// next call to next.
+struct Rows {
+	// fields that aren't pub
+}
+
+impl Rows {
+	// next reads the next row and reports whether there was one. At the end, or at an error,
+	// it returns false; err says which.
+	fn next(&self) -> bool
+
+	// err returns the error that ended the rows, if any: ServerError, Closed, a timeout...
+	fn err(&self) -> !
+
+	// affected is how many rows an INSERT, UPDATE or DELETE changed (once next has returned false).
+	fn affected(&self) -> int
+	fn columns(&self) -> int
+
+	// text returns column i of the row as text (Postgres' text form: 't' and 'f' for booleans), ""
+	// for NULL or a column that doesn't exist.
+	fn text(&self, i int) -> str in self
+	fn is_null(&self, i int) -> bool
+
+	// int returns column i as an integer (0 for NULL or text that isn't one).
+	fn int(&self, i int) -> int
+	fn bool(&self, i int) -> bool
+	fn f64(&self, i int) -> f64
+
+	// close reads the rest of the rows, so the connection can take the next query.
+	fn close(&self)
+}
+// Pool shares up to 16 connections to one server between a thread's goroutines: get takes one
+// (connecting it if needed, waiting while all are in use), put gives it back. Declare it per
+// thread (`thread db postgres.Pool`) and init it in main.
+struct Pool {
+	// fields that aren't pub
+}
+
+impl Pool {
+	// init makes p a pool of n connections (1 to 16) to url, each with an equal share of mem for
+	// its buffer (at least 8 KiB each). They connect when first taken.
+	fn init(&self, url str in self, n int, mem u8[] in self)
+
+	// get takes a connection, waiting while all n are in use (within the goroutine's deadline:
+	// net.Timeout once it has passed), and connects it if it isn't.
+	fn get(&self) -> *postgres.Conn ! in self
+
+	// put gives c back. A connection whose rows weren't read to the end is closed (it reconnects
+	// when next taken).
+	fn put(&self, c *postgres.Conn)
+}
+
+// connect dials the server in url (postgres://user:password@host:port/database; a name is looked
+// up as net.dial does) and authenticates. buf, of at least 8 KiB, becomes the connection's: half
+// for replies (a row must fit in it), half for what it sends (a query with its parameters).
+fn connect(url str, buf u8[]) -> postgres.Conn ! in buf
 
 // Package sort sorts slices of any element type in place. less(a, b) reports whether a goes
 // before b. Heap sort: O(n log n) comparisons, no extra memory, no recursion; not stable (equal

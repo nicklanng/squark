@@ -1,0 +1,58 @@
+program
+
+// crypto/sha256 against FIPS 180-4's examples and RFC 4231's HMAC-SHA-256 test cases, writing the
+// data in one piece and in uneven pieces (the buffered path).
+
+use crypto/sha256
+
+fn hex(d u8[32]) -> str {
+	return str(append_hex(hexbuf[:0], d[:]))
+}
+
+thread hexbuf u8[64]
+
+fn append_hex(dst, b u8[]) -> u8[] in dst {
+	const digits = "0123456789abcdef"
+	for c in b {
+		dst = append(dst, digits[c>>4], digits[c&15])
+	}
+	return dst
+}
+
+fn main() {
+	println(hex(sha256.sum(u8[]{})))
+	var abc u8[3]
+	copy(abc[:], "abc")
+	println(hex(sha256.sum(abc[:])))
+	var long u8[56]
+	copy(long[:], "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+	println(hex(sha256.sum(long[:])))
+	// a million 'a's, written 997 bytes at a time
+	var chunk u8[997]
+	for i in 0..997 {
+		chunk[i] = 'a'
+	}
+	d := sha256.new()
+	left := 1000000
+	while left > 0 {
+		n := min(left, 997)
+		d.write(chunk[:n])
+		left -= n
+	}
+	println(hex(d.sum()))
+	// RFC 4231 test cases 1 and 6 (a key longer than a block)
+	var k1 u8[20]
+	for i in 0..20 {
+		k1[i] = 0x0b
+	}
+	var hi u8[8]
+	copy(hi[:], "Hi There")
+	println(hex(sha256.hmac(k1[:], hi[:])))
+	var k6 u8[131]
+	for i in 0..131 {
+		k6[i] = 0xaa
+	}
+	var msg u8[54]
+	copy(msg[:], "Test Using Larger Than Block-Size Key - Hash Key First")
+	println(hex(sha256.hmac(k6[:], msg[:])))
+}

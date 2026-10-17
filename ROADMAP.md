@@ -238,7 +238,11 @@ Each needs a design pass first: the open questions below are decided in this fil
 - [ ] **3.5 TLS for outbound calls.** BearSSL (no malloc, caller-provided buffers) vendored as a
   C library with a declared stack; `http.dial_tls`. Inbound TLS later; inside a cluster a mesh
   often terminates it.
-- [ ] **3.6 Postgres client.** The wire protocol in squark, over `net`, with fixed buffers and a
+- [x] **3.6 Postgres client.** — done: `std/postgres` (the v3 protocol in squark: trust,
+  cleartext and SCRAM-SHA-256 authentication, the extended protocol with text parameters,
+  `Rows`, SQLSTATE codes, a per-thread `Pool` of up to 16) and `std/crypto/sha256` (SHA-256,
+  HMAC). No TLS (3.5). tests: `testdata/run/sha256.sq` (FIPS 180-4, RFC 4231 vectors),
+  `TestPostgres` via `scripts/test-postgres.sh` (Postgres 16 in Docker, SCRAM). Plan: The wire protocol in squark, over `net`, with fixed buffers and a
   per-thread connection like `sqlite`.
 - [x] **3.7 A showcase service.** — done: `examples/shop` (one program, roles stock and orders;
   self-test in the suite), Dockerfile (static, `FROM scratch`, 1.5 MB image), docker-compose.yml,
@@ -270,3 +274,5 @@ Each needs a design pass first: the open questions below are decided in this fil
   static builds, then 3.7 the showcase (it exercises everything so far), then 3.5 TLS and 3.6
   Postgres, the two largest.
 - 2026-10-17: 3.4 and 3.7 done.
+- 2026-10-17: 3.6 done. Left: 3.5 TLS, which needs a decision on vendoring a TLS library (BearSSL
+  is in Debian but not Homebrew, so macOS builds would need its source in the repo).
