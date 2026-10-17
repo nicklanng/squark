@@ -1,0 +1,8 @@
+program {
+	shutdown 20 // ERROR "shutdown takes a duration from 1ms to 1h"
+	shutdown 2h // ERROR "shutdown takes a duration from 1ms to 1h"
+	shutdown 5x // ERROR "shutdown takes a duration from 1ms to 1h"
+	shutdown 500ms
+}
+
+fn main() {}

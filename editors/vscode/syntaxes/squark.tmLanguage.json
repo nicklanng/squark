@@ -56,9 +56,21 @@
     },
 
     "directives": {
-      "comment": "Directives in the header block: budget 64M, pool http.serve_conn 256, threads auto, workers 4, link \"sqlite3\", cflags/ldflags.",
-      "match": "^\\s*(budget|pool|workers|threads|link|cflags|ldflags)\\b(?=[ \\t]+[^\\s:=,)])",
-      "captures": { "1": { "name": "keyword.other.directive.squark" } }
+      "comment": "Directives in the header block: budget 64M, pool http.serve_conn 256, threads auto, workers 4, shutdown 20s, link \"sqlite3\", cflags/ldflags.",
+      "patterns": [
+        {
+          "match": "^\\s*(shutdown)[ \\t]+([0-9]+)(ms|s|m)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.directive.squark" },
+            "2": { "name": "constant.numeric.integer.decimal.squark" },
+            "3": { "name": "keyword.other.unit.duration.squark" }
+          }
+        },
+        {
+          "match": "^\\s*(budget|pool|workers|threads|shutdown|link|cflags|ldflags)\\b(?=[ \\t]+[^\\s:=,)])",
+          "captures": { "1": { "name": "keyword.other.directive.squark" } }
+        }
+      ]
     },
 
     "uses": {

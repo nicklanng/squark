@@ -1,0 +1,85 @@
+program
+
+// Overload that's an error, not a crash. start f() else { ... } runs the block instead of waiting
+// when f's pool is full. v, ok := x in a gives ok == false and a zero v, instead of a panic,
+// when the arena can't hold what x allocates: new, make, append, string concatenation and
+// copying conversions; allocations inside the functions x calls aren't x's own and still panic.
+
+use time
+
+struct Node {
+	next *Node
+	val  int
+}
+
+thread done int chan[8]
+
+task worker(n int) pool 2 {
+	time.sleep(20 * time.millisecond)
+	done <- n
+}
+
+fn fill(a arena) -> int {
+	n := 0
+	loop {
+		p, ok := new(Node) in a
+		if not ok {
+			return n
+		}
+		p.val = n
+		n++
+	}
+}
+
+fn main() {
+	// a pool of 2: the third start is refused, then a slot frees and it starts
+	refused := 0
+	for i in 0..3 {
+		start worker(i) else {
+			refused++
+		}
+	}
+	println("refused while full:", refused)
+	sum := <-done
+	start worker(9) else {
+		println("still full")
+	}
+	for _ in 0..2 {
+		sum += <-done
+	}
+	println("finished:", sum)
+
+	with arena small 256 {
+		n := fill(small)
+		println("nodes that fit:", n > 0, small.left() < 32)
+
+		s, ok := make(int[], 100) in small
+		println("make too big:", ok, s == nil, len(s))
+		m, ok := make(int[str], 1000) in small
+		println("map too big:", ok, m == nil)
+
+		with arena b 128 {
+			x, ok := "abc" + "def" + str(u8[]("ghi") in b) in b
+			println("concat fits:", ok, x)
+			var long u8[200]
+			y, ok2 := str(long[:]) in b
+			println("conversion too big:", ok2, len(y))
+			var xs int[]
+			grew := 0
+			loop {
+				ys, ok := append(xs, grew) in b
+				if not ok {
+					break
+				}
+				xs = ys
+				grew++
+			}
+			println("appended before full:", grew > 0, len(xs) == grew)
+		}
+	}
+	if p, ok := new(Node) in tiny; ok {
+		println("package arena:", p.val)
+	}
+}
+
+arena tiny 64

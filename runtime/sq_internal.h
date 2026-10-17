@@ -33,6 +33,7 @@ struct sq_g {
 	int64_t wake_at;
 	int64_t heap_index; // -1 when not in the timer heap
 	int64_t deadline;   // with deadline: when blocking I/O times out (sq_nanotime), or 0 for never
+	void *try_jb;       // the jmp_buf of the `v, ok := x in a` being evaluated, or NULL
 	// netpoll
 	int wait_fd;        // fd this goroutine is parked on, or -1
 	bool armed;         // a kqueue/epoll registration for this goroutine is outstanding

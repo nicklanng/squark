@@ -5,6 +5,7 @@
 #define SQ_RT_H
 
 #include <stdint.h>
+#include <setjmp.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
@@ -290,6 +291,10 @@ void sq_preempt(void);
 extern const bool sq_any_preemptible;
 
 void sq_go(sq_pool *pool, void (*entry)(void *), const void *args, size_t argsize);
+bool sq_try_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize);
+// v, ok := x in a: x's arena allocations get a negative line and jump to jb when the arena is full
+void *sq_try_enter(void *jb);
+void sq_try_leave(void *old);
 void sq_gosched(void);
 // with deadline: set the goroutine's deadline for the block; the cleanup restores the outer one
 int64_t sq_deadline_enter(int64_t d);
@@ -401,6 +406,8 @@ extern int64_t sq_shard_count;     // scheduler threads in this process
 extern const int64_t sq_threads;   // threads N (0: one per core)
 extern const bool sq_threads_env;  // SQUARK_THREADS applies (the program has a threads directive)
 extern const int64_t sq_threads_max; // with a budget: the count it was proven for (0: no limit)
+extern const int64_t sq_shutdown_ns; // shutdown D: the graceful stop's grace period (0: 10s)
+extern const int64_t sq_worst_case;  // the proven worst-case memory (0: not known, e.g. threads auto)
 extern const size_t sq_globals_size; // generated: one shard's package variables
 void sq_globals_set(void *p);        // generated: point this thread at a shard's package variables
 int64_t sq_shard_id(void);

@@ -17,7 +17,7 @@ import (
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
-  squark build [-o output] [-v] [-work dir] [-cpu c] [dir]   compile a program
+  squark build [-o output] [-v] [-work dir] [-cpu c] [-manifest k8s|systemd] [dir]   compile a program
   squark run [-v] [-cpu c] dir [args...]                     compile and run
   squark check [dir]                                type and lifetime check only
   squark doc [dir] [pkg]                            list functions with their reference provenance
@@ -83,6 +83,7 @@ func main() {
 	work := fs.String("work", "", "keep intermediate C files in this directory")
 	opt := fs.String("opt", "-O3", "C optimization flag")
 	cpu := fs.String("cpu", "", "CPU to build for: baseline, native, x86-64-v3, ... (default $SQUARK_CPU, or baseline)")
+	manifest := fs.String("manifest", "", "build: also print resource settings that fit the program: k8s or systemd")
 	fs.Parse(os.Args[2:])
 	dir := "."
 	if fs.NArg() > 0 {
@@ -108,6 +109,14 @@ func main() {
 		fmt.Fprint(os.Stderr, res.Notes)
 		if *verbose || res.Memory.Budget > 0 {
 			fmt.Fprint(os.Stderr, driver.FormatMemory(res.Memory))
+		}
+		if *manifest != "" {
+			m, err := driver.Manifest(res, filepath.Base(res.Binary), *manifest)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Print(m)
 		}
 	case "run":
 		tmp, err := os.MkdirTemp("", "squark-run-")

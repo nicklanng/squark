@@ -207,9 +207,10 @@ type TryExpr struct {
 // InExpr is `x in arena`: allocations made by x come from the arena.
 type InExpr struct {
 	ExprInfo
-	X     Expr
-	Arena Expr
-	P     Pos
+	X       Expr
+	Arena   Expr
+	P       Pos
+	CommaOk bool // v, ok := x in a: ok is false, instead of a panic, when a is full
 }
 
 type ChanType struct {
@@ -297,6 +298,7 @@ type AssignStmt struct {
 
 type GoStmt struct {
 	Call *CallExpr
+	Else *BlockStmt // start f() else { ... }: run instead of waiting when the pool is full
 	P    Pos
 	ID   int // go-site index
 }
@@ -535,6 +537,7 @@ type Directive struct {
 	Name   string
 	Target string // pool directive: "pkg.task"
 	Value  Expr
+	Unit   string // shutdown directive: "ms", "s" or "m" after the number
 	P      Pos
 }
 

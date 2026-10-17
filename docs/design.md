@@ -210,4 +210,5 @@ server to compare.
 - **`stack N` on a task** is checked against the proof.
 - **Idle keep-alive connections** have no task at all: after 100 ms of quiet the connection moves to
   the runtime's idle set and its stack is returned to the OS.
-- **Arena exhaustion panics.** A recoverable form (`try ... in a`) is still open.
+- **Arena exhaustion panics**, unless the allocation is written `v, ok := x in a` (added
+  2026-10-17; see spec.md §5).

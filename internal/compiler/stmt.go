@@ -65,6 +65,9 @@ func (c *Checker) stmt(s Stmt) {
 		c.assign(s)
 	case *GoStmt:
 		c.goStmt(s)
+		if s.Else != nil {
+			c.stmt(s.Else)
+		}
 	case *DeferStmt:
 		c.deferStmt(s)
 	case *ReturnStmt:
@@ -206,6 +209,12 @@ func (c *Checker) rhsTypes(pos Pos, lhsN int, rhs []Expr, hints []Type) []Type {
 				return nil
 			}
 			c.expr(u)
+		case *InExpr:
+			c.expr(u)
+			if _, tuple := u.T.(*Tuple); u.Mode != ModeInvalid && !tuple && lhsN == 2 {
+				u.CommaOk = true // v, ok := x in a
+				return []Type{u.T, tBool}
+			}
 		default:
 			c.expr(x)
 		}

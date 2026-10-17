@@ -1375,6 +1375,9 @@ func (l *lifetime) stmt(s Stmt) {
 		l.assignStmt(s)
 	case *GoStmt:
 		l.goStmt(s)
+		if s.Else != nil {
+			l.stmt(s.Else)
+		}
 	case *DeferStmt:
 		l.deferStmt(s)
 	case *ReturnStmt:
@@ -1519,6 +1522,10 @@ func (l *lifetime) assignStmt(s *AssignStmt) {
 			rs = []vec{l.vecOf(r), nil}
 		}
 	case *UnaryExpr:
+		if r.CommaOk {
+			rs = []vec{l.vecOf(r), nil}
+		}
+	case *InExpr:
 		if r.CommaOk {
 			rs = []vec{l.vecOf(r), nil}
 		}

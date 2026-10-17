@@ -1,0 +1,9 @@
+refused while full: 1
+finished: 10
+nodes that fit: true true
+make too big: false true 0
+map too big: false true
+concat fits: true abcdefghi
+conversion too big: false 0
+appended before full: true true
+package arena: 0

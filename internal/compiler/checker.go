@@ -702,6 +702,20 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			}
 			continue
 		}
+		if d.Name == "shutdown" {
+			lit, _ := d.Value.(*BasicLit)
+			unit := map[string]int64{"ms": 1e6, "s": 1e9, "m": 60e9}[d.Unit]
+			n, err := strconv.ParseInt(lit.Lit, 10, 64)
+			if lit.Kind != INT || unit == 0 || err != nil || n < 1 || n*unit > 3600e9 {
+				c.errorf(d.P, "shutdown takes a duration from 1ms to 1h: shutdown 20s (or 500ms, 2m)")
+				continue
+			}
+			if c.prog.Shutdown != 0 {
+				c.errorf(d.P, "duplicate shutdown")
+			}
+			c.prog.Shutdown = n * unit
+			continue
+		}
 		n, ok := c.constSize(d.Value, d.Name)
 		if !ok {
 			continue

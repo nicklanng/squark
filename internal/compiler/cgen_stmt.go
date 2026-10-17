@@ -308,6 +308,32 @@ func (g *gen) multiAssign(lhs []Expr, rhs Expr) {
 			g.line("}")
 			return
 		}
+	case *InExpr:
+		if r.CommaOk {
+			// x's arena allocations pass a negative line, so a full arena jumps back here instead of
+			// panicking (other panics print the line as usual); those of the functions x calls
+			// aren't x's own and still panic
+			t := r.info().T
+			v, ok, jb, saved := g.tmp(), g.tmp(), g.tmp(), g.tmp()
+			g.line("{")
+			g.ind++
+			g.line("%s %s = %s; volatile bool %s = false;", g.ctype(t), v, g.zero(t), ok)
+			g.line("jmp_buf %s; void *%s = sq_try_enter(&%s);", jb, saved, jb)
+			g.line("if (_setjmp(%s) == 0) {", jb)
+			g.ind++
+			x := strings.ReplaceAll(g.expr(r.X), "__FILE__, __LINE__", "__FILE__, -__LINE__")
+			g.line("%s = %s;", v, x)
+			g.line("%s = true;", ok)
+			g.ind--
+			g.line("}")
+			g.line("sq_try_leave(%s);", saved)
+			g.line("if (!%s) %s = %s;", ok, v, g.zero(t))
+			g.storeTarget(lhs[0], targets[0], g.reinterp(v, t, lhs[0].info().T))
+			g.storeTarget(lhs[1], targets[1], ok)
+			g.ind--
+			g.line("}")
+			return
+		}
 	case *UnaryExpr:
 		if sr, ok := g.selRecv[r]; ok && r.CommaOk {
 			g.storeTarget(lhs[0], targets[0], g.reinterp(sr[0], r.X.info().T.Underlying().(*Chan).Elem, lhs[0].info().T))
@@ -436,11 +462,20 @@ func (g *gen) goStmt(s *GoStmt) {
 	fmt.Fprintf(&g.goSites, "static void %s(void *p) { struct sq_ga%d *a = p; (void)a; %s(%s); }\n", tramp, s.ID, f.CName, strings.Join(unpack, ", "))
 	args := g.callArgs(call, sig)
 	ga := g.tmp()
-	if len(args) == 0 {
-		g.line("{ struct sq_ga%d %s = {0}; sq_go(&%s, %s, &%s, sizeof %s); }", s.ID, ga, pool.CName, tramp, ga, ga)
+	init := "{0}"
+	if len(args) > 0 {
+		init = "{ " + strings.Join(args, ", ") + " }"
+	}
+	if s.Else == nil {
+		g.line("{ struct sq_ga%d %s = %s; sq_go(&%s, %s, &%s, sizeof %s); }", s.ID, ga, init, pool.CName, tramp, ga, ga)
 		return
 	}
-	g.line("{ struct sq_ga%d %s = { %s }; sq_go(&%s, %s, &%s, sizeof %s); }", s.ID, ga, strings.Join(args, ", "), pool.CName, tramp, ga, ga)
+	// start f() else { ... }: the block runs instead of waiting for a slot
+	g.line("{ struct sq_ga%d %s = %s; if (!sq_try_go(&%s, %s, &%s, sizeof %s)) {", s.ID, ga, init, pool.CName, tramp, ga, ga)
+	g.ind++
+	g.stmts(s.Else.List)
+	g.ind--
+	g.line("} }")
 }
 
 func (g *gen) deferStmt(s *DeferStmt) {

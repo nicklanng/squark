@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -175,6 +176,32 @@ func TestGracefulStopLimits(t *testing.T) {
 	}
 }
 
+// TestShutdownDirective: program { shutdown 300ms } sets the grace period (and SQUARK_SHUTDOWN
+// still overrides it).
+func TestShutdownDirective(t *testing.T) {
+	bin := buildSource(t, strings.Replace(shutdownServer, "program\n", "program {\n\tshutdown 300ms\n}\n", 1))
+	for _, env := range []string{"", "SQUARK_SHUTDOWN=900ms"} {
+		var envs []string
+		if env != "" {
+			envs = append(envs, env)
+		}
+		cmd, addr, out, done := startServer(t, bin, envs...)
+		go http.Get("http://" + addr + "/slow?ms=10000")
+		time.Sleep(200 * time.Millisecond)
+		began := time.Now()
+		cmd.Process.Signal(syscall.SIGTERM)
+		err := <-done
+		d := time.Since(began)
+		lo, hi := 250*time.Millisecond, 700*time.Millisecond
+		if env != "" {
+			lo, hi = 850*time.Millisecond, 1500*time.Millisecond
+		}
+		if code := exitCode(err); code != 1 || d < lo || d > hi {
+			t.Errorf("%q: exit %d after %v, want 1 after %v-%v: %s", env, code, d, lo, hi, out.String())
+		}
+	}
+}
+
 // TestStopSignalDefault: a program that doesn't ask for graceful stops (no http server) still ends
 // at once on SIGTERM, as before.
 func TestStopSignalDefault(t *testing.T) {
@@ -309,5 +336,47 @@ func TestDeadlineUpstream(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the server didn't exit")
+	}
+}
+
+// TestShedLoad: with http.shed_load, a connection that finds every serve_conn slot busy gets a
+// 503 with Retry-After at once instead of waiting; without it, it waits for a slot.
+func TestShedLoad(t *testing.T) {
+	for _, shed := range []bool{true, false} {
+		src := strings.Replace(shutdownServer, "fn main() {\n", fmt.Sprintf("fn main() {\n\thttp.shed_load = %v\n", shed), 1)
+		src = strings.Replace(src, "program\n", "program {\n\tpool http.serve_conn 2\n}\n", 1)
+		bin := buildSource(t, src)
+		_, addr, out, _ := startServer(t, bin)
+		codes := make(chan int, 2)
+		for i := 0; i < 2; i++ { // fill both slots
+			go func() {
+				resp, err := http.Get("http://" + addr + "/slow?ms=600")
+				if err != nil {
+					codes <- -1
+					return
+				}
+				resp.Body.Close()
+				codes <- resp.StatusCode
+			}()
+		}
+		time.Sleep(200 * time.Millisecond)
+		start := time.Now()
+		resp, err := http.Get("http://" + addr + "/")
+		if err != nil {
+			t.Fatalf("shed=%v: %v\n%s", shed, err, out.String())
+		}
+		resp.Body.Close()
+		d := time.Since(start)
+		if shed && (resp.StatusCode != 503 || resp.Header.Get("Retry-After") != "1" || d > 300*time.Millisecond) {
+			t.Errorf("shedding: %d (Retry-After %q) after %v, want 503 at once", resp.StatusCode, resp.Header.Get("Retry-After"), d)
+		}
+		if !shed && (resp.StatusCode != 200 || d < 250*time.Millisecond) {
+			t.Errorf("waiting: %d after %v, want 200 once a slot freed", resp.StatusCode, d)
+		}
+		for i := 0; i < 2; i++ {
+			if c := <-codes; c != 200 {
+				t.Errorf("shed=%v: a request that had a slot got %d", shed, c)
+			}
+		}
 	}
 }

@@ -102,7 +102,15 @@ Each needs a design pass first: the open questions below are decided in this fil
   - Spec: §4 (`with deadline`), §9 runtime behaviour. Tests: run tests for nesting and expiry,
     errors tests for misuse, an http test where a slow upstream gets cut off.
 
-- [ ] **2.2 Overload that's an error, not a crash.**
+- [x] **2.2 Overload that's an error, not a crash.** — done: `start t(args) else { ... }`
+  (`sq_try_go`), `v, ok := x in a` for every allocating form; `http.shed_load` (off by default)
+  answers 503 + `Retry-After: 1` through a `shed` task pool (16) when serve_conn is full.
+  **Decided:** comma-ok rather than `else` or `!` for allocation (it works in functions without an
+  error result, like handlers, and matches `v, ok := m[k]`); only the expression's own allocations
+  fail softly (they get a negative line; `sq_panic_arena` longjmps to the expression's
+  `_setjmp`), those inside functions it calls still panic, so no callee is left half-done;
+  shedding is opt-in because waiting is the safer default for a lone server. tests:
+  `testdata/run/overload.sq`, `TestShedLoad`. Plan as first written:
   - `start t(args) else { ... }` runs the block instead of waiting when the pool is full. The
     http server uses it to answer `503` with `Retry-After` and close.
   - Allocation that can fail: `x := new(Node) in a else { return ... }` (also `make`, `append`,
@@ -113,7 +121,17 @@ Each needs a design pass first: the open questions below are decided in this fil
     allows recovery without a fault value; `!` composes with existing error handling.
   - Spec: §4, §5, §7 error table. Tests: run tests for both; http test that floods a pool of 2.
 
-- [ ] **2.3 The `program` block as a resource contract.**
+- [x] **2.3 The `program` block as a resource contract.** — done: `shutdown 20s` (ms, s, m;
+  `SQUARK_SHUTDOWN` overrides), the proven worst case linked into the binary (`sq_worst_case`:
+  link, measure, relink), a start-up check of cgroup `memory.max` / v1 `limit_in_bytes`, and
+  `squark build -manifest k8s|systemd`. **Decided:** memory below the worst case refuses to start
+  (status 1) but CPU below `threads N` only warns, since CPU is throttled, not killed; the
+  manifest's memory limit is worst case + max(10%, 16 MiB) until 2.4 counts sockets and C
+  libraries, with requests = limits (Guaranteed QoS) and a stop timeout of grace + 5s; no
+  manifest (and no memory check) with `threads auto`/`workers auto`, whose worst case isn't known.
+  tests: `TestManifest`, `TestShutdownDirective`, `testdata/errors/shutdown.sq`, grammar; checked
+  by hand in Docker: `--memory 32m` refuses a 48.4 MiB program, `--memory 64m` runs it,
+  `SQUARK_IGNORE_LIMITS=1` overrides, `threads 4` under `--cpus 2` warns. Plan as first written:
   ```squark
   program {
       budget 128M
@@ -193,3 +211,6 @@ Each needs a design pass first: the open questions below are decided in this fil
 - 2026-10-17: 1.3 done; section 1 closed. Full suite passes on macOS (with ASan) and Linux
   (Docker; clang, and gcc for the new tests). Next: section 2, whose open questions need deciding
   first. Nothing committed.
+- 2026-10-17: the user delegated section 2's design questions; decisions are recorded per item.
+  Section 1 committed (41ade0c). 2.1 done (218a759; fuzz 5000 clean). 2.2 and 2.3 done: full
+  suite on macOS (ASan) and Linux, fuzz 5000 clean.

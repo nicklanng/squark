@@ -375,6 +375,13 @@ thread waker_started bool
 // active counts this thread's connections being served (not those in the idle set).
 thread active int
 
+// shed_load (false by default) makes a server answer a new connection that finds every
+// serve_conn slot busy with 503 Service Unavailable and Retry-After: 1, then close it, instead of
+// leaving it to wait for a slot. Shedding suits a service with replicas behind a load balancer,
+// where a quick 503 sends the client elsewhere; waiting suits a lone server, where a burst then
+// costs latency rather than errors. Set it before serving (with threads N, on each thread).
+pub thread shed_load = false
+
 // serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
 // Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
@@ -413,8 +420,24 @@ pub fn serve(l net.Listener, h HandlerFunc) -> ! {
 			}
 			return err
 		}
-		start serve_conn(c, id)
+		if shed_load {
+			start serve_conn(c, id) else {
+				start shed(c) else {
+					c.close() // shedding is overloaded too
+				}
+			}
+		} else {
+			start serve_conn(c, id)
+		}
 	}
+}
+
+// shed answers a connection that no serve_conn slot is free for with 503, reading what the client
+// sends for a moment first so that closing doesn't reset the connection before it reads the answer.
+task shed(c net.Conn) pool 16 {
+	var b u8[2048]
+	reject(c, "503 Service Unavailable\r\nRetry-After: 1", b[:])
+	c.close()
 }
 
 // write_error answers a request that won't be served with status and closes the sending side.

@@ -93,6 +93,9 @@ func walkStmt(s Stmt, f func(Node) bool) {
 		}
 	case *GoStmt:
 		we(s.Call)
+		if s.Else != nil {
+			ws(s.Else)
+		}
 	case *DeferStmt:
 		we(s.Call)
 	case *ReturnStmt:

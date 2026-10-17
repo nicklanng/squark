@@ -283,6 +283,7 @@ static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t a
 #endif
 	g->id = sq_self->next_gid++;
 	g->deadline = 0;
+	g->try_jb = NULL;
 }
 
 static void pool_init(sq_pool *p) {
@@ -311,6 +312,27 @@ static void pool_init(sq_pool *p) {
 		g->next = p->free;
 		p->free = g;
 	}
+}
+
+// sq_try_enter makes jb where the arena allocations of a `v, ok := x in a` (passed a negative
+// line) jump when the arena is full; it returns the previous one for sq_try_leave.
+void *sq_try_enter(void *jb) {
+	sq_g *g = sq_self->cur_g;
+	if (!g) return NULL;
+	void *old = g->try_jb;
+	g->try_jb = jb;
+	return old;
+}
+
+void sq_try_leave(void *old) {
+	if (sq_self->cur_g) sq_self->cur_g->try_jb = old;
+}
+
+// sq_try_go is `start f(args) else { ... }`: sq_go if the pool has a free slot, else false.
+bool sq_try_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize) {
+	if (!sq_self->pools[p->index]->free) return false;
+	sq_go(p, entry, args, argsize);
+	return true;
 }
 
 void sq_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize) {
@@ -588,7 +610,7 @@ static SQ_NORETURN void die(const char *file, int line) {
 		err_write("\t");
 		err_write(file);
 		err_write(":");
-		err_int(line);
+		err_int(line < 0 ? -line : line); // negative: an allocation that may fail (sq_try_enter)
 		err_write("\n");
 	}
 	err_write("exit status 2\n");
@@ -649,6 +671,8 @@ void sq_panic_append(int64_t need, int64_t cap, const char *file, int line) {
 }
 
 void sq_panic_arena(sq_arena *a, int64_t need, const char *file, int line) {
+	// line < 0: the allocation of a `v, ok := x in a`, which fails instead (sq_try_enter)
+	if (line < 0 && sq_self->cur_g && sq_self->cur_g->try_jb) _longjmp(*(jmp_buf *)sq_self->cur_g->try_jb, 1);
 	exit_flush();
 	err_write("panic: arena ");
 	err_write(a->name);
@@ -2803,6 +2827,95 @@ static int64_t cgroup_cpu_limit(void) {
 }
 #endif
 
+#if defined(__linux__)
+// cgroup_memory_limit is the smallest memory.max (v2) or memory.limit_in_bytes (v1) from the
+// process's cgroup up to its mount, or 0 for none.
+static int64_t cgroup_mem_dir(const char *dir, bool v2) {
+	char path[4200], buf[64];
+	snprintf(path, sizeof path, v2 ? "%s/memory.max" : "%s/memory.limit_in_bytes", dir);
+	if (!read_small(path, buf, sizeof buf) || buf[0] < '0' || buf[0] > '9') return 0; // "max"
+	const char *p = buf;
+	int64_t v = parse_num(&p);
+	return v >= ((int64_t)1 << 50) ? 0 : v; // v1 writes "no limit" as a huge number
+}
+
+static int64_t cgroup_memory_limit(void) {
+	char cg[4096];
+	if (!read_small("/proc/self/cgroup", cg, sizeof cg)) return 0;
+	int64_t best = 0;
+	for (char *line = cg; line && *line;) {
+		char *next = strchr(line, '\n');
+		if (next) *next++ = 0;
+		char *c1 = strchr(line, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+		if (c2) {
+			*c2 = 0;
+			bool v2 = strcmp(line, "0:") == 0;
+			if (v2 || has_controller(c1 + 1, "memory")) {
+				const char *mount = v2 ? "/sys/fs/cgroup" : "/sys/fs/cgroup/memory";
+				char dir[4096];
+				int n = snprintf(dir, sizeof dir, "%s%s", mount, c2 + 1);
+				size_t base = strlen(mount);
+				if (n > 0 && n < (int)sizeof dir) {
+					for (;;) { // a parent's limit applies to its children
+						size_t len = strlen(dir);
+						while (len > base && dir[len - 1] == '/') dir[--len] = 0;
+						best = min_limit(best, cgroup_mem_dir(dir, v2));
+						char *slash = len > base ? strrchr(dir + base, '/') : NULL;
+						if (!slash) break;
+						*slash = 0;
+					}
+				}
+			}
+		}
+		line = next;
+	}
+	return best;
+}
+#endif
+
+// err_mib writes n bytes as MiB with one decimal ("97.1 MiB").
+static void err_mib(int64_t n) {
+	int64_t tenths = (n * 10 + (1 << 20) - 1) / (1 << 20);
+	err_int(tenths / 10);
+	char d[3] = {'.', (char)('0' + tenths % 10), 0};
+	err_write(d);
+	err_write(" MiB");
+}
+
+// check_limits refuses to start a program whose proven worst case is more memory than its cgroup
+// allows: the kernel would kill it at its busiest instead. It warns, without refusing, when
+// threads N asks for more CPUs than the cgroup's quota (the threads would only be throttled).
+// SQUARK_IGNORE_LIMITS=1 skips both.
+static void check_limits(int64_t threads) {
+#if defined(__linux__)
+	const char *e = getenv("SQUARK_IGNORE_LIMITS");
+	if (e && *e && strcmp(e, "0") != 0) return;
+	int64_t mem = sq_worst_case > 0 ? cgroup_memory_limit() : 0;
+	if (mem > 0 && mem < sq_worst_case) {
+		err_write("squark: this program can use up to ");
+		err_mib(sq_worst_case);
+		err_write(" (its proven worst case), but its cgroup allows ");
+		err_mib(mem);
+		err_write(" (memory.max): raise the memory limit to at least ");
+		err_mib(sq_worst_case);
+		err_write(", or make the program smaller (pool sizes, threads, arenas); SQUARK_IGNORE_LIMITS=1 runs it anyway\n");
+		_exit(1);
+	}
+	int64_t cpus = threads > 0 ? cgroup_cpu_limit() : 0;
+	if (cpus > 0 && threads > cpus) {
+		err_write("squark: warning: ");
+		err_int(threads);
+		err_write(" scheduler threads but the cgroup's CPU limit is ");
+		err_int(cpus);
+		err_write(" (rounded up): they will be throttled; use threads auto, or a CPU limit of ");
+		err_int(threads);
+		err_write("\n");
+	}
+#else
+	(void)threads;
+#endif
+}
+
 static int64_t cpu_count(void) {
 	long c = sysconf(_SC_NPROCESSORS_ONLN);
 	int64_t n = c > 0 ? c : 1;
@@ -3046,6 +3159,7 @@ static int64_t parse_grace(const char *e) {
 
 void sq_stop_gracefully(void) {
 	if (atomic_exchange(&stop_handlers, true)) return;
+	if (sq_shutdown_ns > 0) stop_grace_ns = sq_shutdown_ns;
 	const char *e = getenv("SQUARK_SHUTDOWN");
 	if (e && *e) {
 		int64_t g = parse_grace(e);
@@ -3289,6 +3403,8 @@ int main(int argc, char **argv) {
 	sq_shard0.date_cached_at = -1;
 	g_argc = argc;
 	g_argv = argv;
+	// the whole process tree shares one cgroup: check it once, before any worker starts
+	check_limits(sq_threads > 0 ? sq_threads * (sq_workers > 0 ? sq_workers : 1) : 0);
 	run_workers(); // returns in each worker process (or at once, for a single worker)
 	signal(SIGPIPE, SIG_IGN);
 	struct sigaction sa;

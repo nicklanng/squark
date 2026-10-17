@@ -125,7 +125,7 @@ func (p *parser) memberIdent() *Ident {
 	return p.ident()
 }
 
-var directiveWords = map[string]bool{"budget": true, "link": true, "cflags": true, "ldflags": true, "pool": true, "workers": true, "threads": true}
+var directiveWords = map[string]bool{"budget": true, "link": true, "cflags": true, "ldflags": true, "pool": true, "workers": true, "threads": true, "shutdown": true}
 
 func (p *parser) file(path string) *File {
 	f := &File{Path: path, Pragmas: p.tok.pragmas, Doc: p.tok.doc}
@@ -208,6 +208,20 @@ func (p *parser) directive() *Directive {
 		if p.got(PERIOD) {
 			d.Target += "." + p.ident().Name
 		}
+	}
+	if d.Name == "shutdown" {
+		// shutdown 20s: a number with its unit right after it
+		d.Value = &BasicLit{Kind: p.tok.tok, Lit: p.tok.lit, P: p.tok.pos}
+		if p.tok.tok != INT {
+			p.errorf(p.tok.pos, "shutdown takes a duration: shutdown 20s (or 500ms, 2m)")
+			return d
+		}
+		p.next()
+		if p.tok.tok == IDENT && p.tok.pos == p.prevEnd {
+			d.Unit = p.tok.lit
+			p.next()
+		}
+		return d
 	}
 	d.Value = p.sizeExpr()
 	return d
@@ -1103,7 +1117,12 @@ func (p *parser) callStmt(t Tok, pos Pos) Stmt {
 		return &EmptyStmt{P: pos}
 	}
 	if t == TASK {
-		return &GoStmt{Call: call, P: pos}
+		s := &GoStmt{Call: call, P: pos}
+		if p.tok.tok == ELSE {
+			p.next()
+			s.Else = p.block()
+		}
+		return s
 	}
 	return &DeferStmt{Call: call, P: pos}
 }

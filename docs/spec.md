@@ -50,7 +50,8 @@ always current.
     `deadline`, `select` before `{`.
   - `pool`, `stack`, `blocking` and `preemptible` after a signature; `c"symbol"` after an extern's.
   - `static` after `in` in a signature.
-  - `budget`, `pool`, `workers`, `threads`, `link`, `cflags` and `ldflags` in the file header.
+  - `budget`, `pool`, `workers`, `threads`, `shutdown`, `link`, `cflags` and `ldflags` in the file
+    header.
 - **Member names may be spelled like keywords.** After a `.`, as a struct field, as a method's
   name, as an enum member and as a key in a struct literal, any word is a name: `r.arena`,
   `Pair{in: 1}`, `Kind.int`.
@@ -76,6 +77,7 @@ program {                     // the main package; a library file starts with `m
     pool http.serve_conn 512  // program only: resize a task's pool (pkg.task or task)
     workers 4                 // program only: run 4 processes (or auto: one per CPU); see §9
     threads auto              // program only: a scheduler thread per CPU (or N); see §9
+    shutdown 20s              // program only: a graceful stop's grace period (ms, s or m); see §9
     link "sqlite3"            // link a C library (any package)
     cflags "-I/opt/include"   // C compiler flags for this package's .c files
     ldflags "-L/opt/lib"      // linker flags
@@ -317,7 +319,9 @@ extern fn query(q str) -> int stack 128K blocking c"slow_query" // runs on a hel
   `&self` method can be called on an addressable value (its address is taken) and a `self` method
   on a pointer.
 - Each method's name belongs to its type, so two types can both have a `close`.
-- `pool N`: at most N instances run at once. `start` on a full pool waits for a slot.
+- `pool N`: at most N instances run at once. `start` on a full pool waits for a slot;
+  `start f(x) else { ... }` runs the block instead (and starts nothing), to shed load or answer
+  "busy".
 - `preemptible` on a task: once one of its goroutines has run for a time slice (about 10ms)
   without blocking, it yields at the next loop iteration, in its own code or any function it
   calls, so a long computation doesn't hold up its thread. Those functions get a check at each
@@ -404,7 +408,8 @@ fn build(a arena, n int) -> *Node { return new(Node) in a }   // allocate in the
 - Sizes are constants.
 - Every declared size (a type, an arena, a capacity, the budget) is at most 1T (2^40 bytes or
   elements), and a task pool at most 2^24 goroutines.
-- A full arena panics: `panic: arena scratch is full (capacity 65536, used …, need …)`.
+- A full arena panics: `panic: arena scratch is full (capacity 65536, used …, need …)`, unless the
+  allocation is written `v, ok := x in a` (§5), which gives `ok == false` instead.
 - `append(s, x) in a` grows a slice to twice its capacity (at least what it needs, and at least 4
   elements). A slice that is the arena's latest allocation grows in place; any other is copied,
   and the old elements stay allocated until the arena ends. Size arenas for that, or collect into a
@@ -536,6 +541,7 @@ An unnamed struct type is written
 | expression | squark |
 |---|---|
 | `x in a` | allocations made by `x` come from arena `a`. Lowest precedence: `a + b + c in ar` is one allocation |
+| `v, ok := x in a` | the same, but if `a` can't hold what `x` allocates (`new`, `make`, `append`, `+`, copying conversions), `ok` is false and `v` is zero instead of a panic. Allocations inside the functions `x` calls are theirs, not `x`'s, and still panic. Also `v, ok = x in a` and `if v, ok := x in a; ok { }` |
 | `.name` | the member `name` of the enum the context expects (§4) |
 | `new(T) in a` | zeroed `*T` in the arena. `new(T)` without an arena is an error |
 | `make(T[], n[, c]) in a` | run-time sizes are OK. `make(V[K], n) in a` also works. `make` without an arena is an error, as is `make(T chan)` |
@@ -608,6 +614,7 @@ if v, ok := m[k]; ok { } else { }
 switch x { case 1, 2: ... default: ... }
 select { case v := <-c: ... case d <- 1: ... default: ... }
 start worker(i)            // start a task (rule 7)
+start worker(i) else { }   // ... or run the block if its pool is full
 defer f.close()
 with arena scratch 64K { }
 with deadline 2 * time.second { }
@@ -896,7 +903,8 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 - **Graceful stop.** SIGTERM and SIGINT end a program at once, unless it has called
   `runtime.stop_gracefully()`, as `http.serve` does. Then the first one starts a stop:
   `runtime.stopping()` becomes true, `accept` returns `net.Stopping`, and the program has a grace
-  period (`SQUARK_SHUTDOWN`, such as `20s` or `500ms`; 10s by default) to finish and return from
+  period (`shutdown 20s` in the program header, or `SQUARK_SHUTDOWN` such as `20s` or `500ms`,
+  which overrides it; 10s by default) to finish and return from
   main, after which it exits with status 1. A second signal ends it at once. During the stop,
   every goroutine's blocking I/O (blocked already or later) times out with `net.Timeout` a
   tenth of the grace period before its end, as if under `with deadline`, so a handler stuck on a
@@ -905,6 +913,13 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   keep-alive connections and returns nil from `serve`, so a container's stop (Kubernetes,
   `docker stop`, systemd) drops no request. With `workers N` the supervisor passes the signal on
   and each worker stops this way.
+- **Resource limits at start-up.** On Linux a program checks its cgroup before running any squark
+  code. If the memory limit (`memory.max`, a container's `--memory`, a pod's `limits.memory`) is
+  below the proven worst case, it doesn't start: it exits with status 1 and a message naming
+  both numbers, instead of being killed by the kernel at its busiest. If `threads N` (times
+  `workers N`) is more than the CPU limit, it prints a warning and runs (the threads are only
+  throttled). `SQUARK_IGNORE_LIMITS=1` skips both. With `threads auto` or `workers auto` the
+  worst case isn't known at build time and memory isn't checked.
 - When every goroutine is blocked with nothing to wake it: `fatal error: all goroutines are asleep -
   deadlock!`.
 - `SQ_STACKCHECK=1` reports, per pool, the proven and the deepest observed stack use at exit.
@@ -914,12 +929,19 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 ## 10. Toolchain
 
 ```sh
-squark build [-o out] [-v] [-work dir] [-cpu c] [dir]   # -v prints the memory breakdown (always printed with a budget)
+squark build [-o out] [-v] [-work dir] [-cpu c] [-manifest k8s|systemd] [dir]   # -v prints the memory breakdown (always printed with a budget)
 squark run [-v] [-cpu c] dir [args...]
 squark check [dir]                              # type and lifetime check only
 squark doc [dir] [pkg]                          # API with provenance; `squark doc std` for the stdlib
 squark emit-c [dir]                             # the generated C
 ```
+
+`-manifest k8s` prints, on stdout, a pod spec's `resources` (requests equal to limits, so the
+pod is in the Guaranteed QoS class) and `terminationGracePeriodSeconds`; `-manifest systemd`
+prints `MemoryMax=`, `CPUQuota=` and `TimeoutStopSec=` for a unit. The memory limit is the
+proven worst case plus 10% or 16 MiB, whichever is more, for what squark doesn't count (kernel
+socket buffers, C libraries); the CPU limit is the scheduler threads; the stop timeout is the
+shutdown grace period plus 5 seconds. It needs `threads N`, not `auto`.
 
 `-cpu` (or `SQUARK_CPU` in the environment) picks the CPU to build for: `baseline` (the default:
 every CPU of the architecture, which on x86-64 means SSE2 only), `native` (the building machine's

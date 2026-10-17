@@ -146,6 +146,7 @@ func (w *ptWalker) stmt(s Stmt) {
 		}
 	case *GoStmt:
 		w.expr(s.Call)
+		w.stmt(s.Else)
 	case *DeferStmt:
 		w.expr(s.Call)
 	case *ReturnStmt:

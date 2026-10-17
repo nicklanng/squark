@@ -76,6 +76,7 @@ type Program struct {
 	Workers    int64 // workers N in package main: processes to run (default 1; 0: one per core)
 	Threads    int64 // threads N in package main: scheduler threads per process (default 1; 0: one per core)
 	ThreadsSet bool  // the program has a threads directive: it is written for threads, so SQUARK_THREADS applies
+	Shutdown   int64 // shutdown D in package main: the graceful stop's grace period in ns (0: the default, 10s)
 
 	GoSites   []*GoStmt
 	MakeSites []*CallExpr
@@ -196,7 +197,7 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 					case "ldflags":
 						pkg.LDFlags = append(pkg.LDFlags, fields...)
 					}
-				case "budget", "pool", "workers", "threads":
+				case "budget", "pool", "workers", "threads", "shutdown":
 					pkg.Budgets = append(pkg.Budgets, d)
 				}
 			}

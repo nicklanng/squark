@@ -803,6 +803,7 @@ const max_path_params = 8
 thread read_header_timeout time.Duration
 thread read_timeout time.Duration
 fault TooManyServers 503 "http: too many servers in one process"
+thread shed_load bool
 fault Malformed -40 "http: malformed response"
 fault HeaderTooLarge -41 "http: response header larger than the client's buffer"
 fault BodyTooLarge -42 "http: response body larger than the client's buffer"

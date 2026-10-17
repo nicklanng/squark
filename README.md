@@ -128,7 +128,8 @@ with arena scratch 64K {
 - Package-level arenas (`arena words 8M`) are static and bump-only: a place for data that lives
   forever, such as interned strings.
 - Arenas can be passed in: `fn build(a arena, depth int) -> *Node` allocates in the caller's arena.
-- A full arena panics with its name and size. `a.used()`, `a.left()` and `a.cap()` report usage.
+- A full arena panics with its name and size, unless the allocation is written
+  `p, ok := new(Node) in a`: then `ok` is false. `a.used()`, `a.left()` and `a.cap()` report usage.
 - Every HTTP request gets `r.arena` (16 KiB), which is gone once the response is written.
 
 ### Capacity in types: storage and views
@@ -184,7 +185,7 @@ start serve_conn(c, h)
 ```
 
 Only tasks can be started. The pool is the maximum number running at once: `start` waits for a
-free slot instead of growing. The compiler proves each task's stack size from clang's frame sizes
+free slot instead of growing, and `start f(x) else { ... }` runs the block instead of waiting. The compiler proves each task's stack size from clang's frame sizes
 and the call graph; recursion is banned so that this is possible. `stack N` asserts an upper bound,
 and a program can resize a library's pool with `pool http.serve_conn 512`.
 
@@ -222,7 +223,10 @@ memory: worst case 97.1 MiB of 128.0 MiB budget
   C libraries                 not counted   sqlite3 manages its own memory
 ```
 
-If the worst case is over budget, the build fails and prints this breakdown.
+If the worst case is over budget, the build fails and prints this breakdown. The binary knows its
+worst case too: on Linux it refuses to start in a cgroup (a container, a pod) whose memory limit
+is lower, rather than being killed later at its busiest. `squark build -manifest k8s` prints the
+matching pod `resources` and `terminationGracePeriodSeconds` (`-manifest systemd` for a unit).
 
 ### Errors, `!`, extern C, size literals
 
@@ -355,7 +359,6 @@ docs/design.md      the language design and its rationale
 - Provenance contracts on function types. Indirect calls use whole-program inference instead.
 - One SQLite connection per thread: a slow query no longer stalls its thread, but the thread's
   other goroutines that need the database wait for it (a small pool per thread would let them in).
-- Arena exhaustion panics. A `try`-able allocation form would make it recoverable.
 
 ## License
 
