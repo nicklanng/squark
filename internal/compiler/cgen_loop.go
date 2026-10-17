@@ -151,6 +151,9 @@ func walkStmt(s Stmt, f func(Node) bool) {
 	case *ArenaStmt:
 		we(s.Size)
 		ws(s.Body)
+	case *DeadlineStmt:
+		we(s.D)
+		ws(s.Body)
 	}
 }
 
@@ -293,7 +296,7 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, bounds ...Expr) *loopPlan {
 		case Stmt:
 			stmts++
 			switch s := s.(type) {
-			case *ForStmt, *RangeStmt, *SwitchStmt, *SelectStmt, *LabeledStmt, *GoStmt, *DeferStmt, *ArenaStmt, *SendStmt:
+			case *ForStmt, *RangeStmt, *SwitchStmt, *SelectStmt, *LabeledStmt, *GoStmt, *DeferStmt, *ArenaStmt, *DeadlineStmt, *SendStmt:
 				// an inner loop or a statement with labels or registrations is not copied
 				ok = false
 			case *AssignStmt:

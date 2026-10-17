@@ -46,8 +46,8 @@ always current.
 - **Contextual words** (identifiers elsewhere):
   - `program`, `module` and `use` at the start of a file; `as` in a `use`.
   - `thread` and `shared` before a package-level variable.
-  - `start` before a call (`start f(x)`), `loop` before `{`, `with` before `arena`, `select`
-    before `{`.
+  - `start` before a call (`start f(x)`), `loop` before `{`, `with` before `arena` or
+    `deadline`, `select` before `{`.
   - `pool`, `stack`, `blocking` and `preemptible` after a signature; `c"symbol"` after an extern's.
   - `static` after `in` in a signature.
   - `budget`, `pool`, `workers`, `threads`, `link`, `cflags` and `ldflags` in the file header.
@@ -610,6 +610,7 @@ select { case v := <-c: ... case d <- 1: ... default: ... }
 start worker(i)            // start a task (rule 7)
 defer f.close()
 with arena scratch 64K { }
+with deadline 2 * time.second { }
 ```
 
 - `for ... in` always declares its variables, fresh for each iteration (assigning one doesn't
@@ -634,6 +635,15 @@ with arena scratch 64K { }
   `recover`, and the operating system closes the program's files and sockets).
 - `start f(args)`: `f` must be a task. Arguments must not reference stack or arena memory.
 - Channel sends: the value must not reference stack or arena memory.
+- `with deadline d { ... }` (`d` a `time.Duration`): blocking I/O in the block, and in everything
+  it calls, returns `net.Timeout` once `d` has passed: reads, writes, `accept`, `dial` and name
+  lookups, and so the http client and anything built on `net`. Input already waiting is still
+  read, and an expired deadline (`d <= 0`) fails only the calls that would wait. Blocks nest, and
+  the sooner deadline wins: an inner block can shorten the outer deadline but not extend it.
+  Leaving the block in any way (its end, `return`, `break`, `continue`) restores the outer one.
+  The deadline belongs to the goroutine, so a task started inside the block doesn't inherit it.
+  It doesn't affect `time.sleep`, channel operations (use `select` with `time.after`, and
+  `runtime.deadline_left()` for the time left) or `blocking` C calls, which can't be interrupted.
 - There is no `goto` and no `fallthrough`.
 - Unused variables and unused imports are not errors.
 
@@ -887,7 +897,10 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   `runtime.stop_gracefully()`, as `http.serve` does. Then the first one starts a stop:
   `runtime.stopping()` becomes true, `accept` returns `net.Stopping`, and the program has a grace
   period (`SQUARK_SHUTDOWN`, such as `20s` or `500ms`; 10s by default) to finish and return from
-  main, after which it exits with status 1. A second signal ends it at once. An HTTP server stops
+  main, after which it exits with status 1. A second signal ends it at once. During the stop,
+  every goroutine's blocking I/O (blocked already or later) times out with `net.Timeout` a
+  tenth of the grace period before its end, as if under `with deadline`, so a handler stuck on a
+  slow upstream can still answer. An HTTP server stops
   accepting, finishes the requests in progress (answering `Connection: close`), closes its idle
   keep-alive connections and returns nil from `serve`, so a container's stop (Kubernetes,
   `docker stop`, systemd) drops no request. With `workers N` the supervisor passes the signal on

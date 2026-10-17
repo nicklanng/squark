@@ -101,6 +101,13 @@ func (g *gen) stmt1(s Stmt) {
 		g.declStmt(s.Decl)
 	case *LabeledStmt:
 		g.stmt1(s.Stmt)
+	case *DeadlineStmt:
+		g.lineDirective(s.P)
+		g.open()
+		// the cleanup restores the outer deadline however the block is left (return, break...)
+		g.line("int64_t %s __attribute__((cleanup(sq_deadline_restore))) = sq_deadline_enter((int64_t)(%s));", g.tmp(), g.expr(s.D))
+		g.stmts(s.Body.List)
+		g.close()
 	case *ArenaStmt:
 		v := s.Name.Obj.Var
 		g.lineDirective(s.P)

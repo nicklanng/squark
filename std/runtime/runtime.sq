@@ -2,6 +2,8 @@
 // runs its own copy of main, with its own package variables and goroutines.
 module runtime
 
+use time
+
 // shard returns the index of the calling goroutine's scheduler thread, from 0 to shards()-1.
 pub extern fn shard() -> int stack 1K c"sq_shard_id"
 
@@ -24,3 +26,18 @@ extern fn sys_stopping() -> int stack 1K c"sq_stopping"
 
 // stopping reports whether a graceful stop has begun (see stop_gracefully).
 pub fn stopping() -> bool { return sys_stopping() != 0 }
+
+extern fn sys_deadline_at() -> int stack 1K c"sq_deadline_at"
+
+extern fn sys_nanotime() -> int stack 1K c"sq_nanotime"
+
+// deadline_left returns how long the calling goroutine's blocking I/O has before it times out
+// (with deadline, or a graceful stop), and false if it has no deadline. It is 0 or less once the
+// deadline has passed.
+pub fn deadline_left() -> (time.Duration, bool) {
+	at := sys_deadline_at()
+	if at == 0 {
+		return 0, false
+	}
+	return time.Duration(at - sys_nanotime()), true
+}

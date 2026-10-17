@@ -121,6 +121,15 @@ func (c *Checker) stmt(s Stmt) {
 			c.labels[s.Label.Name] = s.Label.P
 		}
 		c.stmt(s.Stmt)
+	case *DeadlineStmt:
+		if c.valueExpr(s.D, nil) {
+			if !isInteger(s.D.info().T) {
+				c.errorf(s.D.Pos(), "with deadline takes a time.Duration, not %s", s.D.info().T)
+			} else {
+				c.defaultUntyped(s.D)
+			}
+		}
+		c.stmt(s.Body)
 	case *ArenaStmt:
 		n, ok := c.constSize(s.Size, "arena size")
 		if ok && n < 16 {
@@ -916,6 +925,8 @@ func (c *Checker) isTerminating(s Stmt) bool {
 		return c.isTerminatingList(s.List)
 	case *ArenaStmt:
 		return c.isTerminating(s.Body)
+	case *DeadlineStmt:
+		return c.isTerminating(s.Body)
 	case *IfStmt:
 		return s.Else != nil && c.isTerminating(s.Body) && c.isTerminating(s.Else)
 	case *LabeledStmt:
@@ -961,6 +972,8 @@ func hasBreak(s Stmt, target Stmt, top bool) bool {
 	case *BlockStmt:
 		return hasBreakList(s.List, target, top)
 	case *ArenaStmt:
+		return hasBreak(s.Body, target, top)
+	case *DeadlineStmt:
 		return hasBreak(s.Body, target, top)
 	case *IfStmt:
 		if hasBreak(s.Body, target, top) {

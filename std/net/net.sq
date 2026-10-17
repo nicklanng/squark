@@ -45,7 +45,8 @@ extern fn sys_idle_count() -> int stack 8K c"sq_idle_count"
 
 pub fault BadAddress 22 "invalid address (want host:port)"
 
-// Timeout is returned by read_timeout when nothing arrived in time.
+// Timeout is returned by read_timeout when nothing arrived in time, and by every blocking call
+// once the goroutine's deadline (with deadline) has passed.
 pub fault Timeout -20 "i/o timeout"
 
 const sq_e_timeout = 65536 // sq_read_timeout returns -sq_e_timeout for a timeout
@@ -54,6 +55,14 @@ const sq_e_timeout = 65536 // sq_read_timeout returns -sq_e_timeout for a timeou
 pub fault Stopping -23 "stopping: the program got a stop signal"
 
 const sq_e_stop = 65537 // sq_accept returns -sq_e_stop during a graceful stop
+
+// fd_error is the error for a runtime call's negative result: Timeout or an errno.
+fn fd_error(n int) -> error {
+	if n == -sq_e_timeout {
+		return Timeout
+	}
+	return os.errno(-n)
+}
 
 // split_host_port splits "host:port", "[ipv6]:port" or ":port".
 fn split_host_port(addr str) -> (str, int) ! {
@@ -124,6 +133,9 @@ impl Listener {
 		if fd == -sq_e_stop {
 			return Conn{sysfd: -1}, Stopping
 		}
+		if fd == -sq_e_timeout {
+			return Conn{sysfd: -1}, Timeout
+		}
 		if fd < 0 {
 			return Conn{sysfd: -1}, os.errno(-fd)
 		}
@@ -179,6 +191,9 @@ fn dial_proto(ip IP, port int, udp int) -> Conn ! {
 		return Conn{sysfd: -1}, BadAddress
 	}
 	fd := sys_dial(ip.b[:ip.n], port, udp)
+	if fd == -sq_e_timeout {
+		return Conn{sysfd: -1}, Timeout
+	}
 	if fd < 0 {
 		return Conn{sysfd: -1}, os.errno(-fd)
 	}
@@ -188,10 +203,12 @@ fn dial_proto(ip IP, port int, udp int) -> Conn ! {
 impl Conn {
 	pub fn fd(self) -> int { return self.sysfd }
 
+	// read reads into p. Like every blocking call here, it returns Timeout once the goroutine's
+	// deadline (with deadline) has passed.
 	pub fn read(self, p u8[]) -> int ! {
 		n := sys_read(self.sysfd, p)
 		if n < 0 {
-			return 0, os.errno(-n)
+			return 0, fd_error(n)
 		}
 		if n == 0 and len(p) > 0 {
 			return 0, io.EOF
@@ -207,11 +224,8 @@ impl Conn {
 			return self.read(p)
 		}
 		n := sys_read_timeout(self.sysfd, p, int(d))
-		if n == -sq_e_timeout {
-			return 0, Timeout
-		}
 		if n < 0 {
-			return 0, os.errno(-n)
+			return 0, fd_error(n)
 		}
 		if n == 0 and len(p) > 0 {
 			return 0, io.EOF
@@ -227,7 +241,7 @@ impl Conn {
 	pub fn write(self, p u8[]) -> int ! {
 		n := sys_write(self.sysfd, p)
 		if n < 0 {
-			return 0, os.errno(-n)
+			return 0, fd_error(n)
 		}
 		if n < len(p) {
 			return n, io.ShortWrite
@@ -238,7 +252,7 @@ impl Conn {
 	pub fn write_string(self, s str) -> int ! {
 		n := sys_write_str(self.sysfd, s)
 		if n < 0 {
-			return 0, os.errno(-n)
+			return 0, fd_error(n)
 		}
 		if n < len(s) {
 			return n, io.ShortWrite
@@ -250,7 +264,7 @@ impl Conn {
 	pub fn write2(self, a, b u8[]) -> int ! {
 		n := sys_writev2(self.sysfd, a, b)
 		if n < 0 {
-			return 0, os.errno(-n)
+			return 0, fd_error(n)
 		}
 		if n < len(a)+len(b) {
 			return n, io.ShortWrite

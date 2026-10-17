@@ -198,3 +198,116 @@ fn main() {
 		t.Errorf("exit %d, want %d", code, 128+int(syscall.SIGTERM))
 	}
 }
+
+// upstreamServer's handler reads from a slow upstream (os.arg(2), which never answers): with
+// ?deadline it gives up after 100ms by itself; without, only a graceful stop's cap cuts it off.
+// Either way it answers 504.
+const upstreamServer = `program
+
+use http, net, os, time
+
+fn ask_upstream() -> ! {
+	c := net.dial(os.arg(2))!
+	defer c.close()
+	var b u8[16]
+	c.read(b[:])!
+	return nil
+}
+
+fn handle(w *http.ResponseWriter, r *http.Request) {
+	var err error
+	if r.query_value("deadline") != "" {
+		with deadline 100 * time.millisecond {
+			err = ask_upstream()
+		}
+	} else {
+		err = ask_upstream()
+	}
+	if err == net.Timeout {
+		w.text(504, "upstream timed out\n")
+		return
+	}
+	w.text(200, "upstream answered\n")
+}
+
+fn main() {
+	if err := http.listen_and_serve(os.arg(1), handle); err != nil {
+		println("error:", err.message())
+	}
+}
+`
+
+// TestDeadlineUpstream: a handler's slow upstream call returns net.Timeout at its with-deadline,
+// and, with no deadline of its own, before the end of a graceful stop's grace period, so the
+// client still gets an answer.
+func TestDeadlineUpstream(t *testing.T) {
+	up, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer up.Close()
+	go func() { // accept and never answer
+		var held []net.Conn
+		for {
+			c, err := up.Accept()
+			if err != nil {
+				return
+			}
+			held = append(held, c)
+		}
+	}()
+	bin := buildSource(t, upstreamServer)
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := l.Addr().String()
+	l.Close()
+	cmd := exec.Command(bin, addr, up.Addr().String())
+	cmd.Env = append(cmd.Environ(), "SQUARK_SHUTDOWN=1s")
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	get := func(path string) (int, time.Duration) {
+		start := time.Now()
+		for i := 0; ; i++ {
+			resp, err := http.Get("http://" + addr + path)
+			if err == nil {
+				io.ReadAll(resp.Body)
+				resp.Body.Close()
+				return resp.StatusCode, time.Since(start)
+			}
+			if i == 200 {
+				t.Fatalf("GET %s: %v\n%s", path, err, out.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+			start = time.Now()
+		}
+	}
+	if code, d := get("/?deadline=1"); code != 504 || d > 600*time.Millisecond {
+		t.Errorf("with deadline: %d after %v, want 504 after about 100ms", code, d)
+	}
+
+	type res struct {
+		code int
+		d    time.Duration
+	}
+	slow := make(chan res, 1)
+	go func() { c, d := get("/"); slow <- res{c, d} }()
+	time.Sleep(200 * time.Millisecond) // the handler is waiting on the upstream
+	cmd.Process.Signal(syscall.SIGTERM)
+	r := <-slow
+	if r.code != 504 {
+		t.Errorf("during the stop: %d, want 504 (the cap cut the upstream read off)", r.code)
+	}
+	select {
+	case err := <-done:
+		if code := exitCode(err); code != 0 {
+			t.Errorf("exit %d, want 0: %s", code, out.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server didn't exit")
+	}
+}

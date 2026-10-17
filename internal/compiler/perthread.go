@@ -201,6 +201,9 @@ func (w *ptWalker) stmt(s Stmt) {
 		w.stmt(s.Stmt)
 	case *ArenaStmt:
 		w.stmt(s.Body)
+	case *DeadlineStmt:
+		w.expr(s.D)
+		w.stmt(s.Body)
 	}
 }
 

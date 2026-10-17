@@ -1055,6 +1055,16 @@ func (p *parser) stmt() Stmt {
 			s.Size = p.sizeExpr()
 			s.Body = p.block()
 			return s
+		case p.tok.lit == "with" && nt == IDENT && p.peek().lit == "deadline":
+			p.next()
+			p.next()
+			s := &DeadlineStmt{P: pos}
+			old := p.exprLev
+			p.exprLev = -1 // a { ends the expression, as in an if condition
+			s.D = p.expr()
+			p.exprLev = old
+			s.Body = p.block()
+			return s
 		case p.tok.lit == "select" && nt == LBRACE:
 			return p.selectStmt("")
 		case nt == COLON:

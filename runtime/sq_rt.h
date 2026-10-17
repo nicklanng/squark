@@ -291,6 +291,9 @@ extern const bool sq_any_preemptible;
 
 void sq_go(sq_pool *pool, void (*entry)(void *), const void *args, size_t argsize);
 void sq_gosched(void);
+// with deadline: set the goroutine's deadline for the block; the cleanup restores the outer one
+int64_t sq_deadline_enter(int64_t d);
+void sq_deadline_restore(int64_t *saved);
 
 // ---- channels ----
 // A goroutine waiting on a channel queues a waiter: one for a send or receive, one per case of a

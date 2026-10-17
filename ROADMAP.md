@@ -73,7 +73,15 @@ These are what a real deployment hits first. No language changes.
 
 Each needs a design pass first: the open questions below are decided in this file before code.
 
-- [ ] **2.1 Deadlines.** One mechanism for request timeouts, outbound call timeouts and shutdown.
+- [x] **2.1 Deadlines.** — done: `with deadline d { }` (DeadlineStmt; a C cleanup variable restores
+  the outer deadline on every exit), a per-goroutine deadline that `wait_fd` turns into a timer,
+  `net.Timeout` from read, write, accept, dial and lookups, `runtime.deadline_left()`; a
+  graceful stop caps every goroutine's I/O at 90% of the grace period (blocked ones get a timer).
+  **Decided:** channels, `time.sleep` and `blocking` externs are not affected (select with
+  `time.after` and `deadline_left()` cover channels; C calls can't be interrupted); a task started
+  in the block doesn't inherit the deadline; the sooner of nested deadlines wins. tests:
+  `testdata/run/deadline.sq`, `testdata/errors/deadline.sq`, `TestDeadlineUpstream`, grammar.
+  Plan as first written: One mechanism for request timeouts, outbound call timeouts and shutdown.
   ```squark
   with deadline 2s {
       resp := client.get("/stock")!       // net.Timeout once 2s have passed

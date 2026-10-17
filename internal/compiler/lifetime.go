@@ -1476,6 +1476,9 @@ func (l *lifetime) stmt(s Stmt) {
 		}
 	case *LabeledStmt:
 		l.stmt(s.Stmt)
+	case *DeadlineStmt:
+		l.vecOf(s.D)
+		l.stmt(s.Body)
 	case *ArenaStmt:
 		l.depth++
 		v := s.Name.Obj.Var

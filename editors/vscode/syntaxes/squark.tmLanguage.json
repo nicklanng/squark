@@ -328,6 +328,14 @@
           "name": "keyword.control.with.squark"
         },
         {
+          "comment": "with deadline D { ... }",
+          "match": "(?<![\\w)\\]]\\.)\\b(with)\\s+(deadline)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.with.squark" },
+            "2": { "name": "keyword.control.deadline.squark" }
+          }
+        },
+        {
           "comment": "after a signature: pool N, stack 8K",
           "match": "(?<![\\w)\\]]\\.)\\b(pool|stack)\\b(?=\\s+(?:[0-9(]|[A-Za-z_]\\w*\\s*(?:\\{|$|//|c\"|\\b(?:pool|stack|blocking|preemptible)\\b|[(.+\\-*/])))",
           "name": "keyword.other.clause.squark"

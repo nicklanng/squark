@@ -1,0 +1,13 @@
+50ms deadline -> i/o timeout ~50ms
+deadline after the block: false
+2s around 50ms -> i/o timeout ~50ms
+outer deadline back: true true
+a later inner one doesn't extend it: true
+expired, input waiting -> 2 bytes
+expired, nothing waiting -> i/o timeout ~0ms
+sleep isn't cut short: true
+returned from inside: 1 false
+after break: false
+accept: i/o timeout
+read_timeout(1s) under 50ms: i/o timeout
+no deadline, data arrives -> 4 bytes

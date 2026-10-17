@@ -1,0 +1,132 @@
+program
+
+// with deadline: blocking I/O in the block, and in what it calls, returns net.Timeout once the
+// deadline has passed. Blocks nest (the sooner deadline wins), and leaving a block by return,
+// break or the end restores the outer one. time.sleep and input already waiting aren't affected.
+
+use net, runtime, time
+
+thread l net.Listener
+
+// pair returns the two ends of a new connection: the client's, then the server's.
+fn pair() -> (net.Conn, net.Conn) {
+	var b u8[32]
+	c, err := net.dial(str(net.append_host_port(b[:0], "127.0.0.1", l.port())))
+	if err != nil {
+		panic(err)
+	}
+	s, err := l.accept()
+	if err != nil {
+		panic(err)
+	}
+	return c, s
+}
+
+// read_for reads c and reports what happened and roughly how long it took.
+fn read_for(what str, c net.Conn) {
+	var b u8[16]
+	t := time.now()
+	n, err := c.read(b[:])
+	ms := time.since(t).milliseconds()
+	if err != nil {
+		println(what, "->", err.message(), approx(ms))
+	} else {
+		println(what, "->", n, "bytes")
+	}
+}
+
+// approx rounds a time in ms to the nearest 50, so the output doesn't depend on timing noise.
+fn approx(ms int) -> str {
+	switch (ms + 25) / 50 {
+	case 0:
+		return "~0ms"
+	case 1:
+		return "~50ms"
+	case 2:
+		return "~100ms"
+	case 3:
+		return "~150ms"
+	}
+	return "too long"
+}
+
+fn has_deadline() -> bool {
+	_, ok := runtime.deadline_left()
+	return ok
+}
+
+// inner_return leaves its block by returning.
+fn inner_return(c net.Conn) -> int {
+	with deadline 50 * time.millisecond {
+		if has_deadline() {
+			return 1
+		}
+	}
+	return 0
+}
+
+fn main() {
+	ln, err := net.listen("127.0.0.1:0")
+	if err != nil {
+		panic(err)
+	}
+	l = ln
+	c, s := pair()
+
+	with deadline 50 * time.millisecond {
+		read_for("50ms deadline", c)
+	}
+	println("deadline after the block:", has_deadline())
+
+	with deadline 2 * time.second {
+		with deadline 50 * time.millisecond {
+			read_for("2s around 50ms", c)
+		}
+		left, ok := runtime.deadline_left()
+		println("outer deadline back:", ok, left > time.second)
+		with deadline 10 * time.second {
+			left, _ := runtime.deadline_left()
+			println("a later inner one doesn't extend it:", left <= 2*time.second)
+		}
+	}
+
+	s.write_string("hi")
+	c.wait_readable(time.second) // the input has arrived
+	with deadline 0 {
+		read_for("expired, input waiting", c)
+		read_for("expired, nothing waiting", c)
+		t := time.now()
+		time.sleep(60 * time.millisecond)
+		println("sleep isn't cut short:", time.since(t) >= 60*time.millisecond)
+	}
+
+	println("returned from inside:", inner_return(c), has_deadline())
+	for i in 0..3 {
+		with deadline 100 * time.millisecond {
+			if i == 1 {
+				break
+			}
+		}
+	}
+	println("after break:", has_deadline())
+
+	with deadline 50 * time.millisecond {
+		_, err := l.accept()
+		println("accept:", err.message())
+		var b u8[4]
+		_, err = c.read_timeout(b[:], time.second)
+		println("read_timeout(1s) under 50ms:", err.message())
+	}
+	read_for("no deadline, data arrives", deliver(c, s))
+}
+
+// deliver writes to s from another goroutine after a while, and returns c.
+fn deliver(c, s net.Conn) -> net.Conn {
+	start late(s)
+	return c
+}
+
+task late(s net.Conn) pool 1 {
+	time.sleep(80 * time.millisecond)
+	s.write_string("late")
+}

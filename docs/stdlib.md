@@ -299,27 +299,6 @@ fn from_fd(fd int) -> os.File
 // doesn't fit is io.TooLarge (buf then holds its beginning).
 fn read_file(path str, buf u8[]) -> u8[] ! in buf
 
-// Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
-// runs its own copy of main, with its own package variables and goroutines.
-module runtime
-
-// shard returns the index of the calling goroutine's scheduler thread, from 0 to shards()-1.
-extern fn shard() -> int stack 1024 c"sq_shard_id"
-// shards returns the number of scheduler threads in this process (threads N; 1 by default).
-extern fn shards() -> int stack 1024 c"sq_shard_total"
-// gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
-// Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
-extern fn gosched() stack 1024 c"sq_gosched"
-// stop_gracefully makes SIGTERM and SIGINT start a graceful stop instead of ending the program at
-// once: stopping() becomes true, every goroutine blocked in net.Listener.accept (and every later
-// accept) gets net.Stopping, and the program has a grace period (SQUARK_SHUTDOWN, such as 20s or
-// 500ms; 10s by default) to finish its work and return from main. After that it ends with status
-// 1; a second signal ends it at once. http.serve calls it, so a server drains its requests when a
-// container is stopped. Calling it again does nothing.
-extern fn stop_gracefully() stack 1024 c"sq_stop_gracefully"
-// stopping reports whether a graceful stop has begun (see stop_gracefully).
-fn stopping() -> bool
-
 // Package time measures and waits.
 module time
 
@@ -370,6 +349,31 @@ fn after(d time.Duration) -> time.Time chan in static
 // "ns", "us" (or "µs"), "ms", "s", "m" and "h". A malformed, unitless (except "0") or
 // out-of-range string is InvalidDuration.
 fn parse_duration(s str) -> time.Duration !
+
+// Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
+// runs its own copy of main, with its own package variables and goroutines.
+module runtime
+
+// shard returns the index of the calling goroutine's scheduler thread, from 0 to shards()-1.
+extern fn shard() -> int stack 1024 c"sq_shard_id"
+// shards returns the number of scheduler threads in this process (threads N; 1 by default).
+extern fn shards() -> int stack 1024 c"sq_shard_total"
+// gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
+// Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
+extern fn gosched() stack 1024 c"sq_gosched"
+// stop_gracefully makes SIGTERM and SIGINT start a graceful stop instead of ending the program at
+// once: stopping() becomes true, every goroutine blocked in net.Listener.accept (and every later
+// accept) gets net.Stopping, and the program has a grace period (SQUARK_SHUTDOWN, such as 20s or
+// 500ms; 10s by default) to finish its work and return from main. After that it ends with status
+// 1; a second signal ends it at once. http.serve calls it, so a server drains its requests when a
+// container is stopped. Calling it again does nothing.
+extern fn stop_gracefully() stack 1024 c"sq_stop_gracefully"
+// stopping reports whether a graceful stop has begun (see stop_gracefully).
+fn stopping() -> bool
+// deadline_left returns how long the calling goroutine's blocking I/O has before it times out
+// (with deadline, or a graceful stop), and false if it has no deadline. It is 0 or less once the
+// deadline has passed.
+fn deadline_left() -> (time.Duration, bool)
 
 // Package flag parses command-line flags, as Go's flag package does for its default set
 // (flag.CommandLine, which exits on an error). Define flags, call parse, then read them:
@@ -699,6 +703,9 @@ struct Conn {
 
 impl Conn {
 	fn fd(self) -> int
+
+	// read reads into p. Like every blocking call here, it returns Timeout once the goroutine's
+	// deadline (with deadline) has passed.
 	fn read(self, p u8[]) -> int !
 
 	// read_timeout is read that waits at most d for input: if nothing arrives in time it returns 0 and

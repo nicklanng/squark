@@ -204,6 +204,11 @@ static sq_shard sq_shard0;
 static _Thread_local sq_shard *sq_self = &sq_shard0;
 static atomic_int_fast64_t live_shards;
 static atomic_int graceful_signal; // the signal that started a graceful stop (sq_stop_gracefully), or 0
+static _Atomic int64_t stop_cap;   // during a graceful stop: when every goroutine's I/O times out
+// Errors beyond every errno: a timeout (a deadline, or sq_read_timeout's limit) and accept during a
+// graceful stop.
+#define SQ_ETIMEOUT 65536
+#define SQ_ESTOP 65537
 static void stop_shard(void);
 
 static void heap_remove(sq_g *g);
@@ -277,6 +282,7 @@ static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t a
 	g->ctx.rsp = top;
 #endif
 	g->id = sq_self->next_gid++;
+	g->deadline = 0;
 }
 
 static void pool_init(sq_pool *p) {
@@ -799,7 +805,7 @@ static void ready_shared(sq_g *g) {
 
 // drain_remote moves goroutines other shards have woken onto this shard's run queue.
 static void drain_remote(void) {
-	if (atomic_load_explicit(&graceful_signal, memory_order_relaxed) && !sq_self->stop_seen) stop_shard();
+	if (atomic_load_explicit(&stop_cap, memory_order_relaxed) && !sq_self->stop_seen) stop_shard(); // set by the watchdog
 	if (!atomic_load_explicit(&sq_self->remote_pending, memory_order_acquire)) return;
 	atomic_store(&sq_self->remote_pending, false);
 #if !SQ_KQUEUE
@@ -1691,10 +1697,60 @@ static void arm_fd(int fd, int mode) {
 // wait_fd parks the current goroutine until fd is readable or writable. It returns false if fd
 // was closed meanwhile (by another goroutine): the caller must not use the descriptor number again,
 // which may already name another file.
-static bool wait_fd(int fd, int mode) {
+// effective_deadline is when g's blocking I/O times out: its with-deadline, or a graceful stop's
+// cap if that is sooner; 0 for never.
+static int64_t effective_deadline(sq_g *g) {
+	int64_t d = g->deadline, cap = atomic_load_explicit(&stop_cap, memory_order_relaxed);
+	return cap && (!d || cap < d) ? cap : d;
+}
+
+static void timer_add(sq_g *g, int64_t at) {
+	g->wake_at = at;
+	g->heap_index = sq_self->ntimers;
+	sq_self->timer_heap[sq_self->ntimers++] = g;
+	heap_up(g->heap_index);
+}
+
+// disarm_fd drops g's registration on fd for mode after a timer woke it: left armed, it would count
+// g as waiting on fd after it moves on (a goroutine blocked on a channel would then hang instead of
+// being reported as a deadlock), and its late event would be stale.
+static void disarm_fd(sq_g *g, int fd, int mode) {
+	fd_slot *s = slot(fd);
+	sq_g **mine_p = s ? (mode == 'r' ? &s->rd : &s->wr) : NULL;
+	bool mine = !s || *mine_p == g; // else another goroutine has registered on fd since
+	if (s && *mine_p == g) *mine_p = NULL;
+#if SQ_KQUEUE
+	if (mine) kq_change(fd, mode == 'r' ? EVFILT_READ : EVFILT_WRITE, EV_DELETE, NULL); // fails harmlessly if it fired
+#else
+	if (s && (s->rd || s->wr)) {
+		epoll_arm(fd, s); // keep the other direction's registration (another goroutine's)
+	} else if (mine) {
+		struct epoll_event ev = {.events = 0};
+		epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, fd, &ev);
+	}
+#endif
+	if (g->armed) {
+		g->armed = false;
+		sq_self->fd_waiters--;
+	}
+}
+
+// wait_fd parks until fd is ready for mode ('r' or 'w'). It returns 0; -EBADF if fd was closed
+// meanwhile; or -SQ_ETIMEOUT if the goroutine's deadline (with deadline, or a graceful stop's
+// cap) came first.
+static int wait_fd(int fd, int mode) {
+	sq_g *g = sq_self->cur_g;
+	int64_t dl = effective_deadline(g);
+	if (dl && sq_nanotime() >= dl) return -SQ_ETIMEOUT;
 	arm_fd(fd, mode);
+	if (dl) timer_add(g, dl);
 	sq_park();
-	return sq_self->cur_g->wake != WAKE_CLOSED;
+	if (g->wake == WAKE_CLOSED) return -EBADF;
+	if (g->wake == WAKE_TIMER) {
+		disarm_fd(g, fd, mode);
+		return -SQ_ETIMEOUT;
+	}
+	return 0; // the fd event took g off the timer heap
 }
 
 // fd_event delivers a readiness event; stale events (for a goroutine no longer waiting on that
@@ -1823,35 +1879,30 @@ static void release(uint8_t *p, int64_t n) {
 // sq_wait_idle parks until fd is readable (returns 0) or until grace_ns passes first (returns 1).
 // On timeout the read registration is withdrawn; the caller either waits again or hands the fd to
 // the idle set with sq_park_idle, both of which register it anew.
+// with deadline d { ... }: sq_deadline_enter sets the goroutine's deadline to d from now, unless
+// an outer one is sooner, and returns the outer one; the block's cleanup puts it back.
+int64_t sq_deadline_enter(int64_t d) {
+	sq_g *g = sq_self->cur_g;
+	if (!g) return 0;
+	int64_t saved = g->deadline, at = d > 0 ? deadline(d) : sq_nanotime();
+	if (!saved || at < saved) g->deadline = at;
+	return saved;
+}
+
+void sq_deadline_restore(int64_t *saved) {
+	if (sq_self->cur_g) sq_self->cur_g->deadline = *saved;
+}
+
+// sq_deadline_at returns when the calling goroutine's I/O times out (sq_nanotime), or 0 for never.
+int64_t sq_deadline_at(void) { return sq_self->cur_g ? effective_deadline(sq_self->cur_g) : 0; }
+
 int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 	sq_g *g = sq_self->cur_g;
 	arm_fd((int)fd, 'r');
-	g->wake_at = deadline(grace_ns);
-	g->heap_index = sq_self->ntimers;
-	sq_self->timer_heap[sq_self->ntimers++] = g;
-	heap_up(g->heap_index);
+	timer_add(g, deadline(grace_ns));
 	sq_park();
 	if (g->wake == WAKE_FD || g->wake == WAKE_CLOSED) return 0; // closed: the read reports it
-	// Timed out. Left armed, the registration would count g as waiting on fd after it moves on
-	// (a goroutine blocked on a channel would then hang instead of being reported as a deadlock),
-	// and its late event would be stale.
-	fd_slot *s = slot((int)fd);
-	bool mine = !s || s->rd == g; // else another goroutine has registered to read fd since
-	if (s && s->rd == g) s->rd = NULL;
-#if SQ_KQUEUE
-	if (mine) kq_change((int)fd, EVFILT_READ, EV_DELETE, NULL); // fails harmlessly if it fired
-#else
-	if (s && (s->rd || s->wr)) {
-		epoll_arm((int)fd, s); // keep the other direction's registration (another goroutine's)
-	} else if (mine) {
-		struct epoll_event ev = {.events = 0};
-		epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, (int)fd, &ev);
-	}
-#endif
-	if (g->armed) {
-		g->armed = false;
-		sq_self->fd_waiters--;
-	}
+	disarm_fd(g, (int)fd, 'r'); // timed out
 	return 1;
 }
 
@@ -1965,14 +2016,16 @@ static bool read_needs_poll(int fd) {
 int64_t sq_read(int64_t fd, sq_bytes b) {
 	if (sq_self->cur_g && read_needs_poll((int)fd)) {
 		struct pollfd p = {(int)fd, POLLIN, 0};
-		if (poll(&p, 1, 0) == 0 && !wait_fd((int)fd, 'r')) return -EBADF;
+		int w;
+		if (poll(&p, 1, 0) == 0 && (w = wait_fd((int)fd, 'r'))) return w;
 	}
 	for (;;) {
 		ssize_t r = read((int)fd, b.p, (size_t)b.len);
 		if (r >= 0) return r;
 		if (errno == EINTR) continue;
 		if (errno == EAGAIN && sq_self->cur_g) {
-			if (!wait_fd((int)fd, 'r')) return -EBADF;
+			int w = wait_fd((int)fd, 'r');
+			if (w) return w;
 			continue;
 		}
 		return -errno;
@@ -1981,10 +2034,15 @@ int64_t sq_read(int64_t fd, sq_bytes b) {
 
 // sq_read_timeout is sq_read that waits at most timeout_ns for input: it returns -SQ_ETIMEOUT if
 // none arrived by then. (SQ_ETIMEOUT is above every errno, so the caller can tell it apart.)
-#define SQ_ETIMEOUT 65536
-#define SQ_ESTOP 65537 // sq_accept during a graceful stop
 int64_t sq_read_timeout(int64_t fd, sq_bytes b, int64_t timeout_ns) {
 	int64_t deadline = sq_nanotime() + timeout_ns;
+	if (sq_self->cur_g) { // the goroutine's own deadline, if sooner
+		int64_t dl = effective_deadline(sq_self->cur_g);
+		if (dl && dl < deadline) {
+			deadline = dl;
+			timeout_ns = dl - sq_nanotime();
+		}
+	}
 	if (sq_self->cur_g && read_needs_poll((int)fd)) {
 		struct pollfd p = {(int)fd, POLLIN, 0};
 		if (poll(&p, 1, 0) == 0 && (timeout_ns <= 0 || sq_wait_idle(fd, timeout_ns))) return -SQ_ETIMEOUT;
@@ -2013,7 +2071,8 @@ static int64_t write_fd(int64_t fd, const uint8_t *p, int64_t n) {
 		}
 		if (errno == EINTR) continue;
 		if (errno == EAGAIN && sq_self->cur_g) {
-			if (!wait_fd((int)fd, 'w')) return done > 0 ? done : -EBADF;
+			int w = wait_fd((int)fd, 'w');
+			if (w) return done > 0 ? done : w;
 			continue;
 		}
 		return done > 0 ? done : -errno;
@@ -2035,7 +2094,8 @@ int64_t sq_writev2(int64_t fd, sq_bytes a, sq_bytes b) {
 		if (w < 0) {
 			if (errno == EINTR) continue;
 			if (errno == EAGAIN && sq_self->cur_g) {
-				if (!wait_fd((int)fd, 'w')) return done > 0 ? done : -EBADF;
+				int w = wait_fd((int)fd, 'w');
+				if (w) return done > 0 ? done : w;
 				continue;
 			}
 			return done > 0 ? done : -errno;
@@ -2335,14 +2395,15 @@ int64_t sq_accept(int64_t lfd) {
 		if (errno == EAGAIN && sq_self->cur_g) {
 			if (sq_self->naccepting < (int)(sizeof sq_self->accepting / sizeof sq_self->accepting[0]))
 				sq_self->accepting[sq_self->naccepting++] = (int)lfd;
-			bool woken = wait_fd((int)lfd, 'r');
+			int w = wait_fd((int)lfd, 'r');
 			for (int i = 0; i < sq_self->naccepting; i++) {
 				if (sq_self->accepting[i] == (int)lfd) {
 					sq_self->accepting[i] = sq_self->accepting[--sq_self->naccepting];
 					break;
 				}
 			}
-			if (!woken) return sq_self->stop_seen ? -SQ_ESTOP : -EBADF; // stopping, or the listener was closed
+			if (w == -EBADF && sq_self->stop_seen) return -SQ_ESTOP; // woken for a graceful stop
+			if (w) return w; // the listener was closed, or the deadline passed
 			continue;
 		}
 		return -errno;
@@ -2369,7 +2430,11 @@ int64_t sq_dial(sq_bytes ip, int64_t port, int64_t udp) {
 			close(fd);
 			return -e;
 		}
-		(void)wait_fd(fd, 'w'); // fd is new and private: nothing else can close it
+		int w = wait_fd(fd, 'w'); // fd is new and private: nothing else can close it
+		if (w) { // the deadline passed
+			close(fd);
+			return w;
+		}
 		int err = 0;
 		socklen_t len = sizeof err;
 		getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
@@ -2998,9 +3063,18 @@ void sq_stop_gracefully(void) {
 
 int64_t sq_stopping(void) { return atomic_load_explicit(&graceful_signal, memory_order_relaxed) != 0; }
 
-// stop_shard runs on each shard once it sees the stop: its goroutines blocked in accept return.
+// stop_shard runs on each shard once it sees the stop: its goroutines blocked in accept return, and
+// those blocked on other I/O get a timer for the stop's cap (later waits check the cap anyway).
 static void stop_shard(void) {
 	sq_self->stop_seen = true;
+	int64_t cap = atomic_load(&stop_cap);
+	for (int64_t i = 0; cap && i < sq_npools; i++) {
+		sq_pool *p = sq_self->pools[i];
+		for (int64_t k = 0; k < p->count; k++) {
+			sq_g *g = &p->gs[k];
+			if (g->state == G_WAITING && g->wait_fd >= 0 && g->heap_index < 0) timer_add(g, cap);
+		}
+	}
 	while (sq_self->naccepting > 0) {
 		int fd = sq_self->accepting[--sq_self->naccepting];
 		fd_slot *sl = slot(fd);
@@ -3020,6 +3094,9 @@ static void stop_watch(void) {
 	int64_t now = sq_nanotime();
 	if (!began) {
 		began = now;
+		// I/O times out a tenth of the grace period before its end, so handlers waiting on
+		// something slow can still answer
+		atomic_store(&stop_cap, now + stop_grace_ns - stop_grace_ns / 10);
 		for (int64_t i = 0; i < sq_shard_count; i++) {
 			sq_shard *s = atomic_load(&all_shards[i]);
 			if (s) wake_shard(s);

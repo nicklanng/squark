@@ -1,0 +1,12 @@
+program
+
+use time
+
+fn main() {
+	with deadline "soon" { // ERROR "with deadline takes a time.Duration, not"
+	}
+	with deadline 1.5 { // ERROR "with deadline takes a time.Duration"
+	}
+	with deadline 2 * time.second {
+	}
+}

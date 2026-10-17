@@ -407,6 +407,14 @@ type ArenaStmt struct {
 	P    Pos
 }
 
+// DeadlineStmt is `with deadline D { ... }`: blocking I/O in the body (and in what it calls)
+// returns a timeout once D has passed.
+type DeadlineStmt struct {
+	D    Expr
+	Body *BlockStmt
+	P    Pos
+}
+
 type EmptyStmt struct{ P Pos }
 
 func (s *ExprStmt) Pos() Pos    { return s.X.Pos() }
@@ -428,6 +436,7 @@ func (s *DeclStmt) Pos() Pos    { return s.Decl.P }
 func (s *LabeledStmt) Pos() Pos { return s.P }
 func (s *EmptyStmt) Pos() Pos   { return s.P }
 func (s *ArenaStmt) Pos() Pos   { return s.P }
+func (s *DeadlineStmt) Pos() Pos { return s.P }
 func (*ExprStmt) stmt()         {}
 func (*SelectStmt) stmt()       {}
 func (*SendStmt) stmt()         {}
@@ -548,3 +557,4 @@ type File struct {
 }
 
 func (*ArenaStmt) stmt() {}
+func (*DeadlineStmt) stmt() {}
