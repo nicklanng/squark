@@ -1,0 +1,117 @@
+// Package retry tries a call again, with exponential backoff and jitter, as a loop the caller
+// writes (there are no closures to pass the call in):
+//
+//    b := retry.backoff(retry.Policy{})       // 4 tries, waits from 100ms doubling to 5s
+//    while b.next() {                         // the first call returns at once; later ones wait
+//        resp, err = c.get("/stock")
+//        if err == nil or not retry.transient(err) {
+//            break
+//        }
+//    }
+//
+// Waits use full jitter (each a random time up to its ceiling, so clients that failed together
+// don't retry together). A Backoff stops early, rather than wait for nothing, when the wait would
+// run past the goroutine's deadline (with deadline) or a graceful stop has begun.
+module retry
+
+use math/rand, net, runtime, time
+
+extern fn errno_transient(n int) -> int stack 1K c"sq_errno_transient"
+
+// Policy says how often and how long to retry. Its zero value is a sensible default.
+pub struct Policy {
+	pub attempts int           // tries in all, the first included (0: 4)
+	pub base     time.Duration // the first wait's ceiling (0: 100ms); each later one doubles
+	pub max      time.Duration // the longest wait (0: 5s)
+	pub fixed    bool          // wait the ceilings exactly, without jitter (for tests)
+}
+
+// Backoff is one call's retries in progress.
+pub struct Backoff {
+	p        Policy
+	n        int           // tries allowed so far
+	override time.Duration // the next wait, set by after (0: the policy's)
+}
+
+// backoff starts retries under p.
+pub fn backoff(p Policy) -> Backoff {
+	if p.attempts <= 0 {
+		p.attempts = 4
+	}
+	if p.base <= 0 {
+		p.base = 100 * time.millisecond
+	}
+	if p.max <= 0 {
+		p.max = 5 * time.second
+	}
+	return Backoff{p: p}
+}
+
+impl Backoff {
+	// next reports whether to try (again). The first call returns true at once. Each later one
+	// waits first, and returns false instead when the tries are used up, the wait would run past
+	// the goroutine's deadline, or a graceful stop has begun.
+	pub fn next(&self) -> bool {
+		if self.n == 0 {
+			self.n = 1
+			return true
+		}
+		if self.n >= self.p.attempts or runtime.stopping() {
+			return false
+		}
+		d := self.wait(self.n)
+		if self.override > 0 {
+			d = self.override
+			self.override = 0
+		}
+		if left, ok := runtime.deadline_left(); ok and d >= left {
+			return false
+		}
+		time.sleep(d)
+		self.n++
+		return true
+	}
+
+	// wait returns how long to wait before try n+1 (n >= 1): a ceiling of base·2^(n-1), at most
+	// max, and with jitter a random time up to it.
+	pub fn wait(self, n int) -> time.Duration {
+		ceiling := self.p.base
+		for _ in 1..n {
+			if ceiling >= self.p.max / 2 {
+				ceiling = self.p.max
+				break
+			}
+			ceiling *= 2
+		}
+		ceiling = min(ceiling, self.p.max)
+		if self.p.fixed or ceiling <= 0 {
+			return ceiling
+		}
+		return time.Duration(rand.intn(int(ceiling) + 1))
+	}
+
+	// after makes the next wait d instead (a server's Retry-After, say), still within the deadline.
+	pub fn after(&self, d time.Duration) { self.override = d }
+
+	// tries returns how many tries next has allowed so far.
+	pub fn tries(self) -> int { return self.n }
+}
+
+// transient reports whether err is a failure that trying again may get past: a timeout, a name
+// server failing, a refused, reset or unreachable connection, too many connections. Errors that
+// say the request itself is wrong (a bad address, no such host, a closed file) aren't.
+pub fn transient(err error) -> bool {
+	if err == nil {
+		return false
+	}
+	if err == net.Timeout or err == net.NameServer or err == net.TooManyConnections {
+		return true
+	}
+	return err.code() > 0 and errno_transient(err.code()) != 0
+}
+
+// transient_status reports whether an HTTP status says to try again later: 408, 429, 502, 503
+// and 504. (A 429 or 503 may come with Retry-After: pass it to Backoff.after.)
+pub fn transient_status(code int) -> bool {
+	return code == 408 or code == 429 or code == 502 or code == 503 or code == 504
+}

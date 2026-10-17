@@ -1403,6 +1403,61 @@ impl Pool {
 // for replies (a row must fit in it), half for what it sends (a query with its parameters).
 fn connect(url str, buf u8[]) -> postgres.Conn ! in buf
 
+// Package retry tries a call again, with exponential backoff and jitter, as a loop the caller
+// writes (there are no closures to pass the call in):
+//
+//    b := retry.backoff(retry.Policy{})       // 4 tries, waits from 100ms doubling to 5s
+//    while b.next() {                         // the first call returns at once; later ones wait
+//        resp, err = c.get("/stock")
+//        if err == nil or not retry.transient(err) {
+//            break
+//        }
+//    }
+//
+// Waits use full jitter (each a random time up to its ceiling, so clients that failed together
+// don't retry together). A Backoff stops early, rather than wait for nothing, when the wait would
+// run past the goroutine's deadline (with deadline) or a graceful stop has begun.
+module retry
+
+// Policy says how often and how long to retry. Its zero value is a sensible default.
+struct Policy {
+	attempts int
+	base time.Duration
+	max time.Duration
+	fixed bool
+}
+// Backoff is one call's retries in progress.
+struct Backoff {
+	// fields that aren't pub
+}
+
+impl Backoff {
+	// next reports whether to try (again). The first call returns true at once. Each later one
+	// waits first, and returns false instead when the tries are used up, the wait would run past
+	// the goroutine's deadline, or a graceful stop has begun.
+	fn next(&self) -> bool
+
+	// wait returns how long to wait before try n+1 (n >= 1): a ceiling of base·2^(n-1), at most
+	// max, and with jitter a random time up to it.
+	fn wait(self, n int) -> time.Duration
+
+	// after makes the next wait d instead (a server's Retry-After, say), still within the deadline.
+	fn after(&self, d time.Duration)
+
+	// tries returns how many tries next has allowed so far.
+	fn tries(self) -> int
+}
+
+// backoff starts retries under p.
+fn backoff(p retry.Policy) -> retry.Backoff
+// transient reports whether err is a failure that trying again may get past: a timeout, a name
+// server failing, a refused, reset or unreachable connection, too many connections. Errors that
+// say the request itself is wrong (a bad address, no such host, a closed file) aren't.
+fn transient(err error) -> bool
+// transient_status reports whether an HTTP status says to try again later: 408, 429, 502, 503
+// and 504. (A 429 or 503 may come with Retry-After: pass it to Backoff.after.)
+fn transient_status(code int) -> bool
+
 // Package sort sorts slices of any element type in place. less(a, b) reports whether a goes
 // before b. Heap sort: O(n log n) comparisons, no extra memory, no recursion; not stable (equal
 // elements may change order).

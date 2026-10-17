@@ -253,6 +253,13 @@ Each needs a design pass first: the open questions below are decided in this fil
   deadlines, metrics, probes, `-manifest` output and Kubernetes manifests; a script that runs it
   in kind.
 
+- [x] **3.8 Retries with backoff** (asked for on 2026-10-17). — done: `std/retry`: `backoff(Policy)`
+  and `while b.next() { ... }` (no closures, so the loop is the caller's), exponential waits with
+  full jitter, `after` for a Retry-After, stopping early when the wait would pass the deadline or
+  a graceful stop has begun; `transient(err)` (timeouts, refused/reset/unreachable connections,
+  classified in C with the system's own errno numbers) and `transient_status(code)`.
+  `examples/shop` retries a failed dial (never the POST). test: `testdata/run/retry.sq`.
+
 ---
 
 ## Progress log

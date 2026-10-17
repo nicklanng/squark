@@ -11,7 +11,8 @@
 // containers (see README.md there).
 //
 // It shows:
-//   - a call to another service by name (net resolves names through resolv.conf), under a deadline
+//   - a call to another service by name (net resolves names through resolv.conf), under a deadline,
+//     with retries (std/retry) for a connection that fails
 //   - an admin port with /healthz, /readyz and /metrics, and JSON logs
 //   - SIGTERM draining requests (shutdown 20s), and limits the build proves: squark build
 //     -manifest k8s examples/shop prints the pod resources that fit
@@ -23,7 +24,7 @@ program {
 	shutdown 20s
 }
 
-use flag, http, json, log, metrics, net, os, time
+use flag, http, json, log, metrics, net, os, retry, time
 
 // stock_call_limit bounds a call from orders to stock.
 const stock_call_limit = 300 * time.millisecond
@@ -167,14 +168,28 @@ fn place_order(w *http.ResponseWriter, r *http.Request) {
 }
 
 // take_from_stock asks stock to take one of item, within stock_call_limit (dialing, the name
-// lookup included), and returns its status.
+// lookup included), and returns its status. A connection that fails (stock restarting, say) is
+// tried again with backoff, as long as the deadline leaves time; the request itself isn't, since
+// stock may have taken the item before its answer was lost.
 fn take_from_stock(item str, a arena) -> int ! {
 	var buf u8[4K]
 	with deadline stock_call_limit {
-		c := http.dial(stock_addr, buf[:])!
-		resp, err := c.post("/stock/" + item + "/take" in a, "application/json", buf[:0])
-		c.close()
-		return resp.status_code, err
+		b := retry.backoff(retry.Policy{attempts: 3, base: 20 * time.millisecond})
+		err := net.Timeout
+		while b.next() {
+			c, e := http.dial(stock_addr, buf[:])
+			if e != nil {
+				err = e
+				if retry.transient(e) {
+					continue // nothing was sent: safe to try again
+				}
+				break
+			}
+			resp, e := c.post("/stock/" + item + "/take" in a, "application/json", buf[:0])
+			c.close()
+			return resp.status_code, e
+		}
+		return 0, err
 	}
 }
 

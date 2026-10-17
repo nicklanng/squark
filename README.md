@@ -295,6 +295,7 @@ squark is built for services that run under resource limits (a Kubernetes pod, `
 - **Stops that drop nothing.** SIGTERM drains an HTTP server (`shutdown 20s`); `with deadline`
   bounds calls to other services, and during a stop every call is cut off before the grace period
   ends.
+  `std/retry` retries a failing call with jittered backoff, within that deadline.
 - **Overload that degrades.** `start f() else { }`, `v, ok := x in a`, `http.shed_load`, and
   `isolate` tasks: a handler that panics ends only its own connection.
 - **A one-file image.** `squark build -static` links everything, SQLite included, so the image

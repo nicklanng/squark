@@ -2651,6 +2651,19 @@ int64_t sq_dial(sq_bytes ip, int64_t port, int64_t udp) {
 	return fd;
 }
 
+// sq_errno_transient reports whether errno code n is a failure that trying again may get past (a
+// refused or reset connection, an unreachable network, a timeout, a full table), using the
+// system's own numbers, which differ between macOS and Linux.
+int64_t sq_errno_transient(int64_t n) {
+	switch (n) {
+	case ECONNREFUSED: case ECONNRESET: case ECONNABORTED: case EPIPE: case ETIMEDOUT:
+	case EHOSTUNREACH: case ENETUNREACH: case ENETDOWN: case EHOSTDOWN: case EAGAIN:
+	case EADDRNOTAVAIL: case EMFILE: case ENFILE: case ENOBUFS: case EINTR:
+		return 1;
+	}
+	return 0;
+}
+
 // sq_random_u64 returns 64 bits from the operating system's random source (for DNS query IDs).
 uint64_t sq_random_u64(void) {
 	uint64_t v = 0;

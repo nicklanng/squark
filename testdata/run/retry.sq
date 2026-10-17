@@ -1,0 +1,62 @@
+program
+
+// std/retry: exponential waits up to the policy's max (exact with fixed, a random time up to the
+// ceiling with jitter), the tries a loop gets, after (a server's Retry-After), stopping early
+// rather than wait past the goroutine's deadline, and which errors and statuses are transient.
+
+use net, os, retry, time
+
+fn main() {
+	ms := time.millisecond
+	b := retry.backoff(retry.Policy{base: 10 * ms, max: 50 * ms, fixed: true})
+	for n in 1..7 {
+		print(b.wait(n).milliseconds(), " ")
+	}
+	println()
+
+	j := retry.backoff(retry.Policy{base: 10 * ms, max: 50 * ms})
+	in_range := true
+	varied := false
+	for _ in 0..200 {
+		w := j.wait(3)
+		in_range = in_range and w >= 0 and w <= 40*ms
+		varied = varied or w != j.wait(3)
+	}
+	println("jitter within the ceiling:", in_range, "and varied:", varied)
+
+	// a loop that fails every time: 3 tries, waiting 20ms then 40ms
+	start := time.now()
+	l := retry.backoff(retry.Policy{attempts: 3, base: 20 * ms, fixed: true})
+	tries := 0
+	while l.next() {
+		tries++
+	}
+	took := time.since(start)
+	println("tries:", tries, l.tries(), "waited 60ms:", took >= 60*ms and took < 300*ms)
+
+	// after: the next wait is the server's
+	a := retry.backoff(retry.Policy{base: 500 * ms, fixed: true})
+	a.next()
+	a.after(15 * ms)
+	start = time.now()
+	a.next()
+	println("after 15ms:", time.since(start) < 400*ms)
+
+	// a deadline sooner than the wait: no point waiting
+	d := retry.backoff(retry.Policy{base: 200 * ms, fixed: true})
+	with deadline 50 * ms {
+		d.next()
+		start = time.now()
+		println("past the deadline:", d.next(), time.since(start) < 100*ms)
+	}
+
+	var ab u8[32]
+	l2, _ := net.listen("127.0.0.1:0")
+	addr := str(net.append_host_port(ab[:0], "127.0.0.1", l2.port()))
+	l2.close()
+	_, refused := net.dial(addr)
+	_, missing := os.open("/nonexistent/squark")
+	println("transient: timeout", retry.transient(net.Timeout), "refused", retry.transient(refused),
+		"no file", retry.transient(missing), "no host", retry.transient(net.NoSuchHost), "nil", retry.transient(nil))
+	println("statuses:", retry.transient_status(503), retry.transient_status(429), retry.transient_status(404), retry.transient_status(500))
+}

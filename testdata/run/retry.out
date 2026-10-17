@@ -1,0 +1,7 @@
+10 20 40 50 50 50 
+jitter within the ceiling: true and varied: true
+tries: 3 3 waited 60ms: true
+after 15ms: true
+past the deadline: false true
+transient: timeout true refused true no file false no host false nil false
+statuses: true true false false
