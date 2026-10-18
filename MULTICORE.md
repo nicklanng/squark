@@ -10,7 +10,7 @@ Stage 2 is the real design. Stage 3 removes the other single-thread bottleneck (
 Go-style M:N scheduling is deliberately out of scope (see the end).
 
 **What makes this tractable.** The lifetime checker already forbids `go` arguments and channel
-sends that reference stack or arena memory, so the only memory goroutines can share is static
+sends that reference stack or arena memory, so the only memory tasks can share is static
 (package-level) memory. That is exactly the surface where data races could happen, and the
 compiler can already see it.
 
@@ -46,7 +46,7 @@ and Linux.
 ## Stage 2: a thread per core, sharing nothing
 
 One process, N scheduler threads (shards). Each shard is today's runtime: its own run queue,
-timers, poller, goroutine pools and idle set. Goroutines never move between shards, so within a
+timers, poller, task pools and idle set. Tasks never move between shards, so within a
 shard rule 10 still holds and no locks are needed. Shards talk only through cross-shard channels.
 
 Design decisions to settle first (record the answers here):
@@ -80,7 +80,7 @@ Design decisions to settle first (record the answers here):
 Implementation steps (each lands with the full suite passing on macOS and Linux):
 
 - [x] 2.1 Runtime state into `struct sq_shard`, reached through one thread-local pointer, with a
-      single shard: scheduler context, current goroutine, run queue, counters, poller fd and
+      single shard: scheduler context, current task, run queue, counters, poller fd and
       change list, timer heap, idle set, output buffer, `fd_read_kind`, the HTTP date cache. No
       behaviour change; check the benchmarks for the cost of thread-local access. — done: `sq_shard` + `_Thread_local sq_shard *sq_self`; notes HTTP throughput unchanged on macOS (224k/201k/153k vs 226k/202k/153k)
 - [x] 2.2 Generated code: package variables (and package arenas, map/channel storage) into a
@@ -90,18 +90,18 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
       by each function that uses globals; `sq_globals_size`/`sq_globals_set` exported for 2.4.
       Error constants became shared `static const` values (and taking their address is now an
       error: it allowed writing to a constant). HTTP throughput on macOS within noise of before.
-- [x] 2.3 Goroutine pools per shard: descriptors, goroutine tables and stacks set up per shard at
+- [x] 2.3 Task pools per shard: descriptors, task tables and stacks set up per shard at
       start (mmap, so `threads auto` works); generated code names pools by index. — done: generated pools are templates with an `index`; each shard
       has its own copies (shard 0 uses the templates), and `sq_go` maps the template to the current
       shard's pool.
 - [x] 2.4 `threads N` (or `auto`) in package `main`: start N shard threads, each with its own
       signal stack, running `main`. The process exits when every shard's `main` has returned, or
-      at the first panic. Budget × N (with `workers`, × workers × threads). — done: `shard_new` lays out a shard in one mmap (pools, goroutine
+      at the first panic. Budget × N (with `workers`, × workers × threads). — done: `shard_new` lays out a shard in one mmap (pools, task
       tables, timer heap, package variables, signal stack); the main thread runs shard 0. A shard
-      whose `main` returns keeps serving its goroutines until every shard's `main` has returned
+      whose `main` returns keeps serving its tasks until every shard's `main` has returned
       (stopping it at once stranded connections queued on its socket). `runtime.Shard()` and
       `runtime.Shards()` added. The stack proof now lists the scheduler-only runtime functions
-      explicitly (inlining had moved netpoll's 8 KiB frame into the goroutine budget).
+      explicitly (inlining had moved netpoll's 8 KiB frame into the task budget).
 - [x] 2.5 Listening: `SO_REUSEPORT` per shard on Linux; on macOS shards share one listening socket
       (a process-wide table keyed by address), since its `SO_REUSEPORT` doesn't balance. — done, both OSes, through a process-wide table: a shard listens
       on an address once (a second Listen is "address in use", as with one thread; otherwise on
@@ -111,8 +111,8 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
       × N — done: `TestThreads` (spread, per-shard counters exact under 64 concurrent clients,
       listen rules, SIGTERM, panic), `TestNoHeapAtRuntime` with threads 1 and 4, error tests.
 - [x] 2.6b The runtime under ThreadSanitizer. Needs fiber annotations
-      (`__tsan_switch_to_fiber`) around goroutine context switches, or TSan misreads them. — done:
-      fiber per goroutine slot plus one per scheduler, switched at park/yield/exit and in
+      (`__tsan_switch_to_fiber`) around task context switches, or TSan misreads them. — done:
+      fiber per task slot plus one per scheduler, switched at park/yield/exit and in
       `schedule` (compiled out of normal builds); `Options.Sanitize`; `TestThreadsRace` serves
       concurrent load on 4 shards with no reports on macOS and Linux, and reports races when the
       shards are made to share package variables.
@@ -126,7 +126,7 @@ Implementation steps (each lands with the full suite passing on macOS and Linux)
       shard (same machinery as error constants). Writes, `&`, slicing and pointer-method calls on
       them (or their elements/fields) are errors. Done: `testdata/run/const_composite.sq`,
       `testdata/errors/const_composite.sq`, `const_data.sq`; builds with clang and gcc.
-- [x] 2.8b `shared var x = expr`: initialized once, on shard 0 in its main goroutine (so the
+- [x] 2.8b `shared var x = expr`: initialized once, on shard 0 in its main task (so the
       initializer may do I/O) before the other shards start; read-only afterwards with the same
       rules as constants. Types limited to what can't be written through (numbers, strings, bools,
       errors, arrays and structs of them), since there's no way to freeze what a slice or pointer
@@ -147,30 +147,30 @@ none under TSan; throughput close to stage 1 (see 2.7).
 
 ## Stage 3: blocking C calls off the scheduler
 
-A blocking C call (a SQLite query, file I/O on a slow disk) stops every goroutine on its thread.
+A blocking C call (a SQLite query, file I/O on a slow disk) stops every task on its thread.
 
 - [x] Mark externs that may block (e.g. `extern ... blocking`), and run those calls on a small
-      pool of helper threads while the calling goroutine parks. — `extern ... stack N blocking`:
-      the call site calls a generated wrapper that packs arguments on the goroutine's stack and
+      pool of helper threads while the calling task parks. — `extern ... stack N blocking`:
+      the call site calls a generated wrapper that packs arguments on the task's stack and
       calls `sq_blocking`; 2 helper threads per scheduler thread (stack proven from the largest
-      blocking extern, counted in the memory report) run it and wake the goroutine through its
-      shard's remote queue (2.9). `sq_gmutex`: a goroutine lock for C state shared across a wait.
+      blocking extern, counted in the memory report) run it and wake the task through its
+      shard's remote queue (2.9). `sq_gmutex`: a task lock for C state shared across a wait.
 - [x] Mark the SQLite shim's calls; measure the notes mix scenario before and after. — **first
       attempt (every Step on a helper) was a disaster**: threads 3 note 577k → 76k req/s, mix
       207k → 8.6k: each statement held its connection across two thread handoffs, serializing the
       thread. **Now Step runs inline with a busy handler that declines to wait; only a Step that
       found the database locked runs again on a helper** (safe: SQLite gave up at a lock it would
       have waited for). Open/Exec/Prepare/Finalize/Close always run on a helper. Each connection
-      has a goroutine lock held from a statement's first Bind/Step to its Reset. Linux, 6 cores
+      has a task lock held from a statement's first Bind/Step to its Reset. Linux, 6 cores
       shared with the load generator: threads 3 mix 207k → 249k req/s and p99 4.47 → 1.99 ms;
       workers 3 mix 205k → 284k, p99 4.15 → 1.91 ms; one process 165k → 173k; health and note
       unchanged (Go: 95k mix).
-- [x] Tests: a slow blocking call doesn't delay other goroutines; the no-heap test still passes.
+- [x] Tests: a slow blocking call doesn't delay other tasks; the no-heap test still passes.
       — `TestBlocking` (testdata/blocking: two 300ms calls overlap and a ticker keeps ticking; 1
-      and 4 threads, TSan), `TestSQLiteThreads` (4 threads × 8 goroutines insert and read back on
+      and 4 threads, TSan), `TestSQLiteThreads` (4 threads × 8 tasks insert and read back on
       one database; fails with the connection lock removed; TSan), no-heap test (uses SQLite).
-- [x] Slow statements (not just lock waits) — **decided 2026-10-14: move the goroutine mid-call.**
-      `sq_detach()` / `sq_reattach()` in `sq_rt.h`: C code that turns out slow moves its goroutine
+- [x] Slow statements (not just lock waits) — **decided 2026-10-14: move the task mid-call.**
+      `sq_detach()` / `sq_reattach()` in `sq_rt.h`: C code that turns out slow moves its task
       (its stack, mid-call) to a helper thread and back; the scheduler hands it over once its
       context is saved. SQLite calls it from its progress handler (over 100µs, checked every 1000
       VM steps) and busy handler (then retries the lock at once and backs off from 50µs), which
@@ -182,7 +182,7 @@ A blocking C call (a SQLite query, file I/O on a slow disk) stops every goroutin
 
 ## Out of scope: Go-style M:N
 
-Goroutines migrating between threads with work stealing would need locks or atomics in every
+Tasks migrating between threads with work stealing would need locks or atomics in every
 channel, map and pool, user-visible mutexes and a memory model, and a race detector. It removes
 rule 10 and changes the language's character. Revisit only if parallel computation over shared
 in-memory data becomes a goal; explicit constructs (a parallel `for` over arrays) would be the

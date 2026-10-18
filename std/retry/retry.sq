@@ -11,7 +11,7 @@
 //
 // Waits use full jitter (each a random time up to its ceiling, so clients that failed together
 // don't retry together). A Backoff stops early, rather than wait for nothing, when the wait would
-// run past the goroutine's deadline (with deadline) or a graceful stop has begun.
+// run past the task's deadline (with deadline) or a graceful stop has begun.
 module retry
 
 use math/rand, net, runtime, time
@@ -50,7 +50,7 @@ pub fn backoff(p Policy) -> Backoff {
 impl Backoff {
 	// next reports whether to try (again). The first call returns true at once. Each later one
 	// waits first, and returns false instead when the tries are used up, the wait would run past
-	// the goroutine's deadline, or a graceful stop has begun.
+	// the task's deadline, or a graceful stop has begun.
 	pub fn next(&self) -> bool {
 		if self.n == 0 {
 			self.n = 1

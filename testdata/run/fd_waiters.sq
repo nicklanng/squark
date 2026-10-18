@@ -1,7 +1,7 @@
 program
 
-// Goroutines waiting on descriptors: Close wakes a blocked Read (and closing a listener a blocked
-// Accept) with an error instead of leaving them parked forever; and one goroutine can read a
+// Tasks waiting on descriptors: Close wakes a blocked Read (and closing a listener a blocked
+// Accept) with an error instead of leaving them parked forever; and one task can read a
 // socket while another is blocked writing to it (epoll used to keep only the last waiter).
 
 use net, strconv, time

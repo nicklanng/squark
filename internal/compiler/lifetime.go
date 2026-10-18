@@ -525,11 +525,6 @@ func (l *lifetime) function(fn *Func) {
 			rv[k] = n
 		}
 		l.results = append(l.results, rv)
-		// with deferred calls, every return goes through the named results (as in Go), and a
-		// deferred call may change them after the return statement
-		if r := fn.Sig.Results[i]; r.Name != "" && len(fn.Defers) > 0 && HasRefs(r.Type) {
-			l.assign(rv, l.varVec(r), &why{r.Pos, "returned (deferred calls can change it)", wStore})
-		}
 	}
 	l.depth = 2
 	l.stmts(fn.Decl.Body.List)
@@ -677,9 +672,9 @@ func (l *lifetime) report(u, v int, prev map[int]pathStep) {
 		if how != "" {
 			msg += " (" + how + ")"
 		}
-		msg += ": it would outlive its storage (Go would move it to the heap)"
+		msg += ": it would outlive its storage"
 	case dst.rank == 1 && viaResult && viaParam < 0:
-		msg = fmt.Sprintf("cannot return %s: it lives in this function's stack frame (Go would move it to the heap); have the caller pass in the storage instead", strings.TrimPrefix(what, "a "))
+		msg = fmt.Sprintf("cannot return %s: it lives in this function's stack frame; have the caller pass in the storage instead", strings.TrimPrefix(what, "a "))
 	case dst.rank == 1:
 		param := "a parameter"
 		if viaParam >= 0 {
@@ -1365,7 +1360,7 @@ func (l *lifetime) stmt(s Stmt) {
 	case *SendStmt:
 		l.vecOf(s.Chan)
 		if v := l.vecOf(s.Value); v != nil {
-			l.requireAll(v, l.static, &why{s.Value.Pos(), "sent on a channel, which shares it with other goroutines", wStore})
+			l.requireAll(v, l.static, &why{s.Value.Pos(), "sent on a channel, which shares it with other tasks", wStore})
 		}
 	case *IncDecStmt:
 		if _, ok := l.mapStore(s.X); !ok {
@@ -1551,7 +1546,7 @@ func (l *lifetime) goStmt(s *GoStmt) {
 			continue
 		}
 		what := describeSlot(exprString(call.Fun), i, sig.Recv != nil)
-		l.requireAll(sl, l.static, &why{call.P, "passed as " + what + " to a new goroutine, which can outlive this function", wStore})
+		l.requireAll(sl, l.static, &why{call.P, "passed as " + what + " to a new task, which can outlive this function", wStore})
 	}
 	l.applyCall(call, sig, slots)
 }
@@ -1585,11 +1580,6 @@ func (l *lifetime) returnStmt(s *ReturnStmt) {
 		return
 	}
 	if len(s.Results) == 0 {
-		for i, r := range l.fn.Sig.Results {
-			if r.Name != "" && HasRefs(r.Type) {
-				l.assign(l.results[i], l.varVec(r), &why{s.P, "returned", wStore})
-			}
-		}
 		return
 	}
 	if len(s.Results) == 1 && len(l.results) > 1 {

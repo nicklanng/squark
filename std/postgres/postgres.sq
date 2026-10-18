@@ -12,7 +12,7 @@
 //    }
 //    rows.err()!
 //
-// A Conn is used by one goroutine at a time; a Pool shares a few between a thread's goroutines.
+// A Conn is used by one task at a time; a Pool shares a few between a thread's tasks.
 // Every call is blocking I/O on the poller, so with deadline bounds it, and a graceful stop's cap
 // cuts it off.
 module postgres
@@ -842,7 +842,7 @@ fn b64_decode(dst u8[], s str) -> (u8[], bool) in dst {
 
 // ---- a pool ----
 
-// Pool shares up to 16 connections to one server between a thread's goroutines: get takes one
+// Pool shares up to 16 connections to one server between a thread's tasks: get takes one
 // (connecting it if needed, waiting while all are in use), put gives it back. Declare it per
 // thread (`thread db postgres.Pool`) and init it in main.
 pub struct Pool {
@@ -867,7 +867,7 @@ impl Pool {
 		}
 	}
 
-	// get takes a connection, waiting while all n are in use (within the goroutine's deadline:
+	// get takes a connection, waiting while all n are in use (within the task's deadline:
 	// net.Timeout once it has passed), and connects it if it isn't.
 	pub fn get(&self) -> *Conn ! in self {
 		i := 0

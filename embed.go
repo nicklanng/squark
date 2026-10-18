@@ -5,3 +5,8 @@ import "embed"
 
 //go:embed runtime std
 var Files embed.FS
+
+// Tour is the squark tour (squark tour): its web page and lessons.
+//
+//go:embed tour
+var Tour embed.FS

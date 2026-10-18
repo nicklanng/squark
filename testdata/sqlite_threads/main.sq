@@ -3,9 +3,9 @@ program {
 }
 
 // Test program for TestSQLiteThreads (internal/driver): four scheduler threads, each with its own
-// connection to one database and eight goroutines sharing it. Every goroutine inserts rows and reads
+// connection to one database and eight tasks sharing it. Every task inserts rows and reads
 // each back by its rowid. Writers on four connections find the database locked, so their steps
-// wait on helper threads while other goroutines queue for the connection; if two goroutines ever
+// wait on helper threads while other tasks queue for the connection; if two tasks ever
 // interleaved on a connection, a rowid or value would come back wrong.
 
 use os, runtime, sqlite

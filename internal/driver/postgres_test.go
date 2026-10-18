@@ -10,7 +10,7 @@ import (
 // TestPostgres runs std/postgres against a real server: SQUARK_PG_URL names one (scripts/
 // test-postgres.sh starts one in Docker, with SCRAM-SHA-256 authentication), and the test is
 // skipped without it. It covers authentication, DDL, parameters (text with quotes, booleans,
-// NULL), rows, the affected count, a server error's SQLSTATE, a pool shared by goroutines, and a
+// NULL), rows, the affected count, a server error's SQLSTATE, a pool shared by tasks, and a
 // query cut off by with deadline.
 func TestPostgres(t *testing.T) {
 	url := os.Getenv("SQUARK_PG_URL")

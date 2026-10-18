@@ -9,7 +9,7 @@
 //
 // writes {"time":"2026-10-17T09:30:00.123Z","level":"info","msg":"served","path":"/x",
 // "status":200,"took":0.0021}. An entry is a value on the caller's stack (up to 1 KiB of JSON), so
-// goroutines that log at the same time can't mix their lines; it never allocates, and a line too
+// tasks that log at the same time can't mix their lines; it never allocates, and a line too
 // long for the entry keeps the fields that fit and ends with "truncated":true. Entries below
 // log.level cost a branch per call.
 module log

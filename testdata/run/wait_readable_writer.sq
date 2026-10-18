@@ -1,6 +1,6 @@
 program
 
-// A WaitReadable that times out withdraws only its own registration: another goroutine blocked
+// A WaitReadable that times out withdraws only its own registration: another task blocked
 // writing the same connection still wakes when the peer drains it (epoll keeps one registration
 // per descriptor for both directions, and the timeout used to clear it whole).
 

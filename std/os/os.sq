@@ -116,8 +116,7 @@ impl File {
 	}
 
 	// read_full reads into p until it is full, returning how many bytes it read. If the file ends
-	// first, the error is io.EOF if nothing was read and io.UnexpectedEOF otherwise, as with Go's
-	// io.read_full.
+	// first, the error is io.EOF if nothing was read and io.UnexpectedEOF otherwise.
 	pub fn read_full(self, p u8[]) -> int ! {
 		n := 0
 		while n < len(p) {

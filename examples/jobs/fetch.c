@@ -1,6 +1,6 @@
 // A stand-in for a slow I/O call (a disk read, a query): it waits, then fills the caller's buffer
 // with bytes that depend only on the record id. Declared `blocking` in main.sq, so it runs on a
-// helper thread and the scheduler thread keeps running other goroutines meanwhile.
+// helper thread and the scheduler thread keeps running other tasks meanwhile.
 #include <stdint.h>
 #include <unistd.h>
 

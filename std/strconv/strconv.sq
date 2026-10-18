@@ -31,8 +31,8 @@ pub fn append_uint(dst u8[], v u64) -> u8[] {
 	return append(dst, tmp[i:]...)
 }
 
-// append_int_base appends v in base 2 to 36 (lower-case letters for digits over 9), as Go's
-// strconv.append_int(dst, v, base) does. Base 16 gives hex.
+// append_int_base appends v in base 2 to 36 (lower-case letters for digits over 9, a '-' for a
+// negative v). Base 16 gives hex.
 pub fn append_int_base(dst u8[], v int, base int) -> u8[] in dst {
 	if v < 0 {
 		dst = append(dst, '-')
@@ -92,8 +92,8 @@ pub fn format_int(buf u8[], v int) -> str {
 	return str(append_int(buf[:0], v))
 }
 
-// append_float appends v with prec digits after the decimal point, like Go's
-// strconv.append_float(dst, v, 'f', prec, 64): the exact binary value rounded half to even. The
+// append_float appends v with prec digits after the decimal point and no exponent: the exact
+// binary value rounded half to even. The
 // result can be long (1e300 has 301 digits), so size dst for it. prec -1 gives the shortest digits
 // that read back to v, in plain notation for 1e-6 <= |v| < 1e21 and exponent notation outside
 // (1.5e+300), as JSON and JavaScript write numbers; other negative precs count as 0.
@@ -249,8 +249,8 @@ pub fn atoi(s str) -> int ! {
 	return parse_int(s, 10)
 }
 
-// parse_int parses an integer in the given base (2 to 36). Unlike Go there is no base 0, so no
-// prefixes and no '_' separators.
+// parse_int parses an integer, with an optional sign, in the given base (2 to 36). There are no
+// prefixes (0x...) and no '_' separators.
 pub fn parse_int(s str, base int) -> int ! {
 	if base < 2 or base > 36 {
 		return 0, Base

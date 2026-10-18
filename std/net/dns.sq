@@ -44,7 +44,7 @@ thread conf_at time.Time
 thread conf_loaded bool
 
 // file_buf is the line buffer for reading resolv.conf and the hosts file. Reading a regular file
-// never parks, so the goroutines of a thread can't use it at the same time.
+// never parks, so the tasks of a thread can't use it at the same time.
 thread file_buf u8[4K]
 
 // lookup_ip returns host's addresses as a view of out, IPv4 ones first. An IP literal is itself.
@@ -171,7 +171,7 @@ fn current_config() -> Config {
 }
 
 // load_config reads a resolv.conf. Without one, or without a nameserver line in it, the name
-// servers are 127.0.0.1 and ::1, as in Go.
+// servers are 127.0.0.1 and ::1.
 fn load_config(path str) -> Config {
 	var c Config
 	c.ndots = 1

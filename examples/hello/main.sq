@@ -3,7 +3,7 @@
 //	squark run examples/hello
 //
 // It shows:
-//   - structs, pointer-receiver methods and variadic functions, as in Go
+//   - structs, pointer-receiver methods and variadic functions
 //   - a vector (int[..16]): fixed storage with a length, filled with push and viewed as a slice
 //   - a map with a declared capacity, ready to use without make
 //   - range over a string, which yields runes

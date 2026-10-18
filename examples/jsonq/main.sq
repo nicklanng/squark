@@ -93,10 +93,10 @@ impl Scanner {
 		}
 	}
 
-	// next returns the next element and the line it starts on, or ok == false after the final ']'.
-	fn next(&self) -> (rec u8[], line int, ok bool, err error) {
+	// next returns the next element and the line it starts on, and false after the final ']'.
+	fn next(&self) -> (u8[], int, bool) ! {
 		self.space()
-		line = self.line
+		line := self.line
 		if self.pos < len(self.data) and self.data[self.pos] == ']' {
 			self.pos++
 			self.space()
@@ -128,7 +128,7 @@ impl Scanner {
 		if self.pos >= len(self.data) {
 			return nil, line, false, Truncated
 		}
-		rec = self.data[start:self.pos]
+		rec := self.data[start:self.pos]
 		if self.data[self.pos] == ',' {
 			self.pos++
 		}

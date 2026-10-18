@@ -180,10 +180,10 @@ task crunch(j Job) pool 4 preemptible {
 // ---- I/O jobs ----
 
 // fetch is a slow C call (fetch.c). Declared blocking, each call runs on a helper thread while
-// the calling goroutine waits, so the other goroutines of its thread keep running.
+// the calling task waits, so the other tasks of its thread keep running.
 extern fn fetch(id int, buf u8[], ms int) -> int stack 8K blocking c"jobs_fetch"
 
-// fetch_job runs an I/O job in the worker itself: the blocking extern parks only this goroutine.
+// fetch_job runs an I/O job in the worker itself: the blocking extern parks only this task.
 fn fetch_job(j Job) -> Result {
 	start := time.now()
 	var buf u8[fetch_size]

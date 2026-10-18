@@ -1,5 +1,5 @@
 // Package http is an HTTP/1.1 server and client. The server runs each connection in its own
-// goroutine, whose read and write buffers live on its (statically sized) stack: no allocation per
+// task, whose read and write buffers live on its (statically sized) stack: no allocation per
 // request. The client (Dial, Client) reads responses into a buffer the caller provides.
 module http
 
@@ -16,13 +16,13 @@ const (
 	pub max_headers        = 32
 )
 
-// idle_release is how long a keep-alive connection may sit idle before its goroutine exits and the
+// idle_release is how long a keep-alive connection may sit idle before its task exits and the
 // connection moves to the runtime's idle set (where it costs no stack until its next request).
 pub const idle_release = 100 * time.millisecond
 
 // read_header_timeout (5 seconds) is how long a client has to send a request's line and headers,
 // counted from when the request starts arriving. A connection that takes longer gets a 408 and is
-// closed, so slow clients can't hold connection goroutines. Set it in main before serving (with
+// closed, so slow clients can't hold connection tasks. Set it in main before serving (with
 // threads, each scheduler thread runs main and sets its own copy).
 pub thread read_header_timeout = 5 * time.second
 
@@ -94,7 +94,7 @@ impl Request {
 	}
 }
 
-// ResponseWriter stages the response in the connection goroutine's write buffer.
+// ResponseWriter stages the response in the connection task's write buffer.
 pub struct ResponseWriter {
 	conn         net.Conn
 	buf          u8[]
@@ -352,7 +352,7 @@ fn append_hex(dst u8[], v int) -> u8[] {
 // HandlerFunc handles one request.
 pub HandlerFunc: fn(w *ResponseWriter, r *Request)
 
-// listen_and_serve listens on addr and serves each connection in its own goroutine. With a nil h it
+// listen_and_serve listens on addr and serves each connection in its own task. With a nil h it
 // dispatches to the patterns registered with handle_func. It returns nil after a graceful stop
 // (see serve).
 pub fn listen_and_serve(addr str, h HandlerFunc) -> ! {
@@ -505,7 +505,7 @@ fn admin_handle(w *ResponseWriter, r *Request) {
 // costs latency rather than errors. Set it before serving (with threads N, on each thread).
 pub thread shed_load = false
 
-// serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
+// serve accepts connections on l and serves each in its own task. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
 // Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
 // get a 400 and a closed connection. `Expect: 100-continue` is answered before the body is read;
@@ -603,10 +603,9 @@ task wake_idle() pool 1 {
 
 // serve_conn runs one keep-alive connection while it is busy. At most 10000 run at once; further
 // connections wait for a slot. A connection that stays quiet for idle_release is parked in the
-// runtime's idle set and this goroutine exits, returning its whole stack to the OS.
+// runtime's idle set and this task exits, returning its whole stack to the OS.
 // During a graceful stop it closes the connection once no request is pending. It is isolate: a
-// handler that panics ends only its own connection (closed, as Go's net/http does), while the
-// server goes on.
+// handler that panics ends only its own connection, which is closed, while the server goes on.
 task serve_conn(c net.Conn, id int) pool 10000 isolate {
 	active++
 	open := true // until the connection is closed or parked: if a handler panics, it is still open

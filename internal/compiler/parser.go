@@ -505,10 +505,8 @@ func (p *parser) signatureWith(pos Pos, params []*Field) *FuncType {
 			p.next()
 		case LPAREN:
 			ft.Results = p.params()
+			ft.Results = p.unnamedResults(ft.Results, p.tok.tok == BANG)
 			if p.tok.tok == BANG {
-				if len(ft.Results) > 0 && len(ft.Results[0].Names) > 0 {
-					p.errorf(p.tok.pos, "named results declare the error by name: (..., err error)")
-				}
 				ft.Results = append(ft.Results, errorField(p.tok.pos))
 				p.next()
 			}
@@ -540,6 +538,50 @@ func (p *parser) signatureWith(pos Pos, params []*Field) *FuncType {
 		panic(bailout{})
 	}
 	return ft
+}
+
+// unnamedResults reports named results, which squark doesn't have, and returns the fields with
+// their names dropped (one per name), so checking goes on with the types. The message spells the
+// results as they should be written; bang says a ! follows the list.
+func (p *parser) unnamedResults(fs []*Field, bang bool) []*Field {
+	var out []*Field
+	var names, types []string
+	var at Pos
+	for _, f := range fs {
+		if len(f.Names) == 0 {
+			out = append(out, f)
+			types = append(types, exprString(f.Type))
+			continue
+		}
+		if len(names) == 0 {
+			at = f.Names[0].P
+		}
+		for _, n := range f.Names {
+			names = append(names, n.Name)
+			types = append(types, exprString(f.Type))
+			out = append(out, &Field{Type: f.Type})
+		}
+	}
+	if len(names) == 0 {
+		return out
+	}
+	// a trailing error is written as !
+	if !bang && len(types) > 1 && types[len(types)-1] == "error" {
+		types, bang = types[:len(types)-1], true
+	}
+	want := strings.Join(types, ", ")
+	if len(types) > 1 {
+		want = "(" + want + ")"
+	}
+	if bang {
+		want += " !"
+	}
+	what := "it as a variable"
+	if len(names) > 1 {
+		what = "them as variables"
+	}
+	p.errorf(at, "results aren't named: write -> %s and return the values (declare %s in the body: %s)", want, what, strings.Join(names, ", "))
+	return out
 }
 
 // startsResultType: a type right after the parameters, as Go would write a result.

@@ -1,5 +1,5 @@
-// Package flag parses command-line flags, as Go's flag package does for its default set
-// (flag.CommandLine, which exits on an error). Define flags, call parse, then read them:
+// Package flag parses command-line flags into one set for the program, exiting on an error. Define
+// flags, call parse, then read them:
 //
 //	port := flag.int_flag("port", 8080, "port to listen on")
 //	flag.parse()
@@ -13,7 +13,7 @@
 // Parse accepts -name, --name, -name=value and -name value (not for bool flags, which take
 // -name or -name=false); flag parsing stops at the first argument that isn't a flag, or after
 // "--". -h and -help, unless defined, print the usage to stderr and exit 0. An undefined flag, a
-// missing value or a bad value prints Go's message ("flag provided but not defined: -x",
+// missing value or a bad value prints why ("flag provided but not defined: -x",
 // `invalid value "abc" for flag -port: parse error`) and the usage to stderr and exits 2.
 //
 // With threads N every scheduler thread runs main, so each parses into its own copy of the
@@ -97,8 +97,8 @@ fn lookup(name str) -> int {
 	return -1
 }
 
-// Int defines an int flag. Its value is read as Go's strconv.ParseInt(s, 0, 64) reads it:
-// decimal, or with a 0x, 0o, 0b or 0 (octal) prefix, and _ between digits.
+// Int defines an int flag. Its value is an optional sign, then decimal, or a 0x, 0o, 0b or 0
+// (octal) prefix, with _ allowed between digits.
 pub fn int_flag(name str in static, value int, usage str in static) -> *int {
 	e := define(name, usage, .int)
 	e.i = value
@@ -198,7 +198,7 @@ pub fn parse() {
 	first = i
 }
 
-// err_text is why the last set_value failed: Go's "parse error" or "value out of range".
+// err_text is why the last set_value failed: "parse error" or "value out of range".
 thread err_text = ""
 
 // set_value sets e from s; on a bad value it sets err_text and returns false.
@@ -231,8 +231,8 @@ fn set_value(e *Entry, s str in static) -> bool {
 	return true
 }
 
-// parse_int reads s as Go's strconv.ParseInt(s, 0, 64) does: an optional sign, then decimal, or
-// a 0b, 0o, 0x or 0 (octal) prefix, with '_' allowed between digits. A bad value sets err_text.
+// parse_int reads s as an int flag's value: an optional sign, then decimal, or a 0b, 0o, 0x or 0
+// (octal) prefix, with '_' allowed between digits. A bad value sets err_text.
 fn parse_int(s str) -> (int, bool) {
 	err_text = "parse error"
 	t := s
@@ -307,8 +307,7 @@ fn out_of_range(neg bool) -> (int, bool) {
 	return 0, false
 }
 
-// underscore_ok reports whether the '_'s in s are between digits (or after a base prefix), as in
-// Go's strconv.
+// underscore_ok reports whether the '_'s in s are between digits (or after a base prefix).
 fn underscore_ok(s str) -> bool {
 	saw := u8('^') // the last thing seen: ^ the start, 0 a digit or prefix, _ an underscore, ! other
 	i := 0
@@ -351,7 +350,7 @@ fn failf(a str, b str, c str, d str) {
 	exit(2)
 }
 
-// failq prints Go's bad-value message, with the value quoted, and exits 2.
+// failq prints the bad-value message, with the value quoted, and exits 2.
 fn failq(a str, value str, c str, name str) {
 	put(a)
 	put_quoted(value)
@@ -421,7 +420,7 @@ pub fn args() -> str[] {
 }
 
 // print_defaults prints, to stderr, each flag's name, type, usage and default (unless it is the
-// zero value), sorted by name, in Go's format:
+// zero value), sorted by name, like this:
 //
 //	  -port int
 //	    	port to listen on (default 8080)
@@ -571,8 +570,8 @@ fn flush() {
 	}
 }
 
-// put_quoted writes s in double quotes with Go's escapes for quotes, backslashes and control
-// characters (bytes from 0x80 up are written as they are).
+// put_quoted writes s in double quotes, escaping quotes, backslashes and control characters
+// (\n, \t, \x01...; bytes from 0x80 up are written as they are).
 fn put_quoted(s str) {
 	const hex = "0123456789abcdef"
 	put("\"")

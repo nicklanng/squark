@@ -7,7 +7,7 @@
 // It shows:
 //   - tasks with fixed-size pools, started with go
 //   - channels declared as storage (T chan[N]), ranged over and closed
-//   - time.sleep parking one goroutine while the others run
+//   - time.sleep parking one task while the others run
 program
 
 use time
@@ -28,7 +28,7 @@ struct Result {
 	worker int
 }
 
-// The channels are package-level storage, so they live in static memory and every goroutine can
+// The channels are package-level storage, so they live in static memory and every task can
 // use them (a start argument can't refer to a stack, so main couldn't hand out a channel of its own).
 thread jobs Job chan[16]
 thread results Result chan[16]
@@ -50,7 +50,7 @@ fn collatz(n int) -> int {
 	return steps
 }
 
-// ---- the goroutines ----
+// ---- the tasks ----
 
 task worker(id int) pool num_workers {
 	for j in jobs {

@@ -6,19 +6,19 @@ app_queue_length 5
 # TYPE app_requests_total counter
 app_requests_total{code="2xx"} 4
 app_requests_total{code="5xx"} 1
-# HELP squark_pool_goroutines Goroutines running in a task's pool.
-# TYPE squark_pool_goroutines gauge
-squark_pool_goroutines{task="main.main"} 1
-squark_pool_goroutines{task="main.job"} 2
-# HELP squark_pool_capacity Goroutines a task's pool can run at once (every thread's).
+# HELP squark_pool_running Tasks running in the pool.
+# TYPE squark_pool_running gauge
+squark_pool_running{task="main.main"} 1
+squark_pool_running{task="main.job"} 2
+# HELP squark_pool_capacity Tasks the pool can run at once (every thread's).
 # TYPE squark_pool_capacity gauge
 squark_pool_capacity{task="main.main"} 1
 squark_pool_capacity{task="main.job"} 3
-# HELP squark_pool_peak The most goroutines that ran at once in a task's pool, on one thread.
+# HELP squark_pool_peak The most tasks that ran at once in the pool, on one thread.
 # TYPE squark_pool_peak gauge
 squark_pool_peak{task="main.main"} 1
 squark_pool_peak{task="main.job"} 2
-# HELP squark_pool_started_total Goroutines a task's pool has started.
+# HELP squark_pool_started_total Tasks the pool has started.
 # TYPE squark_pool_started_total counter
 squark_pool_started_total{task="main.main"} 1
 squark_pool_started_total{task="main.job"} 2

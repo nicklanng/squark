@@ -1,0 +1,35 @@
+program
+
+// A deferred call runs after the return values are computed, so it can't change them (squark
+// has no named results). With !, the deferred calls run before the error is returned.
+
+fault Bad 1 "bad"
+
+thread ran int
+
+fn set(p *int) { *p = 42 }
+fn note()      { ran++ }
+fn fail() -> int ! { return 0, Bad }
+
+fn plain() -> int {
+	x := 3
+	defer set(&x)
+	return x
+}
+
+fn early() -> int ! {
+	defer note()
+	n := fail()!
+	return n, nil
+}
+
+fn late() -> (int, int) ! {
+	defer note()
+	return 1, 2, nil
+}
+
+fn main() {
+	n, err := early()
+	a, b, err2 := late()
+	println(plain(), n, err.message(), a, b, err2 == nil, ran)
+}

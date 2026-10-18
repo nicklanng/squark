@@ -20,13 +20,13 @@ Celsius: f64
 
 enum Tens { a = 0, b = 10, c = 20 }
 
-fn minmax(xs int[]) -> (lo, hi int) {
-	lo, hi = xs[0], xs[0]
+fn minmax(xs int[]) -> (int, int) {
+	lo, hi := xs[0], xs[0]
 	for x in xs[1:] {
 		lo = min(lo, x)
 		hi = max(hi, x)
 	}
-	return
+	return lo, hi
 }
 
 fn describe(n int) -> str {

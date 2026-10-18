@@ -41,8 +41,6 @@ fn classify(n int) -> str {
 	return "odd"
 }
 
-fn divmod(a, b int) -> (q, r int) {
-	q = a / b
-	r = a % b
-	return
+fn divmod(a, b int) -> (int, int) {
+	return a / b, a % b
 }

@@ -1,10 +1,10 @@
 program
 
-// Stale poller events must not uncount a goroutine's current wait (the scheduler stops polling
+// Stale poller events must not uncount a task's current wait (the scheduler stops polling
 // when it counts no waiters, and reports a false deadlock):
-//   - a read registration still queued when another goroutine closes the descriptor fails (kqueue
+//   - a read registration still queued when another task closes the descriptor fails (kqueue
 //     reports EBADF for it) after the reader has moved on to another connection;
-//   - a WaitReadable that timed out is followed by data on that connection while its goroutine
+//   - a WaitReadable that timed out is followed by data on that connection while its task
 //     waits on another one.
 
 use net, runtime, strconv, time

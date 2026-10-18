@@ -1,6 +1,6 @@
 // squark runtime interface. Included by every generated program.
-// Nothing in the runtime allocates from the heap: goroutine stacks, channel buffers,
-// map tables and timers all live in static memory or on goroutine stacks.
+// Nothing in the runtime allocates from the heap: task stacks, channel buffers,
+// map tables and timers all live in static memory or on task stacks.
 #ifndef SQ_RT_H
 #define SQ_RT_H
 
@@ -267,17 +267,17 @@ void sq_print_err(sq_error e);
 void sq_print_byte(uint8_t c);
 void sq_flush(void);
 
-// ---- goroutines ----
+// ---- tasks ----
 typedef struct sq_g sq_g;
 typedef struct sq_pool {
 	const char *name;      // entry function
-	int64_t count;         // max live goroutines
+	int64_t count;         // max live tasks
 	int64_t stack_size;    // usable bytes per stack (proven by the compiler)
 	int64_t slot_size;     // stack_size rounded to pages + guard page
 	uint8_t *stacks;       // count * slot_size, statically allocated
-	sq_g *gs;              // count goroutine descriptors
+	sq_g *gs;              // count task descriptors
 	sq_g *free;
-	sq_g *waitq_head, *waitq_tail; // goroutines waiting for a free slot
+	sq_g *waitq_head, *waitq_tail; // tasks waiting for a free slot
 	int64_t live, peak, started;
 	int64_t observed; // deepest stack use seen (only with SQ_STACKCHECK=1)
 	int64_t index;    // position in sq_pools; each shard has its own copy of every pool
@@ -287,8 +287,8 @@ typedef struct sq_pool {
 
 // Unwinding (task ... isolate). In a program with an isolate task, every function with deferred
 // calls pushes an sq_unwind frame on entry and pops it on return. A panic in an isolate task's
-// goroutine prints as usual, then jumps to the innermost frame, which runs its deferred calls and
-// resumes the unwinding at the next, up to the task's entry (sq_unwind_base), where the goroutine
+// task prints as usual, then jumps to the innermost frame, which runs its deferred calls and
+// resumes the unwinding at the next, up to the task's entry (sq_unwind_base), where the task
 // ends and the program goes on.
 typedef struct sq_unwind {
 	jmp_buf jb;
@@ -301,7 +301,7 @@ void sq_unwind_base(sq_unwind *u);
 void sq_unwind_end(sq_unwind *u);
 
 // Preemption: loops in preemptible tasks (and the functions they call) check their thread's flag
-// at every iteration; the watchdog sets it when a goroutine has run for a time slice.
+// at every iteration; the watchdog sets it when a task has run for a time slice.
 extern _Thread_local _Atomic int *sq_preempt_flag;
 void sq_preempt(void);
 extern const bool sq_any_preemptible;
@@ -312,13 +312,13 @@ bool sq_try_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsi
 void *sq_try_enter(void *jb);
 void sq_try_leave(void *old);
 void sq_gosched(void);
-// with deadline: set the goroutine's deadline for the block; the cleanup restores the outer one
+// with deadline: set the task's deadline for the block; the cleanup restores the outer one
 int64_t sq_deadline_enter(int64_t d);
 void sq_deadline_restore(int64_t *saved);
 
 // ---- channels ----
-// A goroutine waiting on a channel queues a waiter: one for a send or receive, one per case of a
-// select (the generated code provides them, on the goroutine's stack).
+// A task waiting on a channel queues a waiter: one for a send or receive, one per case of a
+// select (the generated code provides them, on the task's stack).
 typedef struct sq_waiter {
 	sq_g *g;
 	void *elem;              // the value to send, or where a received value goes
@@ -356,17 +356,17 @@ int64_t sq_chan_len_locked(sq_chan *c);
 // fired, -1 for default (block false: nothing was ready), or n when timeout_ns (>= 0) passed first.
 int64_t sq_select(sq_scase *cs, sq_waiter *ws, int64_t n, bool block, int64_t timeout_ns, const char *file, int line);
 
-// Blocking externs (extern ... blocking): the call runs on a helper thread while the goroutine
-// waits, so the other goroutines of its scheduler thread keep running.
+// Blocking externs (extern ... blocking): the call runs on a helper thread while the task
+// waits, so the other tasks of its scheduler thread keep running.
 extern const int64_t sq_helpers_per_thread; // 0: the program makes no blocking calls
-extern const int64_t sq_helper_stack;       // their stack size, proven like goroutine stacks
+extern const int64_t sq_helper_stack;       // their stack size, proven like task stacks
 void sq_blocking(void (*fn)(void *), void *arg);
 
-// sq_detach moves the running goroutine, in the middle of a C call that turned out to be slow, to a
-// helper thread: its scheduler thread goes on with its other goroutines, and the C code carries on
+// sq_detach moves the running task, in the middle of a C call that turned out to be slow, to a
+// helper thread: its scheduler thread goes on with its other tasks, and the C code carries on
 // (on the same stack) on the helper. It returns true once running there (false if it can't: no
 // helpers, or already on one). sq_reattach, called before the C function returns to squark code,
-// moves the goroutine back to its own thread (it does nothing if the goroutine wasn't moved).
+// moves the task back to its own thread (it does nothing if the task wasn't moved).
 // In between, the C code runs on another OS thread: it must not touch the squark runtime or rely on
 // thread-local state or thread-owned locks from before sq_detach.
 bool sq_detach(void);
@@ -374,18 +374,18 @@ void sq_reattach(void);
 bool sq_on_helper(void); // running on a helper thread (a blocking call, or detached)
 int64_t sq_nanotime(void);
 
-// sq_gmutex: a lock held by a goroutine; others that want it wait (park) instead of blocking their
+// sq_gmutex: a lock held by a task; others that want it wait (park) instead of blocking their
 // thread. Usable from any scheduler thread. Zero-initialized storage needs sq_gmutex_init.
 typedef struct sq_gmutex {
-	pthread_mutex_t mu;         // guards the wait queue (only used when goroutines wait)
+	pthread_mutex_t mu;         // guards the wait queue (only used when tasks wait)
 	struct sq_g *_Atomic owner;
-	_Atomic bool contended;     // goroutines may be waiting: unlock must look
+	_Atomic bool contended;     // tasks may be waiting: unlock must look
 	struct sq_g *wait_head, *wait_tail;
 } sq_gmutex;
 void sq_gmutex_init(sq_gmutex *m);
 void sq_gmutex_lock(sq_gmutex *m);
 void sq_gmutex_unlock(sq_gmutex *m);
-bool sq_gmutex_held(sq_gmutex *m); // by the running goroutine
+bool sq_gmutex_held(sq_gmutex *m); // by the running task
 static inline int64_t sq_chan_len(sq_chan *c) { return c ? (c->shared ? sq_chan_len_locked(c) : c->len) : 0; }
 sq_chan *sq_chan_init_shared(sq_chan *c, void *buf, int64_t elemsize, int64_t cap);
 static inline int64_t sq_chan_cap(sq_chan *c) { return c ? c->cap : 0; }

@@ -1,7 +1,7 @@
 # Writing squark
 
-squark is a language without a heap; it grew out of Go and keeps Go's semantics, but its syntax is
-its own (do not write Go syntax). Before writing or changing `.sq` code, read:
+squark is a language without a heap, with its own syntax and semantics (it looks a little like Go:
+don't write Go syntax, and don't assume Go's behaviour). Before writing or changing `.sq` code, read:
 
 - `docs/spec.md`: the language reference. It covers the syntax, the memory rules, and a table of
   compiler errors with their fixes.
@@ -11,6 +11,12 @@ its own (do not write Go syntax). Before writing or changing `.sq` code, read:
 Check your work with `bin/squark check <dir>` (types and lifetimes) and `bin/squark run <dir>`. Build
 the compiler with `go build -o bin/squark ./cmd/squark`. Compiler errors name the fix; the spec's
 error table maps each one to the usual rewrite.
+
+The tour (`squark tour`) lives in `tour/`: one Markdown file per chapter in `tour/lessons` (the
+format is described in `internal/tour/content.go`) and the page in `tour/site`. `go test
+./internal/tour` compiles and runs every lesson and checks each goal against its solution
+(`TOUR=chapter` runs one chapter, `TOUR_SHOW=1` prints the output); change a lesson when the
+language changes under it.
 
 Working on the compiler itself: `go test ./internal/...` runs the error-annotation tests
 (`testdata/errors`) and the run tests (`testdata/run`, `.sq` + expected `.out`), and the run tests

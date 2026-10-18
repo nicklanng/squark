@@ -1,4 +1,4 @@
-// squark runtime: M:1 goroutine scheduler, kqueue/epoll netpoll, timers, channels, maps, panics.
+// squark runtime: M:1 task scheduler, kqueue/epoll netpoll, timers, channels, maps, panics.
 // This file must never call malloc/free (checked by `squark build`, which inspects the
 // undefined symbols of every object it produces).
 #define _GNU_SOURCE
@@ -45,7 +45,7 @@
 
 void sq_ctx_switch(sq_ctx *from, sq_ctx *to);
 
-// ThreadSanitizer has to be told when the runtime switches stacks (goroutine <-> scheduler), or it
+// ThreadSanitizer has to be told when the runtime switches stacks (task <-> scheduler), or it
 // sees one thread jumping between unrelated stacks. Nothing of this exists in normal builds.
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -128,19 +128,24 @@ __asm__(
 #endif
 
 // ---------------------------------------------------------------------------
-// goroutines
+// tasks
 
 
 // Everything a scheduler owns lives in its shard. One shard per scheduler thread; code reaches the
 // current one through sq_self.
 #define SQ_MAX_SHARDS 1024 // threads N
+// The idle set's capacity: the driver sets it to 1 for a program without sockets, and to
+// connections N when that is declared, since an fd is queued at most once.
+#ifndef SQ_IDLE_SLOTS
+#define SQ_IDLE_SLOTS (1 << 16)
+#endif
 
 typedef struct sq_shard {
 	sq_ctx sched_ctx;
 	sq_g *cur_g;
 	sq_g *runq_head, *runq_tail;
 	int64_t next_gid;
-	int64_t total_parked; // goroutines blocked on channels/slots (not fds/timers)
+	int64_t total_parked; // tasks blocked on channels/slots (not fds/timers)
 	int64_t fd_waiters;   // outstanding netpoll registrations
 	uint8_t outbuf[8192]; // println output, flushed at newlines, exit and before writes to fd 1
 	size_t outlen;
@@ -153,7 +158,7 @@ typedef struct sq_shard {
 	struct kevent changes[256]; // registrations batched into the next kevent call
 	int nchanges;
 #endif
-	int32_t idle_ready[1 << 16]; // see "The idle set" below
+	int32_t idle_ready[SQ_IDLE_SLOTS]; // see "The idle set" below
 	int64_t idle_head, idle_len, idle_parked;
 	sq_g *idle_waiter;
 	struct fd_slot *fds;  // per fd: who waits to read and write it (mmap'd, sized by RLIMIT_NOFILE)
@@ -161,23 +166,23 @@ typedef struct sq_shard {
 	char date_cache[32];        // sq_httpdate
 	time_t date_cached_at;
 	int64_t id;        // 0 .. sq_shard_count-1
-	bool main_done;    // this shard's main has returned; it keeps serving its other goroutines
+	bool main_done;    // this shard's main has returned; it keeps serving its other tasks
 	bool start_pending; // shard 0: start the other shards from the scheduler's stack
-	// goroutines woken by other shards (shared channels): queued here, then this shard's poller
+	// tasks woken by other shards (shared channels): queued here, then this shard's poller
 	// is woken (EVFILT_USER on macOS, an eventfd on Linux)
 	pthread_mutex_t remote_mu;
 	sq_g *remote_head, *remote_tail;
 	atomic_bool remote_pending;
 	int wake_fd;              // Linux: eventfd
-	int64_t shared_parked;    // this shard's goroutines waiting for other threads (shared channels, locks, blocking calls)
-	sq_g *detach_g;           // a goroutine detaching (sq_detach), handed to a helper once switched out
+	int64_t shared_parked;    // this shard's tasks waiting for other threads (shared channels, locks, blocking calls)
+	sq_g *detach_g;           // a task detaching (sq_detach), handed to a helper once switched out
 	uint64_t rand;            // select's random start
-	sq_g *preempted;          // the goroutine that just yielded to preemption
+	sq_g *preempted;          // the task that just yielded to preemption
 	// read by the watchdog thread
-	_Atomic int preempt;          // asks the running goroutine to yield (if it is preemptible)
-	_Atomic uint64_t switches;    // goroutines run so far
-	_Atomic(const char *) running; // the running goroutine's task (NULL: in the scheduler)
-	_Atomic bool others;          // other goroutines were waiting when it started
+	_Atomic int preempt;          // asks the running task to yield (if it is preemptible)
+	_Atomic uint64_t switches;    // tasks run so far
+	_Atomic(const char *) running; // the running task's task (NULL: in the scheduler)
+	_Atomic bool others;          // other tasks were waiting when it started
 #if defined(__APPLE__)
 	mach_port_t mach_thread;      // for the watchdog: this thread's CPU time
 #else
@@ -188,7 +193,7 @@ typedef struct sq_shard {
 		int entry; // in listen_table
 	} listeners[32];   // this shard's listening sockets
 	int nlisteners;
-	int accepting[64]; // listening fds a goroutine of this shard waits in accept on
+	int accepting[64]; // listening fds a task of this shard waits in accept on
 	int naccepting;
 	bool stop_seen;    // this shard has acted on a graceful stop (sq_stop_gracefully)
 	void *globals;     // this shard's package variables (shard 0: the generated static copy)
@@ -204,7 +209,7 @@ static sq_shard sq_shard0;
 static _Thread_local sq_shard *sq_self = &sq_shard0;
 static atomic_int_fast64_t live_shards;
 static atomic_int graceful_signal; // the signal that started a graceful stop (sq_stop_gracefully), or 0
-static _Atomic int64_t stop_cap;   // during a graceful stop: when every goroutine's I/O times out
+static _Atomic int64_t stop_cap;   // during a graceful stop: when every task's I/O times out
 // Errors beyond every errno: a timeout (a deadline, or sq_read_timeout's limit) and accept during a
 // graceful stop.
 #define SQ_ETIMEOUT 65536
@@ -265,7 +270,7 @@ static void g_entry(void) {
 
 static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t argsize) {
 #ifdef SQ_TSAN
-	if (!g->tsan_fiber) g->tsan_fiber = __tsan_create_fiber(0); // kept for the slot's next goroutine
+	if (!g->tsan_fiber) g->tsan_fiber = __tsan_create_fiber(0); // kept for the slot's next task
 #endif
 	uintptr_t top = (uintptr_t)g->stack_hi;
 	top -= (argsize + 15) & ~(uintptr_t)15;
@@ -296,7 +301,7 @@ static void pool_init(sq_pool *p) {
 	size_t total = (size_t)(p->count * p->slot_size);
 	void *mem = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 	if (mem == MAP_FAILED) {
-		err_write("fatal error: cannot reserve goroutine stacks for pool ");
+		err_write("fatal error: cannot reserve task stacks for pool ");
 		err_write(p->name);
 		err_write("\n");
 		_exit(2);
@@ -602,7 +607,7 @@ static SQ_NORETURN void die(const char *file, int line) {
 		err_write("\n\nin a blocking C call (helper thread)\nexit status 2\n");
 		_exit(2);
 	}
-	err_write("\n\ngoroutine ");
+	err_write("\n\ntask ");
 	if (sq_self->cur_g) {
 		err_int(sq_self->cur_g->id);
 		err_write(" [");
@@ -619,10 +624,10 @@ static SQ_NORETURN void die(const char *file, int line) {
 		err_int(line < 0 ? -line : line); // negative: an allocation that may fail (sq_try_enter)
 		err_write("\n");
 	}
-	// a panic in squark code (it has a position) in an isolate task: only this goroutine ends
+	// a panic in squark code (it has a position) in an isolate task: only this task ends
 	sq_g *g = sq_self->cur_g;
 	if (file && g && g->pool->isolate && g->unwind) {
-		err_write("the goroutine ends; the program goes on (task ");
+		err_write("the task ends; the program goes on (task ");
 		err_write(g->pool->name);
 		err_write(" is isolate)\n");
 		g->unwinding = true;
@@ -656,7 +661,7 @@ void sq_unwind_base(sq_unwind *u) {
 }
 
 // sq_unwind_end runs as an isolate task's entry returns: after an unwinding, it releases the
-// goroutine locks the goroutine still holds, so other goroutines aren't left waiting for them.
+// task locks the task still holds, so other tasks aren't left waiting for them.
 void sq_unwind_end(sq_unwind *u) {
 	(void)u;
 	sq_g *g = sq_self->cur_g;
@@ -756,13 +761,13 @@ void sq_panic_nil(const char *file, int line) {
 
 static uint8_t sq_sigstack[32768]; // not "sigstack": glibc declares a function of that name
 
-static _Thread_local sq_g *helper_g; // a helper thread's detached goroutine (see sq_detach)
+static _Thread_local sq_g *helper_g; // a helper thread's detached task (see sq_detach)
 
 static void on_fault(int sig, siginfo_t *si, void *uctx) {
 	(void)uctx;
 	uintptr_t addr = (uintptr_t)si->si_addr;
 	long pagesz = sysconf(_SC_PAGESIZE);
-	sq_shard *home = sq_self ? sq_self : helper_g ? helper_g->shard : NULL; // a detached goroutine's
+	sq_shard *home = sq_self ? sq_self : helper_g ? helper_g->shard : NULL; // a detached task's
 	for (int64_t i = 0; home && i < sq_npools; i++) {
 		sq_pool *p = home->pools[i];
 		uintptr_t lo = (uintptr_t)p->stacks, hi = lo + (uintptr_t)(p->count * p->slot_size);
@@ -770,7 +775,7 @@ static void on_fault(int sig, siginfo_t *si, void *uctx) {
 			uintptr_t off = (addr - lo) % (uintptr_t)p->slot_size;
 			if (off < (uintptr_t)pagesz) {
 				exit_flush();
-				err_write("fatal error: stack overflow in goroutine [");
+				err_write("fatal error: stack overflow in task [");
 				err_write(p->name);
 				err_write("] (a C function used more stack than its //squark:stack budget)");
 				die(NULL, 0);
@@ -860,7 +865,7 @@ static void wake_shard(sq_shard *s) {
 #endif
 }
 
-// ready_shared makes runnable a goroutine that was parked on a shared channel.
+// ready_shared makes runnable a task that was parked on a shared channel.
 static void ready_shared(sq_g *g) {
 	sq_shard *s = g->shard;
 	if (s == sq_self) {
@@ -876,7 +881,7 @@ static void ready_shared(sq_g *g) {
 	if (!atomic_exchange(&s->remote_pending, true)) wake_shard(s);
 }
 
-// drain_remote moves goroutines other shards have woken onto this shard's run queue.
+// drain_remote moves tasks other shards have woken onto this shard's run queue.
 static void drain_remote(void) {
 	if (atomic_load_explicit(&stop_cap, memory_order_relaxed) && !sq_self->stop_seen) stop_shard(); // set by the watchdog
 	if (!atomic_load_explicit(&sq_self->remote_pending, memory_order_acquire)) return;
@@ -898,8 +903,8 @@ static void drain_remote(void) {
 	}
 }
 
-// park_shared parks the running goroutine until another thread wakes it (ready_shared); mu is
-// the lock that guards the queue it waits in, released once the goroutine is marked waiting.
+// park_shared parks the running task until another thread wakes it (ready_shared); mu is
+// the lock that guards the queue it waits in, released once the task is marked waiting.
 static void park_shared(pthread_mutex_t *mu) {
 	sq_self->shared_parked++;
 	sq_self->cur_g->state = G_WAITING; // before unlocking: a waker may queue it at once
@@ -909,13 +914,13 @@ static void park_shared(pthread_mutex_t *mu) {
 }
 
 // ---------------------------------------------------------------------------
-// blocking calls: helper threads run a blocking extern while its goroutine waits
+// blocking calls: helper threads run a blocking extern while its task waits
 
 static pthread_mutex_t helper_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t helper_cv = PTHREAD_COND_INITIALIZER;
 static sq_g *helper_head, *helper_tail;
 
-// a helper running a detached goroutine: its own context, and the goroutine
+// a helper running a detached task: its own context, and the task
 static _Thread_local sq_ctx helper_ctx;
 static _Thread_local void *helper_fiber;
 static _Thread_local bool on_helper;
@@ -934,7 +939,7 @@ static void *helper_thread(void *arg) {
 #ifdef SQ_TSAN
 	helper_fiber = __tsan_get_current_fiber();
 #endif
-	// a signal stack, so a stack overflow in a detached goroutine reports like any other
+	// a signal stack, so a stack overflow in a detached task reports like any other
 	static const size_t sigsz = 64 << 10;
 	void *sig = mmap(NULL, sigsz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 	if (sig != MAP_FAILED) {
@@ -947,9 +952,9 @@ static void *helper_thread(void *arg) {
 		while (!(g = q_pop(&helper_head, &helper_tail))) pthread_cond_wait(&helper_cv, &helper_mu);
 		pthread_mutex_unlock(&helper_mu);
 		if (g->blk_fn) {
-			g->blk_fn(g->elem); // the goroutine's stack stays put while it waits: its arguments are safe
+			g->blk_fn(g->elem); // the task's stack stays put while it waits: its arguments are safe
 		} else {
-			// a detached goroutine: carry on with its C call here until sq_reattach switches back
+			// a detached task: carry on with its C call here until sq_reattach switches back
 			helper_g = g;
 			TSAN_SWITCH(g->tsan_fiber);
 			sq_ctx_switch(&helper_ctx, &g->ctx);
@@ -977,14 +982,14 @@ bool sq_detach(void) {
 void sq_reattach(void) {
 	if (!on_helper) return;
 	sq_g *g = helper_g;
-	if (!g) return; // a blocking call's helper, not a detached goroutine
+	if (!g) return; // a blocking call's helper, not a detached task
 	sq_ctx *back = &helper_ctx;
 	TSAN_SWITCH(helper_fiber);
 	sq_ctx_switch(&g->ctx, back);
 }
 
 void sq_blocking(void (*fn)(void *), void *arg) {
-	if (!sq_self) { // already on a helper (a detached goroutine): just call it
+	if (!sq_self) { // already on a helper (a detached task): just call it
 		fn(arg);
 		return;
 	}
@@ -1026,10 +1031,10 @@ static void start_helpers(int64_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// goroutine locks
+// task locks
 
 // An uncontended lock or unlock is one compare-and-swap; the mutex and queue come in only when
-// goroutines wait. A waiter sets contended before its last try, and unlock clears the owner
+// tasks wait. A waiter sets contended before its last try, and unlock clears the owner
 // before looking at contended (both sequentially consistent), so either the waiter's try
 // succeeds or unlock sees it and hands the lock over.
 void sq_gmutex_init(sq_gmutex *m) {
@@ -1039,7 +1044,7 @@ void sq_gmutex_init(sq_gmutex *m) {
 	m->wait_head = m->wait_tail = NULL;
 }
 
-// held_add and held_remove keep g's list of the goroutine locks it holds (see sq_unwind_end).
+// held_add and held_remove keep g's list of the task locks it holds (see sq_unwind_end).
 static void held_add(sq_g *g, sq_gmutex *m) {
 	if (g && g->nheld < (int)(sizeof g->held / sizeof g->held[0])) g->held[g->nheld++] = m;
 }
@@ -1110,10 +1115,10 @@ int64_t sq_chan_len_locked(sq_chan *c) {
 }
 
 // ---------------------------------------------------------------------------
-// channel operations. A waiting goroutine queues waiters on its own stack: one for a send or
+// channel operations. A waiting task queues waiters on its own stack: one for a send or
 // receive, one per case for select. A select's waiters can be claimed once (its fired index, by
 // compare-and-swap), so whichever operation, close or timer gets there first completes the
-// select; the others drop its waiters, and the selecting goroutine removes the rest when it wakes.
+// select; the others drop its waiters, and the selecting task removes the rest when it wakes.
 // Shared channels (shared var ... chan) are locked around every step; local ones belong to one
 // scheduler thread and need no lock.
 
@@ -1165,8 +1170,8 @@ static void wq_remove(sq_waiter **head, sq_waiter **tail, sq_waiter *w) {
 	}
 }
 
-// wake makes a waiter's goroutine runnable once its operation is done. Called without channel
-// locks; w is read before the goroutine can run again (only one waker claims it).
+// wake makes a waiter's task runnable once its operation is done. Called without channel
+// locks; w is read before the task can run again (only one waker claims it).
 static void wake(sq_waiter *w) {
 	sq_g *g = w->g;
 	if (w->remote) {
@@ -1230,11 +1235,11 @@ static bool chan_try_recv(sq_chan *c, void *out, bool *ok, sq_waiter **wk) {
 }
 
 // chan_remote reports whether waiters on c may be woken by another scheduler thread. With one
-// thread a shared channel is a local one (under its lock): a goroutine blocked on it counts as
+// thread a shared channel is a local one (under its lock): a task blocked on it counts as
 // parked, so a deadlock is reported instead of the thread sleeping forever.
 static bool chan_remote(sq_chan *c) { return c->shared && sq_shard_count > 1; }
 
-// chan_park parks the running goroutine after queueing w on c (c's lock held if shared).
+// chan_park parks the running task after queueing w on c (c's lock held if shared).
 static void chan_park(sq_chan *c) {
 	if (chan_remote(c)) {
 		park_shared(&c->mu);
@@ -1691,7 +1696,7 @@ void sq_sleep(int64_t ns) {
 }
 
 
-// The fd table records, per descriptor, the goroutine waiting to read it and the one waiting to
+// The fd table records, per descriptor, the task waiting to read it and the one waiting to
 // write it, so that sq_close can wake them, and (epoll) one registration can serve both. It is
 // mmap'd per shard, sized by the open-file limit; only the pages of descriptors in use are touched.
 typedef struct fd_slot {
@@ -1715,7 +1720,7 @@ static fd_slot *slot(int fd) { return fd >= 0 && fd < sq_self->nfds ? &sq_self->
 
 #if !SQ_KQUEUE
 // epoll_arm registers fd for whichever directions have waiters (one registration per fd). Its
-// data is fd<<2 | 2: neither a goroutine (aligned) nor an idle-set entry (bit 0).
+// data is fd<<2 | 2: neither a task (aligned) nor an idle-set entry (bit 0).
 static void epoll_arm(int fd, fd_slot *s) {
 	struct epoll_event ev = {.events = (s->rd ? EPOLLIN : 0) | (s->wr ? EPOLLOUT : 0) | EPOLLONESHOT};
 	ev.data.u64 = ((uint64_t)(uint32_t)fd << 2) | 2;
@@ -1730,7 +1735,7 @@ static void fd_event(sq_g *g, int fd);
 // kq_event delivers one kqueue event (or a failed registration's EV_ERROR, which wakes its waiter
 // so that its syscall reports the error).
 static void kq_event(const struct kevent *ev) {
-	if ((uintptr_t)ev->udata & 1) { // idle set: udata is tag<<1 | 1 (goroutines are aligned)
+	if ((uintptr_t)ev->udata & 1) { // idle set: udata is tag<<1 | 1 (tasks are aligned)
 		idle_event((int)ev->ident, (int)((uintptr_t)ev->udata >> 1));
 		return;
 	}
@@ -1760,7 +1765,7 @@ static void kq_change(int fd, int16_t filter, uint16_t flags, void *udata) {
 }
 #endif
 
-// arm_fd registers the current goroutine to be woken when fd is readable (mode 'r') or writable
+// arm_fd registers the current task to be woken when fd is readable (mode 'r') or writable
 // ('w').
 static void arm_fd(int fd, int mode) {
 	sq_g *g = sq_self->cur_g;
@@ -1787,8 +1792,8 @@ static void arm_fd(int fd, int mode) {
 	}
 }
 
-// wait_fd parks the current goroutine until fd is readable or writable. It returns false if fd
-// was closed meanwhile (by another goroutine): the caller must not use the descriptor number again,
+// wait_fd parks the current task until fd is readable or writable. It returns false if fd
+// was closed meanwhile (by another task): the caller must not use the descriptor number again,
 // which may already name another file.
 // effective_deadline is when g's blocking I/O times out: its with-deadline, or a graceful stop's
 // cap if that is sooner; 0 for never.
@@ -1805,18 +1810,18 @@ static void timer_add(sq_g *g, int64_t at) {
 }
 
 // disarm_fd drops g's registration on fd for mode after a timer woke it: left armed, it would count
-// g as waiting on fd after it moves on (a goroutine blocked on a channel would then hang instead of
+// g as waiting on fd after it moves on (a task blocked on a channel would then hang instead of
 // being reported as a deadlock), and its late event would be stale.
 static void disarm_fd(sq_g *g, int fd, int mode) {
 	fd_slot *s = slot(fd);
 	sq_g **mine_p = s ? (mode == 'r' ? &s->rd : &s->wr) : NULL;
-	bool mine = !s || *mine_p == g; // else another goroutine has registered on fd since
+	bool mine = !s || *mine_p == g; // else another task has registered on fd since
 	if (s && *mine_p == g) *mine_p = NULL;
 #if SQ_KQUEUE
 	if (mine) kq_change(fd, mode == 'r' ? EVFILT_READ : EVFILT_WRITE, EV_DELETE, NULL); // fails harmlessly if it fired
 #else
 	if (s && (s->rd || s->wr)) {
-		epoll_arm(fd, s); // keep the other direction's registration (another goroutine's)
+		epoll_arm(fd, s); // keep the other direction's registration (another task's)
 	} else if (mine) {
 		struct epoll_event ev = {.events = 0};
 		epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, fd, &ev);
@@ -1829,7 +1834,7 @@ static void disarm_fd(sq_g *g, int fd, int mode) {
 }
 
 // wait_fd parks until fd is ready for mode ('r' or 'w'). It returns 0; -EBADF if fd was closed
-// meanwhile; or -SQ_ETIMEOUT if the goroutine's deadline (with deadline, or a graceful stop's
+// meanwhile; or -SQ_ETIMEOUT if the task's deadline (with deadline, or a graceful stop's
 // cap) came first.
 static int wait_fd(int fd, int mode) {
 	sq_g *g = sq_self->cur_g;
@@ -1846,11 +1851,11 @@ static int wait_fd(int fd, int mode) {
 	return 0; // the fd event took g off the timer heap
 }
 
-// fd_event delivers a readiness event; stale events (for a goroutine no longer waiting on that
+// fd_event delivers a readiness event; stale events (for a task no longer waiting on that
 // fd) are dropped. A stale event must leave g's armed count alone: it belongs to g's current wait
 // (another fd, say), and uncounting it would stop the scheduler polling for it. Stale events come
 // from a kqueue registration that fails because the fd was closed before it was sent, and from
-// an event that arrives after its goroutine was woken some other way (a timer).
+// an event that arrives after its task was woken some other way (a timer).
 static void fd_event(sq_g *g, int fd) {
 	if (!g) return;
 	fd_slot *s = slot(fd);
@@ -1881,7 +1886,7 @@ static void fd_ready(int fd, uint32_t events) {
 }
 #endif
 
-// fd_closed wakes the goroutines waiting on fd, which another goroutine of this shard just closed;
+// fd_closed wakes the tasks waiting on fd, which another task of this shard just closed;
 // their wait_fd returns false.
 // wake_closed wakes g if it waits on fd, as if fd had been closed: its wait_fd returns false.
 static void wake_closed(sq_g *g, int fd) {
@@ -1972,7 +1977,7 @@ static void release(uint8_t *p, int64_t n) {
 // sq_wait_idle parks until fd is readable (returns 0) or until grace_ns passes first (returns 1).
 // On timeout the read registration is withdrawn; the caller either waits again or hands the fd to
 // the idle set with sq_park_idle, both of which register it anew.
-// with deadline d { ... }: sq_deadline_enter sets the goroutine's deadline to d from now, unless
+// with deadline d { ... }: sq_deadline_enter sets the task's deadline to d from now, unless
 // an outer one is sooner, and returns the outer one; the block's cleanup puts it back.
 int64_t sq_deadline_enter(int64_t d) {
 	sq_g *g = sq_self->cur_g;
@@ -1986,7 +1991,7 @@ void sq_deadline_restore(int64_t *saved) {
 	if (sq_self->cur_g) sq_self->cur_g->deadline = *saved;
 }
 
-// sq_deadline_at returns when the calling goroutine's I/O times out (sq_nanotime), or 0 for never.
+// sq_deadline_at returns when the calling task's I/O times out (sq_nanotime), or 0 for never.
 int64_t sq_deadline_at(void) { return sq_self->cur_g ? effective_deadline(sq_self->cur_g) : 0; }
 
 int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
@@ -2000,8 +2005,8 @@ int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 }
 
 // The idle set: connections with nothing to do are registered with the poller without any
-// goroutine. When one becomes readable its fd is queued for the (single) idle consumer, which
-// typically starts a fresh goroutine for it. An idle connection therefore costs no stack at all.
+// task. When one becomes readable its fd is queued for the (single) idle consumer, which
+// typically starts a fresh task for it. An idle connection therefore costs no stack at all.
 // Each parked fd carries a small tag (e.g. which server it belongs to) that comes back with it;
 // queue entries hold tag<<24 | fd.
 
@@ -2019,7 +2024,7 @@ static void idle_event(int fd, int tag) {
 	}
 }
 
-// sq_park_idle moves fd into the idle set with tag (0..255) and marks the calling goroutine's stack
+// sq_park_idle moves fd into the idle set with tag (0..255) and marks the calling task's stack
 // for release when it exits.
 void sq_park_idle(int64_t fd, int64_t tag) {
 	sq_g *g = sq_self->cur_g;
@@ -2032,7 +2037,7 @@ void sq_park_idle(int64_t fd, int64_t tag) {
 	ev.data.u64 = ((uint64_t)tag << 33) | ((uint64_t)(uint32_t)fd << 1) | 1;
 	if (epoll_ctl(sq_self->pollfd, EPOLL_CTL_MOD, (int)fd, &ev) < 0) epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, (int)fd, &ev);
 #endif
-	// the goroutine's own registration on fd (if still armed) was just replaced
+	// the task's own registration on fd (if still armed) was just replaced
 	fd_slot *s = slot((int)fd);
 	if (s && s->rd == g) s->rd = NULL;
 	if (g->armed && g->wait_fd == (int)fd) {
@@ -2048,7 +2053,7 @@ void sq_park_idle(int64_t fd, int64_t tag) {
 // as tag<<32 | fd.
 int64_t sq_next_idle(void) {
 	while (sq_self->idle_len == 0) {
-		if (sq_self->idle_waiter) sq_panic_cstr("only one goroutine may wait for idle connections", __FILE__, __LINE__);
+		if (sq_self->idle_waiter) sq_panic_cstr("only one task may wait for idle connections", __FILE__, __LINE__);
 		sq_self->idle_waiter = sq_self->cur_g;
 		sq_self->cur_g->wait_fd = -2;
 		if (!sq_self->cur_g->armed) {
@@ -2088,9 +2093,9 @@ static int set_nonblock(int fd) {
 	return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
-// A read from a blocking pipe or terminal (stdin, typically) would stop every goroutine, and making
+// A read from a blocking pipe or terminal (stdin, typically) would stop every task, and making
 // it non-blocking would change the descriptor for the parent shell too. So for those, wait for
-// readability through the poller first, parking only this goroutine. Sockets are non-blocking
+// readability through the poller first, parking only this task. Sockets are non-blocking
 // already and regular files are always readable: they are read directly.
 // sq_self->fd_read_kind[fd]: 0 unknown, 1 read directly, 2 poll first
 
@@ -2129,7 +2134,7 @@ int64_t sq_read(int64_t fd, sq_bytes b) {
 // none arrived by then. (SQ_ETIMEOUT is above every errno, so the caller can tell it apart.)
 int64_t sq_read_timeout(int64_t fd, sq_bytes b, int64_t timeout_ns) {
 	int64_t deadline = sq_nanotime() + timeout_ns;
-	if (sq_self->cur_g) { // the goroutine's own deadline, if sooner
+	if (sq_self->cur_g) { // the task's own deadline, if sooner
 		int64_t dl = effective_deadline(sq_self->cur_g);
 		if (dl && dl < deadline) {
 			deadline = dl;
@@ -2265,7 +2270,7 @@ static void *shard_thread(void *arg);
 
 int64_t sq_close(int64_t fd) {
 	sock_closed((int)fd); // connections N: its share back
-	fd_closed((int)fd); // wakes this shard's goroutines waiting on it
+	fd_closed((int)fd); // wakes this shard's tasks waiting on it
 	if (sq_self->nlisteners > 0) listener_closed((int)fd);
 	return close((int)fd) < 0 ? -errno : 0;
 }
@@ -2784,9 +2789,9 @@ static void schedule(void) {
 					if (stackcheck) stack_report();
 					// returning from main ends the program, like Go; with threads N, once every
 					// shard's main has returned. Until then this shard keeps running its other
-					// goroutines: other shards' connections may be queued on its listening socket.
+					// tasks: other shards' connections may be queued on its listening socket.
 					if (atomic_fetch_sub(&live_shards, 1) == 1) {
-						exit_flush(); // other shards' goroutines may have printed since
+						exit_flush(); // other shards' tasks may have printed since
 						_exit(0);
 					}
 					sq_self->main_done = true;
@@ -2811,7 +2816,7 @@ static void schedule(void) {
 		if (sq_self->fd_waiters == 0 && sq_self->ntimers == 0 && sq_self->idle_parked == 0 && sq_self->shared_parked == 0) {
 			if (sq_self->main_done) pthread_exit(NULL); // nothing left on this shard
 			exit_flush();
-			err_write("fatal error: all goroutines are asleep - deadlock!\n");
+			err_write("fatal error: all tasks are asleep - deadlock!\n");
 			_exit(2);
 		}
 		int64_t timeout = -1;
@@ -2862,7 +2867,7 @@ static void on_term(int sig) {
 
 // ---------------------------------------------------------------------------
 // workers N: a process per core. The parent forks the workers before any squark code runs, so
-// each initializes its own package variables, goroutine pools and connections, then supervises.
+// each initializes its own package variables, task pools and connections, then supervises.
 
 #define SQ_MAX_WORKERS 1024
 int64_t sq_worker_count = 1; // processes running this program
@@ -3196,7 +3201,7 @@ static void run_workers(void) {
 
 // ---------------------------------------------------------------------------
 // threads N: a scheduler thread per core, each a shard with its own run queue, poller, timers,
-// goroutine pools and package variables. Goroutines never move between shards.
+// task pools and package variables. Tasks never move between shards.
 
 #define SQ_SIGSTACK_SIZE 32768
 int64_t sq_shard_count = 1;
@@ -3206,7 +3211,7 @@ static sq_shard *_Atomic all_shards[SQ_MAX_SHARDS]; // for the watchdog and exit
 static size_t align16(size_t n) { return (n + 15) & ~(size_t)15; }
 
 // shard_new lays out a shard and everything it owns in one mapping: the shard, its copies of the
-// pools with their goroutine tables, its timer heap, its package variables and its signal stack.
+// pools with their task tables, its timer heap, its package variables and its signal stack.
 // Stacks are reserved when the shard starts (pool_init).
 static sq_shard *shard_new(void) {
 	size_t sz = align16(sizeof(sq_shard)) + align16((size_t)sq_npools * sizeof(sq_pool *)) +
@@ -3267,7 +3272,7 @@ void sq_preempt(void) {
 static void watch_warn(const char *task, int64_t ms) {
 	char buf[256];
 	size_t n = 0;
-	const char *parts[] = {"squark: goroutine [", task, "] has run for ", NULL};
+	const char *parts[] = {"squark: task [", task, "] has run for ", NULL};
 	for (int i = 0; parts[i]; i++) {
 		size_t k = strlen(parts[i]);
 		if (n + k >= sizeof buf) k = sizeof buf - n - 1;
@@ -3278,7 +3283,7 @@ static void watch_warn(const char *task, int64_t ms) {
 	int k = 0;
 	do num[k++] = (char)('0' + ms % 10); while ((ms /= 10) > 0 && k < 23);
 	while (k > 0 && n < sizeof buf - 1) buf[n++] = num[--k];
-	const char *tail = "ms of CPU without yielding while other goroutines wait on its thread: mark the "
+	const char *tail = "ms of CPU without yielding while other tasks wait on its thread: mark the "
 	                   "task preemptible, or call runtime.gosched() in its loop\n";
 	size_t t = strlen(tail);
 	if (n + t >= sizeof buf) t = sizeof buf - n - 1;
@@ -3288,7 +3293,7 @@ static void watch_warn(const char *task, int64_t ms) {
 }
 
 // thread_cpu_ms is the CPU time a shard's thread has used (-1: unknown). The watchdog measures
-// goroutines in CPU time, so a thread the OS didn't run (an overloaded machine) isn't blamed.
+// tasks in CPU time, so a thread the OS didn't run (an overloaded machine) isn't blamed.
 static int64_t thread_cpu_ms(sq_shard *s) {
 #if defined(__APPLE__)
 	thread_basic_info_data_t info;
@@ -3303,12 +3308,12 @@ static int64_t thread_cpu_ms(sq_shard *s) {
 #endif
 }
 
-// watchdog asks a goroutine that has used its thread for a time slice (10ms of CPU) to yield, and
+// watchdog asks a task that has used its thread for a time slice (10ms of CPU) to yield, and
 // warns once it has used 100ms while others waited. It reads only the shards' atomic fields and
 // their threads' CPU clocks.
 // Graceful stop. sq_stop_gracefully (the http server calls it) makes SIGTERM and SIGINT start a
 // stop instead of ending the program: the handler records the signal, the watchdog wakes every
-// shard, and each shard wakes its goroutines blocked in accept, whose accept (and every later
+// shard, and each shard wakes its tasks blocked in accept, whose accept (and every later
 // one) returns SQ_ESTOP. The program then finishes its work and returns from main. If it hasn't
 // within the grace period (SQUARK_SHUTDOWN, default 10s), the watchdog ends it with status 1. A
 // second signal ends it at once, as the signal would by default.
@@ -3355,7 +3360,7 @@ void sq_stop_gracefully(void) {
 
 int64_t sq_stopping(void) { return atomic_load_explicit(&graceful_signal, memory_order_relaxed) != 0; }
 
-// stop_shard runs on each shard once it sees the stop: its goroutines blocked in accept return, and
+// stop_shard runs on each shard once it sees the stop: its tasks blocked in accept return, and
 // those blocked on other I/O get a timer for the stop's cap (later waits check the cap anyway).
 static void stop_shard(void) {
 	sq_self->stop_seen = true;
@@ -3412,8 +3417,8 @@ sq_string sq_pool_name(int64_t i) {
 	return (sq_string){(const uint8_t *)n, (int64_t)strlen(n)};
 }
 
-// sq_pool_stat returns pool i's: 0 capacity (every shard's slots), 1 proven stack, 2 goroutines
-// running, 3 the most that ran at once on one shard, 4 goroutines started.
+// sq_pool_stat returns pool i's: 0 capacity (every shard's slots), 1 proven stack, 2 tasks
+// running, 3 the most that ran at once on one shard, 4 tasks started.
 int64_t sq_pool_stat(int64_t i, int64_t which) {
 	if (i < 0 || i >= sq_npools) return 0;
 	int64_t v = 0;
@@ -3575,13 +3580,13 @@ static void shard_run(void) {
 	sigaltstack(&ss, NULL);
 #if SQ_KQUEUE
 	sq_self->pollfd = kqueue();
-	struct kevent wake; // other shards trigger this to hand us goroutines (shared channels)
+	struct kevent wake; // other shards trigger this to hand us tasks (shared channels)
 	EV_SET(&wake, 1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
 	kevent(sq_self->pollfd, &wake, 1, NULL, 0, NULL);
 #else
 	sq_self->pollfd = epoll_create1(0);
 	sq_self->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-	struct epoll_event wake = {.events = EPOLLIN | EPOLLET}; // data 0: no goroutine, just a wakeup
+	struct epoll_event wake = {.events = EPOLLIN | EPOLLET}; // data 0: no task, just a wakeup
 	epoll_ctl(sq_self->pollfd, EPOLL_CTL_ADD, sq_self->wake_fd, &wake);
 #endif
 	pthread_mutex_init(&sq_self->remote_mu, NULL);
@@ -3615,7 +3620,7 @@ static void start_shards(void) {
 	}
 }
 
-// sq_start_shards is called by shard 0's main goroutine once package variables and shared vars
+// sq_start_shards is called by shard 0's main task once package variables and shared vars
 // are initialized: everything it wrote is visible to the new threads (pthread_create orders it).
 void sq_start_shards(void) {
 	if (sq_shard_count <= 1) return;

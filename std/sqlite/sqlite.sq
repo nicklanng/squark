@@ -35,8 +35,8 @@ pub struct Stmt {
 
 // SQLite calls get a generous stack budget: the query planner and VDBE are not tiny. Statements
 // start inline; one that runs long or must wait for another connection's lock moves to a helper
-// thread mid-call, so the thread's other goroutines keep running. Each connection has a lock that
-// keeps one goroutine in it at a time (see shim.c).
+// thread mid-call, so the thread's other tasks keep running. Each connection has a lock that
+// keeps one task in it at a time (see shim.c).
 
 extern fn sys_open(path str, db *rawptr) -> int stack 128K blocking c"sq_sqlite_open"
 
@@ -89,13 +89,13 @@ fn check(rc int) -> ! {
 
 // open opens (creating if needed) a database file. When the file is locked by another connection
 // (another thread or process, e.g. with threads N or workers N), statements wait up to 5 seconds
-// before failing with "database is locked"; only the calling goroutine waits.
+// before failing with "database is locked"; only the calling task waits.
 //
-// A connection serves one goroutine at a time: a statement holds it from its first Bind or step
-// until reset (so start with `defer st.reset()`), and other goroutines that use the connection
+// A connection serves one task at a time: a statement holds it from its first Bind or step
+// until reset (so start with `defer st.reset()`), and other tasks that use the connection
 // meanwhile wait for it. Stmt.exec runs a statement from start to end in one call and gives the
 // connection back before it returns. DB.exec, prepare, changes and last_insert_row_id hold it for
-// the call (or join the statement the goroutine is running: call changes and last_insert_row_id
+// the call (or join the statement the task is running: call changes and last_insert_row_id
 // before reset).
 pub fn open(path str) -> DB ! {
 	for i := 0; i < len(path); i++ {

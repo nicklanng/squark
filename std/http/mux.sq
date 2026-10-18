@@ -31,7 +31,7 @@ struct Route {
 // its own when it runs main).
 thread routes Route[..max_routes]
 
-// handle_func registers h for pattern, as Go's http.handle_func does (Go 1.22 patterns). Serve with
+// handle_func registers h for pattern ("GET /notes/{id}", "/static/{path...}"). Serve with
 // listen_and_serve(addr, nil) to dispatch to the registered patterns.
 //
 // A pattern is [METHOD ]PATH. A method matches only that method ("GET" also matches HEAD); without
@@ -392,7 +392,7 @@ fn unhex(c u8) -> u8 {
 }
 
 // Error replies with status code and its standard text as a plain-text body ("404 Not Found").
-// Like Go's http.Error, it doesn't end the handler: return after calling it.
+// It doesn't end the handler: return after calling it.
 pub fn send_error(w *ResponseWriter, code int) {
 	w.set_header("Content-Type", "text/plain; charset=utf-8")
 	w.write_header(code)

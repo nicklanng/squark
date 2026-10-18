@@ -1,0 +1,21 @@
+program
+
+// Results aren't named: the error spells the results to write instead.
+
+fn split(total int) -> (x, y int) { // ERROR "results aren't named: write -> (int, int) and return the values (declare them as variables in the body: x, y)"
+	return total / 2, total - total/2
+}
+
+fn pair() -> (n int, err error) { // ERROR "results aren't named: write -> int ! and return the values"
+	return 1, nil
+}
+
+fn load() -> (n int, ok bool) ! { // ERROR "results aren't named: write -> (int, bool) !"
+	return 1, true, nil
+}
+
+fn one() -> (p *u8[]) { // ERROR "write -> *u8[] and return the values (declare it as a variable in the body: p)"
+	return nil
+}
+
+fn main() {}

@@ -1205,21 +1205,7 @@ func (g *gen) tryExpr(e *TryExpr) string {
 		errExpr = t
 	}
 	fmt.Fprintf(&b, "if (__builtin_expect(%s.msg.p != NULL, 0)) { ", errExpr)
-	if g.fn != nil && len(g.fn.Defers) > 0 && namedResults(g.fn.Sig) {
-		// as `return zero..., err`: set the named results, run the defers (which may change them),
-		// return the named results
-		sig := g.fn.Sig
-		for _, r := range sig.Results[:len(sig.Results)-1] {
-			fmt.Fprintf(&b, "%s = %s; ", r.CName, g.zero(r.Type))
-		}
-		fmt.Fprintf(&b, "%s = %s; ", sig.Results[len(sig.Results)-1].CName, errExpr)
-		b.WriteString(g.unwindPop())
-		for i := len(g.fn.Defers) - 1; i >= 0; i-- {
-			d := g.fn.Defers[i]
-			fmt.Fprintf(&b, "if (_d%d_on) { %s; } ", d.ID, g.deferCall(d))
-		}
-		fmt.Fprintf(&b, "return %s; ", g.namedResultsValue(sig))
-	} else if g.fn != nil {
+	if g.fn != nil {
 		b.WriteString(g.unwindPop())
 		for i := len(g.fn.Defers) - 1; i >= 0; i-- {
 			d := g.fn.Defers[i]

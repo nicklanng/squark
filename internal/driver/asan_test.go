@@ -15,7 +15,7 @@ import (
 const asanOptions = "detect_stack_use_after_return=1:detect_stack_use_after_scope=1:use_sigaltstack=0:exitcode=86"
 
 // needClangASan skips a test under gcc: gcc's AddressSanitizer loses track of the fake stack across
-// squark's goroutine stack switches ("False positive error reports may follow"), clang's doesn't.
+// squark's task stack switches ("False positive error reports may follow"), clang's doesn't.
 func needClangASan(t *testing.T) {
 	if strings.Contains(os.Getenv("CC"), "gcc") {
 		t.Skip("the ASan harness needs clang (CC=" + os.Getenv("CC") + ")")
@@ -34,7 +34,7 @@ func TestRunASan(t *testing.T) {
 }
 
 // danglingProg keeps a pointer into a returned frame. rawptr bypasses the lifetime checker, so it
-// compiles; BODY runs in main or in a task, to cover the main stack and a goroutine's.
+// compiles; BODY runs in main or in a task, to cover the main stack and a task's.
 const danglingProg = `program
 
 use runtime

@@ -1,18 +1,24 @@
-// Command squark compiles squark programs: a Go-like language that never uses the heap.
+// Command squark compiles squark programs: a language that never uses the heap.
 package main
 
 import (
 	"flag"
 	"fmt"
+	"io/fs"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
 
+	"squark"
 	"squark/internal/driver"
+	"squark/internal/tour"
 )
 
 func usage() {
@@ -22,6 +28,7 @@ func usage() {
   squark check [dir]                                type and lifetime check only
   squark doc [dir] [pkg]                            list functions with their reference provenance
   squark emit-c [dir]                               print the generated C
+  squark tour [-http addr] [-open=false] [-export dir]   the squark tour, in your browser
 `)
 	os.Exit(2)
 }
@@ -79,19 +86,22 @@ func main() {
 	cmd := os.Args[1]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	output := fs.String("o", "", "output binary")
-	verbose := fs.Bool("v", false, "print goroutine pool and stack report")
+	verbose := fs.Bool("v", false, "print task pool and stack report")
 	work := fs.String("work", "", "keep intermediate C files in this directory")
 	opt := fs.String("opt", "-O3", "C optimization flag")
 	cpu := fs.String("cpu", "", "CPU to build for: baseline, native, x86-64-v3, ... (default $SQUARK_CPU, or baseline)")
 	manifest := fs.String("manifest", "", "build: also print resource settings that fit the program: k8s or systemd")
 	static := fs.Bool("static", false, "link statically, C libraries included, for an empty container image (Linux)")
+	httpAddr := fs.String("http", "127.0.0.1:3999", "tour: the address to serve on")
+	openBrowser := fs.Bool("open", true, "tour: open the tour in a browser")
+	export := fs.String("export", "", "tour: write a static copy of the tour, with every lesson's output baked in, into this directory")
 	fs.Parse(os.Args[2:])
 	dir := "."
 	if fs.NArg() > 0 {
 		dir = fs.Arg(0)
 	}
 	// flags must come before the directory; only run (program arguments) and doc (package) take more
-	maxArgs := map[string]int{"build": 1, "check": 1, "emit-c": 1, "doc": 2}
+	maxArgs := map[string]int{"build": 1, "check": 1, "emit-c": 1, "doc": 2, "tour": 0}
 	if n, ok := maxArgs[cmd]; ok && fs.NArg() > n {
 		fmt.Fprintf(os.Stderr, "squark %s: unexpected arguments %q (flags go before the directory)\n", cmd, fs.Args()[n:])
 		os.Exit(2)
@@ -186,7 +196,49 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Print(src)
+	case "tour":
+		if err := serveTour(*httpAddr, *openBrowser, *export); err != nil {
+			fmt.Fprintln(os.Stderr, "squark tour:", err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 	}
+}
+
+func serveTour(addr string, openBrowser bool, export string) error {
+	site, err := tour.New(mustSub(squark.Tour, "tour"))
+	if err != nil {
+		return err
+	}
+	if export != "" {
+		return site.Export(export, os.Stderr)
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	if host, _, _ := net.SplitHostPort(addr); host != "localhost" {
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			fmt.Fprintln(os.Stderr, "squark tour: warning: it runs the code it is sent; it answers only requests addressed to localhost")
+		}
+	}
+	url := "http://" + l.Addr().String() + "/"
+	fmt.Fprintln(os.Stderr, "squark tour: serving on", url)
+	if openBrowser {
+		opener := "xdg-open"
+		if runtime.GOOS == "darwin" {
+			opener = "open"
+		}
+		exec.Command(opener, url).Start()
+	}
+	return http.Serve(l, site.Handler())
+}
+
+func mustSub(fsys fs.FS, dir string) fs.FS {
+	sub, err := fs.Sub(fsys, dir)
+	if err != nil {
+		panic(err)
+	}
+	return sub
 }

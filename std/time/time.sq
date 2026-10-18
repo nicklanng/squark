@@ -36,7 +36,7 @@ impl Time {
 
 pub fn since(t Time) -> Duration { return Duration(nanotime() - t.mono) }
 
-// sleep parks the calling goroutine for at least d.
+// sleep parks the calling task for at least d.
 pub fn sleep(d Duration) { sys_sleep(int(d)) }
 
 // after is for select only: `case <-time.after(d):` runs if no other case is ready within d.
@@ -53,7 +53,7 @@ impl Duration {
 	pub fn milliseconds(self) -> int { return int(self) / 1000000 }
 	pub fn seconds(self) -> f64      { return f64(self) / 1e9 }
 
-	// string writes d as Go's Duration.string does ("1h2m3.5s", "1.5ms", "0s") into buf and returns
+	// string writes d in the form parse_duration reads ("1h2m3.5s", "1.5ms", "0s") into buf and returns
 	// it as a view of buf. 32 bytes hold any duration; a shorter buf gets the beginning.
 	pub fn string(self, buf u8[]) -> str in buf {
 		var arr u8[32]
@@ -111,8 +111,8 @@ impl Duration {
 	}
 }
 
-// InvalidDuration is parse_duration's error for any string that isn't a duration (Go's messages name
-// the string; a squark error's message is constant).
+// InvalidDuration is parse_duration's error for any string that isn't a duration (an error's
+// message is constant, so it doesn't name the string).
 pub fault InvalidDuration 22 "time: invalid duration"
 
 // fmt_frac writes the fraction of v/10^prec, without trailing zeros, at the end of buf, and returns
@@ -152,7 +152,7 @@ fn fmt_int(buf u8[], v u64) -> int {
 	return w
 }
 
-// parse_duration parses a duration as Go's time.parse_duration does: a signed sequence of decimal
+// parse_duration parses a duration: a signed sequence of decimal
 // numbers, each with an optional fraction and a unit ("300ms", "-1.5h", "2h45m"). The units are
 // "ns", "us" (or "µs"), "ms", "s", "m" and "h". A malformed, unitless (except "0") or
 // out-of-range string is InvalidDuration.

@@ -38,12 +38,7 @@ fn grow(s R[], x R) -> R[] {
 	return s
 }
 
-fn mk() -> (r R, n int) { // ERROR "named result r holds"
-	r.m[1] = 1
-	return
-}
-
-fn fresh() -> (R, int) { return R{}, 1 } // unnamed and built by a literal: fine
+fn fresh() -> (R, int) { return R{}, 1 } // a fresh value, built by a literal: fine
 
 fn main() {
 	var r R
@@ -54,6 +49,5 @@ fn main() {
 	st.add("a") // ERROR "cannot call add on a copy of st"
 	var b R[1]
 	fill(b[:])
-	_, _ = mk()
 	_, _ = fresh()
 }

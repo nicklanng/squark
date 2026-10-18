@@ -1,8 +1,7 @@
 # squark
 
-> **Experimental.** squark is an experimental language exploring programming without a heap. It
-> grew out of Go and keeps much of its semantics, with a syntax of its own. Expect breaking
-> changes; it isn't meant for production use.
+> **Experimental.** squark is an experimental language exploring programming without a heap.
+> Expect breaking changes; it isn't meant for production use.
 
 A language where memory is something you can see: there is no heap, every byte a program can use
 is accounted for at compile time, and the compiler proves that no reference outlives the memory it
@@ -32,7 +31,7 @@ fn main() {
 (This is `examples/greet`, without its header comment.)
 
 The compiler is written in Go, emits C, and builds with clang -O3. It produces small native binaries
-(the SQLite notes server is about 100 KiB) with an M:1 goroutine scheduler on kqueue (epoll on Linux).
+(the SQLite notes server is about 100 KiB) with an M:1 task scheduler on kqueue (epoll on Linux).
 
 **Docs:** [language reference](docs/spec.md) (precise; written so people and LLMs can write correct
 squark) · [standard library](docs/stdlib.md) (generated) · [design rationale](docs/design.md)
@@ -45,6 +44,12 @@ bin/squark run examples/hello
 bin/squark build -v -o bin/notes examples/notes   # -v prints the memory breakdown
 bin/squark doc examples/notes strings             # functions with their reference provenance
 ```
+
+New to squark? `bin/squark tour` opens **A Tour of squark** in your browser: about fifty short
+lessons, each compiled and run by the compiler on your machine. Every run draws the program's memory
+map, and some lessons ask you to fix a program or to make the compiler reject one.
+`squark tour -export dir` writes a static copy, with every lesson's output baked in, for any web
+server.
 
 Requires Go 1.27+ and clang. The `sqlite` package links Homebrew's libsqlite3; edit the `link`,
 `cflags` and `ldflags` lines in `std/sqlite/sqlite.sq` for other setups.
@@ -63,12 +68,12 @@ There are four kinds of memory, and every value lives in one of them:
 | an arena | a `with arena` block | `n := new(Node) in scratch` |
 | C libraries | their own business | SQLite's page cache |
 
-Anything that would need a heap in Go, like returning a pointer to a local or storing a reference
+Anything that would need a heap, like returning a pointer to a local or storing a reference
 somewhere that outlives it, is a compile error that tells you where the memory should come from:
 
 ```
 main.sq:13:9: cannot return reference to variable x (declared at main.sq:12): it lives in this
-function's stack frame (Go would move it to the heap); have the caller pass in the storage instead
+function's stack frame; have the caller pass in the storage instead
 main.sq:25:7: a reference to variable inner (declared at main.sq:24) does not live long enough to be
 stored in variable outer (declared at main.sq:22) (link stores argument 2 inside argument 1)
 main.sq:30:12: a reference to variable local (declared at main.sq:28) does not live long enough to
@@ -77,9 +82,8 @@ be stored in arena a (declared at main.sq:14)
 
 ## Language tour
 
-The basics are familiar from Go: packages, structs, methods, pointers, slices of arrays, multiple
-results, `defer`, `switch`, labeled `break`/`continue`, constants, variadic functions,
-goroutines and channels, with the same semantics. The syntax is squark's own:
+The basics are packages, structs, methods, pointers, slices of arrays, multiple results, `defer`,
+`switch`, labeled `break`/`continue`, constants, variadic functions, tasks and channels:
 
 ```squark
 fn cut(s, sep str) -> (str, str, bool) in s {   // results after ->; `in s`: they point into s
@@ -105,9 +109,8 @@ if not done and (a or b) { }
 
 Types read left to right with their size after them (`u8[64]`, `int[str; 1024]`), errors propagate
 with a `!` after the call, and names are `snake_case` for values and `PascalCase` for types, made
-visible to other packages with `pub`. Numbered names are enums, not `iota`: `enum Dir { north,
-east, south, west }` is a type with members `Dir.north`... The rest of this section is what
-squark adds to Go's model.
+visible to other packages with `pub`. Numbered names are enums: `enum Dir { north, east, south,
+west }` is a type with members `Dir.north`... The rest of this section is what sets squark apart.
 
 ### Arenas: scoped dynamic allocation
 
@@ -174,7 +177,7 @@ Leaving provenance out is fine: `squark doc` shows what was inferred. Declaring 
 a checked interface, so a later change to the body can't quietly add a new way for references to
 escape.
 
-### Tasks: goroutines with proven stacks
+### Tasks: concurrency with proven stacks
 
 ```squark
 task serve_conn(c net.Conn, h Handler) pool 10000 stack 256K {
@@ -184,8 +187,8 @@ task serve_conn(c net.Conn, h Handler) pool 10000 stack 256K {
 start serve_conn(c, h)
 ```
 
-Only tasks can be started. `isolate` on a task makes a panic in one of its goroutines run that
-goroutine's deferred calls and end only it, not the program; `http.serve_conn` is isolate, so a
+Only tasks can be started. `isolate` on a task makes a panic in it run its deferred calls and end
+only that task, not the program; `http.serve_conn` is isolate, so a
 handler that panics closes its own connection and the server goes on. The pool is the maximum
 number running at once: `start` waits for a
 free slot instead of growing, and `start f(x) else { ... }` runs the block instead of waiting. The compiler proves each task's stack size from clang's frame sizes
@@ -200,11 +203,11 @@ program {
 }
 ```
 
-Each scheduler thread runs its own copy of `main`, with its own package variables and goroutines,
+Each scheduler thread runs its own copy of `main`, with its own package variables and tasks,
 so nothing needs locks. A package variable says which it is: `thread db sqlite.DB` is one per
 thread, `shared table = make_table()` is one copy, read-only after start-up, and `shared jobs Job
-chan[64]` is a channel between threads. `SQUARK_THREADS=N` overrides the count at run time, like
-`GOMAXPROCS`. Without the directive a program runs on one thread.
+chan[64]` is a channel between threads. `SQUARK_THREADS=N` overrides the count at run time.
+Without the directive a program runs on one thread.
 
 ### Memory budgets
 
@@ -218,9 +221,9 @@ program {
 $ squark build examples/notes
 memory: worst case 97.1 MiB of 128.0 MiB budget
   code                          112.0 KiB
-  static data                   576.0 KiB   package variables, arenas, channel buffers, goroutine tables
+  static data                   576.0 KiB   package variables, arenas, channel buffers, task tables
   task http.serve_conn           96.0 MiB   = 512 × 192.0 KiB stack (proven 187952 B)
-  main goroutine                144.0 KiB   = 1 × 144.0 KiB stack (proven 132432 B)
+  main task                     144.0 KiB   = 1 × 144.0 KiB stack (proven 132432 B)
   task http.wake_idle            16.0 KiB   = 1 × 16.0 KiB stack (proven 9328 B)
   blocking-call helpers         320.0 KiB   = 2 × 160.0 KiB stack: threads that run blocking and detached C calls
   C libraries                 not counted   sqlite3 manages its own memory
@@ -273,8 +276,8 @@ masks (`(v == c).any()`, `m.select(a, b)`), and `t.lookup(idx)` reads a 16-byte 
 indexes at once (hex digits of 16 bytes in two lookups). Plain loops over slices are vectorized by
 clang already (see Loops below); SIMD types are for what it can't do, such as float sums, which it
 keeps in source order, and searches that stop early. Both run 6 to 7 times faster than scalar code
-in `bench/squark/kernels`. On x86-64, `squark build -cpu x86-64-v3` (or `native`) uses AVX2, as
-`GOAMD64=v3` does for Go; the default is SSE2, which every x86-64 has.
+in `bench/squark/kernels`. On x86-64, `squark build -cpu x86-64-v3` (or `native`) uses AVX2; the
+default is SSE2, which every x86-64 has.
 
 ### What's deliberately missing
 
@@ -368,11 +371,13 @@ the OS.
 ## Layout
 
 ```
-cmd/squark          build, run, check, doc, emit-c
+cmd/squark          build, run, check, doc, emit-c, tour
 internal/compiler   lexer, parser, type checker, region inference, call graph, C generator, doc
 internal/driver     clang, stack proofs, pools, memory budget, no-heap check, tests
+internal/tour       the tour's server: lessons, compile-and-run, the memory map, static export
 runtime/            scheduler, context switch (arm64/x86-64), netpoll, channels, maps, arenas
 std/                standard library (squark + C shims), embedded in the compiler
+tour/               the tour: lessons/ (one Markdown file per chapter) and site/ (the page)
 testdata/           compile-error tests (// ERROR "...") and run tests (.sq + .out)
 bench/              Go baselines, load generator, process sampler, harness
 scripts/            test-linux.sh: the test suite on Linux in Docker
@@ -388,7 +393,7 @@ docs/design.md      the language design and its rationale
   standard library and examples.
 - Provenance contracts on function types. Indirect calls use whole-program inference instead.
 - One SQLite connection per thread: a slow query no longer stalls its thread, but the thread's
-  other goroutines that need the database wait for it (a small pool per thread would let them in).
+  other tasks that need the database wait for it (a small pool per thread would let them in).
 
 ## License
 

@@ -3,9 +3,9 @@
 // Run: squark run examples/echo, then try: nc localhost 7007
 //
 // It shows:
-//   - a goroutine per connection, from a task pool of fixed size
-//   - a read buffer on each goroutine's stack, whose size the compiler proves
-//   - blocking reads and writes that park only the goroutine that makes them
+//   - a task per connection, from a task pool of fixed size
+//   - a read buffer on each task's stack, whose size the compiler proves
+//   - blocking reads and writes that park only the task that makes them
 program
 
 use net, os, time

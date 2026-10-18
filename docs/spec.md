@@ -1,9 +1,7 @@
 # squark language reference
 
-This is the precise reference for writing squark. squark grew out of Go, and its semantics are
-still Go's wherever this document doesn't say otherwise (integer arithmetic, slices, strings,
-`switch`, `select`, `defer`, method sets...). Its syntax is its own: this document describes all of
-it. The standard library API is in [stdlib.md](stdlib.md), which is generated from the compiler and
+This is the precise reference for writing squark: its syntax, its semantics and its memory rules.
+The standard library API is in [stdlib.md](stdlib.md), which is generated from the compiler and
 always current.
 
 ## 0. The ten rules that matter most
@@ -29,14 +27,45 @@ always current.
    formatted with dynamic text; use the code, or log separately. A `!` after a call returns its
    error from the enclosing function: `f := os.open(path)!`.
 9. **`str(b)` is a zero-copy view of `b`.** `u8[](s)` is an error without an arena.
-10. **Cooperative within a thread; threads share nothing mutable.** A thread's goroutines switch
+10. **Cooperative within a thread; threads share nothing mutable.** A thread's tasks switch
     only at blocking operations (I/O, channel operations, `time.sleep`, `start` on a full pool,
     `runtime.gosched()`) and in the loops of tasks marked `preemptible`. So data shared between a
-    thread's goroutines needs no locks as long as you don't block mid-update. With `threads N` (or
+    thread's tasks needs no locks as long as you don't block mid-update. With `threads N` (or
     `workers N`) each thread runs its own copy of `main` with its own package variables; threads
     share only read-only data and shared channels. No lock is ever needed. A busy loop in an
     ordinary task holds up its thread: mark CPU-heavy tasks `preemptible`, and the runtime warns
-    about a goroutine that holds its thread for 100ms while others wait.
+    about a task that holds its thread for 100ms while others wait.
+
+## 0a. Core semantics
+
+What the rest of this document builds on:
+
+- **Values.** Every type has a zero value: 0, `false`, `""`, `nil` for pointers, views and
+  functions, and zeroed fields and elements for structs, arrays and vectors. Assignment and
+  argument passing copy the value; a pointer, slice, string, or map or channel view is a reference
+  to memory elsewhere, and copying it copies the reference.
+- **Integers** are two's complement and wrap on overflow. `/` truncates toward zero, `%` has the
+  sign of the dividend, and division by zero panics. There are no implicit conversions between
+  numeric types: `f64(n)`, `int(x)`, `u8(c)`.
+- **Constants** are exact. An untyped constant takes the type its use needs, or its default type
+  (`int`, `f64`, `rune`, `str`, `bool`) where nothing says.
+- **Strings** are immutable bytes, usually UTF-8. `len(s)` counts bytes, `s[i]` is a byte (`u8`),
+  `s[lo:hi]` is a substring sharing the bytes, `for i, r in s` decodes runes (an invalid byte gives
+  `utf8.rune_error` and moves on by one), and `==`, `<` compare bytes.
+- **Slices** are a pointer, a length and a capacity. `s[lo:hi]` (either bound may be left out) is
+  a view of the same storage with capacity `cap(s) - lo`; indexes and slice bounds are checked and
+  panic when out of range. `copy(dst, src)` copies `min(len(dst), len(src))` elements, overlap
+  allowed, and returns the count. A slice compares only with `nil`.
+- **Maps** return the zero value for a missing key (`v, ok := m[k]` says whether it was there),
+  and iterate in no particular order.
+- **Comparison.** Numbers, strings, bools, pointers, errors, enums and channels compare with `==`;
+  structs and arrays compare element by element if their elements can.
+- **`switch`** tries its cases top to bottom and runs the first that matches; there is no
+  fallthrough. A `switch` without a value picks the first case that is true.
+- **`defer f(x)`** evaluates `f` and `x` when the statement runs and calls `f` when the function
+  returns, the most recent deferred call first.
+- **Methods**: a `&self` method can be called on an addressable value (its address is taken) and
+  a `self` method on a pointer (the value is copied).
 
 ## 1. Lexical elements
 
@@ -65,8 +94,12 @@ always current.
 - **Pragmas:** `//squark:noinline` before a function stops clang from inlining it. No other pragmas
   exist.
 - **Semicolons** are inserted at the end of a line that ends in an identifier, a literal, `)`, `]`,
-  `}`, `!`, `chan`, `++`, `--`, `return`, `break` or `continue`, as in Go. Comments, string, rune and
-  number literals are as in Go.
+  `}`, `!`, `chan`, `++`, `--`, `return`, `break` or `continue`.
+- **Comments** run from `//` to the end of the line, or between `/*` and `*/`.
+- **Literals:** strings are `"..."` with backslash escapes (`\n`, `\t`, `\\`, `\"`, `\xff`, `\u00e9`,
+  octal `\377`…) or raw between backquotes; runes are `'x'` with the same escapes; integers are
+  decimal, `0x`, `0o` or `0b`, with `_` between digits; floats have a `.` or an exponent
+  (`1.5`, `2e-3`, `0x1.8p3`).
 - **Names:** by convention functions, methods, fields, variables and constants are `snake_case`;
   types and faults are `PascalCase`. Visibility doesn't depend on the spelling (see `pub`, §2).
 
@@ -123,7 +156,7 @@ in C: `*Node[]` is a slice of `*Node`; a pointer to an array is `*(u8[64])`.
 
 | type | notes |
 |---|---|
-| `bool`, `str`, `int` (64-bit), `i8` `i16` `i32` `i64`, `uint` (64-bit), `u8` `u16` `u32` `u64`, `uintptr`, `f32`, `f64` | as in Go; `rune` is `i32` |
+| `bool`, `str`, `int` (64-bit), `i8` `i16` `i32` `i64`, `uint` (64-bit), `u8` `u16` `u32` `u64`, `uintptr`, `f32`, `f64` | fixed sizes, two's complement integers, IEEE 754 floats; `rune` is `i32` |
 | `rawptr` | untyped C pointer (`void*`) for extern calls; converts to and from pointers and `uintptr`, and is not lifetime-checked |
 | `error` | a value: integer code + constant message (§4). Methods `message() str`, `code() int`. Zero value is `nil`, whose `message()` is `""` and `code()` is 0 (not a panic: an error isn't an interface) |
 | `arena` | a reference to arena storage. Methods `used()`, `left()`, `cap()` (all `int`) |
@@ -175,10 +208,9 @@ for k, v in seen {}
   themselves. Pass a view. The same holds for a struct, array or vector that contains map or
   channel storage: copying one out of a variable is an error (use a pointer), while a fresh value
   (`T{}`, a call result) is fine because its storage is still unused. This covers every copy:
-  `copy`, `append(s, xs...)`, a vector's `append`, an `append` that grows into an arena, calling a
-  method that takes `self` (take `&self` instead), and a named result (it is a
-  variable that is copied out on return; return an unnamed result built by a literal instead).
-- Arrays and vectors copy by value, like Go arrays.
+  `copy`, `append(s, xs...)`, a vector's `append`, an `append` that grows into an arena, and
+  calling a method that takes `self` (take `&self` instead).
+- Arrays and vectors copy by value.
 
 ### Vectors `T[..N]`
 
@@ -248,8 +280,8 @@ t.lookup(x >> 4)               // lane i is t[(x>>4)[i]]: x a u8x16 (or u8x32)
 
 - Operators: `+ - *` on all vectors, `/` on float vectors only (no CPU divides integer vectors:
   divide the lanes one at a time), `& | ^ &^` and unary `^` on integer vectors, unary `-`.
-  Integer lanes wrap. `<<` and `>>` shift every lane of an integer vector by one count, as in
-  Go: a count of at least the lane width gives 0 (or the sign for `>>` of a signed lane), and a
+  Integer lanes wrap. `<<` and `>>` shift every lane of an integer vector by one count, as
+  for scalars: a count of at least the lane width gives 0 (or the sign for `>>` of a signed lane), and a
   negative count panics.
 - Both operands have the same type. An untyped constant is broadcast; a typed scalar must be
   broadcast with a conversion (`v * f32x4(k)`).
@@ -287,13 +319,13 @@ the source order), searches that stop early, and data-dependent selects.
 ### Functions, methods, tasks, externs
 
 ```squark
-fn name(a int, b, c str) -> int { ... }      // parameters as in Go: a name list, then the type
+fn name(a int, b, c str) -> int { ... }      // parameters: names, then their type
 fn f() { ... }                               // no results
 fn f() -> (int, bool) { ... }                // several results
-fn f() -> (n int, err error) { ... }         // named results
 fn open(path str) -> File ! { ... }          // ! adds an error result: (File, error)
 fn check() -> ! { ... }                      // just an error
 fn divmod(a, b int) -> (int, int) ! { ... }  // (int, int, error)
+                                             // results have no names: return the values
 
 struct Stack {
     items int[..64]
@@ -307,10 +339,10 @@ impl Stack {                                 // another impl block (in any file 
     fn pop(&self) -> int { ... }
 }
 
-task name(params) pool N { ... }             // a goroutine entry point; no results
+task name(params) pool N { ... }             // started with start; no results
 task name(params) pool N stack 64K { ... }   // also assert a stack upper bound
 task name(params) pool N preemptible { ... } // its loops may yield after a time slice
-task name(params) pool N isolate { ... }     // a panic in it ends only that goroutine
+task name(params) pool N isolate { ... }     // a panic in it ends only that task
 
 extern fn sqrt(x f64) -> f64 stack 1K                        // the C function of the same name
 extern fn read(fd int, b u8[]) -> int stack 8K c"sq_read"    // the C symbol differs from the name
@@ -320,26 +352,26 @@ extern fn query(q str) -> int stack 128K blocking c"slow_query" // runs on a hel
 - A method is declared in an `impl T { ... }` block, for a struct, enum or named type of the same
   package; a type may have any number of impl blocks, in any of the package's files. Its first
   parameter is `self`, a copy of the value (type `T`), or `&self`, a pointer to it (type `*T`), and
-  `self` is an ordinary variable in the body (`self.n += 1`). It is called `x.m(...)`; as in Go, a
-  `&self` method can be called on an addressable value (its address is taken) and a `self` method
-  on a pointer.
+  `self` is an ordinary variable in the body (`self.n += 1`). It is called `x.m(...)`; a `&self`
+  method can be called on an addressable value (its address is taken) and a `self` method on a
+  pointer.
 - Each method's name belongs to its type, so two types can both have a `close`.
 - `pool N`: at most N instances run at once. `start` on a full pool waits for a slot;
   `start f(x) else { ... }` runs the block instead (and starts nothing), to shed load or answer
   "busy".
-- `preemptible` on a task: once one of its goroutines has run for a time slice (about 10ms)
+- `preemptible` on a task: once a running task has run for a time slice (about 10ms)
   without blocking, it yields at the next loop iteration, in its own code or any function it
   calls, so a long computation doesn't hold up its thread. Those functions get a check at each
-  loop iteration (a load and a branch, too cheap to measure); called from other goroutines they
+  loop iteration (a load and a branch, too cheap to measure); called from other tasks they
   never yield. Only a preemptible task can be interrupted mid-loop, so keep it from leaving state
-  that other goroutines read half-updated across a loop iteration (or update it in one step).
-- `isolate` on a task: a panic in one of its goroutines (or anything that goroutine calls) prints
-  as usual, then unwinds that goroutine instead of ending the program: each frame's deferred
-  calls run, innermost first, and the goroutine ends at the task's entry, giving its pool slot
-  back; goroutine locks it still holds (`sq_gmutex`, as C shims use) are released. Release other
-  resources with `defer` (`defer f.close()`), as in Go. Its stack and arenas just go away: the
-  memory rules already keep every other goroutine from pointing into them. Package and thread
-  variables it was updating stay as they were when it panicked, as in Go. Faults in C code and
+  that other tasks read half-updated across a loop iteration (or update it in one step).
+- `isolate` on a task: a panic in a running task (or anything it calls) prints as usual,
+  then unwinds that task instead of ending the program: each frame's deferred calls run,
+  innermost first, and the task ends at its entry, giving its pool slot back; locks it still
+  holds (`sq_gmutex`, as C shims use) are released. Release other
+  resources with `defer` (`defer f.close()`). Its stack and arenas just go away: the
+  memory rules already keep every other task from pointing into them. Package and thread
+  variables it was updating stay as they were when it panicked. Faults in C code and
   stack overflows still end the program. `http.serve_conn` is isolate: a handler that panics
   closes its own connection, and the server goes on. In a program with an isolate task, each
   function with deferred calls costs a `setjmp` per call.
@@ -349,23 +381,23 @@ extern fn query(q str) -> int stack 128K blocking c"slow_query" // runs on a hel
   on; `str` → `struct { const uint8_t *p; int64_t len; }`; `u8[]` → `struct { uint8_t *p; int64_t
   len, cap; }`; `*T`/`rawptr` → pointers.
 - Extern results are trusted to point to static memory unless provenance is declared.
-- `blocking` on an extern runs each call on a helper thread while the calling goroutine waits, so
+- `blocking` on an extern runs each call on a helper thread while the calling task waits, so
   a C call that blocks (a slow query, a lock wait, a read from a slow disk) doesn't stop the other
-  goroutines of its scheduler thread. Each call costs two thread handoffs (microseconds), so mark
-  only calls that always wait. Arguments may point into the goroutine's stack (it stays put while
-  the goroutine waits). The C function's `stack N` budget applies to the helper threads (two per
+  tasks of its scheduler thread. Each call costs two thread handoffs (microseconds), so mark
+  only calls that always wait. Arguments may point into the task's stack (it stays put while
+  the task waits). The C function's `stack N` budget applies to the helper threads (two per
   scheduler thread, counted in the memory report, each with at least 64 KiB of stack), not to
-  goroutine stacks.
+  task stacks.
 - C code that is usually fast but sometimes slow can move itself instead: `sq_detach()` (in
-  `sq_rt.h`), called in the middle of a C call, moves the running goroutine (its stack, mid-call)
+  `sq_rt.h`), called in the middle of a C call, moves the running task (its stack, mid-call)
   to a helper thread and lets its scheduler thread go on; the C code carries on there.
   `sq_reattach()`, called before the C function returns, moves it back. Fast calls cost nothing
   extra. Between the two, the C code runs on another OS thread, so it must not call into the
   squark runtime or rely on thread-local state or thread-owned locks taken before `sq_detach`.
   `sqlite` does this from SQLite's progress handler (a statement running over 100µs) and busy
-  handler (a lock wait). The stack stays the goroutine's, so `stack N` still counts there.
-- While a goroutine waits or runs elsewhere, others on its thread run, so C state they share
-  needs a lock: the runtime's `sq_gmutex` (in `sq_rt.h`) parks waiting goroutines instead of
+  handler (a lock wait). The stack stays the task's, so `stack N` still counts there.
+- While a task waits or runs elsewhere, others on its thread run, so C state they share
+  needs a lock: the runtime's `sq_gmutex` (in `sq_rt.h`) parks waiting tasks instead of
   blocking the thread.
 
 ### anytype parameters
@@ -422,7 +454,7 @@ fn build(a arena, n int) -> *Node { return new(Node) in a }   // allocate in the
 
 - Sizes are constants.
 - Every declared size (a type, an arena, a capacity, the budget) is at most 1T (2^40 bytes or
-  elements), and a task pool at most 2^24 goroutines.
+  elements), and a task pool at most 2^24 tasks.
 - A full arena panics: `panic: arena scratch is full (capacity 65536, used …, need …)`, unless the
   allocation is written `v, ok := x in a` (§5), which gives `ok == false` instead.
 - `append(s, x) in a` grows a slice to twice its capacity (at least what it needs, and at least 4
@@ -433,7 +465,7 @@ fn build(a arena, n int) -> *Node { return new(Node) in a }   // allocate in the
 
 ### Constants and faults
 
-`const` declares constants as in Go (`const n = 4`, `const ( a = 1; b = 2 )`; every constant
+`const` declares constants (`const n = 4`, `const ( a = 1; b = 2 )`; every constant
 has a value: there is no `iota` and no implicit repetition, an `enum` names a set of numbers),
 plus constant composites: arrays and structs whose elements are constants (numbers, strings, bools, errors, or
 arrays and structs of them):
@@ -499,7 +531,7 @@ and either side of a comparison with an enum. Elsewhere (`x := .north`, an array
 
 ### Variables
 
-Inside a function, `var x T`, `var x = e` and `x := e` declare variables as in Go. A package-level
+Inside a function, `var x T`, `var x = e` and `x := e` declare variables. A package-level
 variable says whether each scheduler thread has its own copy:
 
 ```squark
@@ -526,7 +558,7 @@ pointer refers to could be kept read-only.
 
 A shared channel connects the scheduler threads: `shared jobs Job chan[64]` (declared without a
 value) is one channel for all of them. Send, receive, `close`, `len` and `for ... in` work as for
-any channel; a goroutine blocked on it is woken by whichever thread completes the operation. Its
+any channel; a task blocked on it is woken by whichever thread completes the operation. Its
 elements may not hold references (no strings, slices, maps or pointers), since a reference could
 view one thread's own memory; send numbers, bools, errors, or arrays and structs of them (an index
 or ID instead of a string). Arrays and structs of shared channels work too: `shared inbox Req
@@ -545,7 +577,7 @@ pub Handler: fn(r *Request) -> int
 ```
 
 `struct Name { ... }` declares a struct type and `Name: T` (at package level) a named type with any
-other underlying type; each is a type of its own, as in Go: a `Celsius` doesn't mix with an `f64`
+other underlying type; each is a type of its own: a `Celsius` doesn't mix with an `f64`
 without a conversion. Methods are declared with
 `impl` blocks (above): `impl Celsius { fn fahrenheit(self) -> f64 { return f64(self)*9/5 + 32 } }`.
 An unnamed struct type is written
@@ -565,9 +597,9 @@ An unnamed struct type is written
 | `str(b)` | zero-copy view of `b`'s bytes. `str(b) in a` copies into the arena, and so does `str(s) in a` for a string `s` (to keep a string beyond the memory it views) |
 | `u8[](s)` | only `u8[](s) in a` (copies). Otherwise `copy(buf[:], s)` |
 | `str(r)` (rune) | only for constants; use `utf8.append_rune` |
-| `f(...)!` | if `f`'s last result (an `error`) is non-nil, return it from the enclosing function (whose last result must be `error`), with zero values for the other results (named results too, even if already assigned). Otherwise yields the remaining results. It binds like a call: `f()!.x`, `a.b()!` |
+| `f(...)!` | if `f`'s last result (an `error`) is non-nil, return it from the enclosing function (whose last result must be `error`), with zero values for the other results. Otherwise yields the remaining results. It binds like a call: `f()!.x`, `a.b()!` |
 | `error(code, msg)`, `error(msg)` | builds an error. `msg` must be constant data: a string constant, another error's `message()`, a `shared` variable, a C extern's result, or a string copied into a package arena (`str(b) in pkg_arena`). A package variable's contents can change, so it can't be a message |
-| `not x`, `x and y`, `x or y` | logic, short-circuiting as in Go |
+| `not x`, `x and y`, `x or y` | logic; `and` and `or` evaluate their right operand only when needed |
 | `&T{...}` | address of a temporary that lives until the end of the enclosing block |
 | `T[]{...}`, `T[N]{...}`, `T[...]{...}`, `T[..N]{...}` | slice, array and vector literals; a slice's backing array lives until the end of the enclosing block |
 | `(*T)[]{...}` | a slice of pointers: in an expression `*T[]` would dereference `T[]` |
@@ -583,16 +615,16 @@ literal there needs parentheses unless its type can't be anything else: `for x i
 fine, `for x in (int[2]{1, 2})` needs them (`int[2] {` could be an index and a block).
 
 Integer arithmetic wraps on overflow, division by zero panics, shifts by at least the width
-yield 0 (or -1 for negative signed `>>`), and a negative shift count panics, as in Go.
+yield 0 (or -1 for negative signed `>>`), and a negative shift count panics.
 Converting a float to an integer type when the value doesn't fit saturates: the result is the
-type's minimum or maximum (Go leaves it implementation-defined), and NaN converts to 0.
+type's minimum or maximum, and NaN converts to 0.
 Dereferencing a nil pointer, or calling a nil func value, panics (§9), whatever the offset.
 
-**Order of evaluation.** Calls, method calls and channel receives run left to right as in Go, and
-`a, b = ...` evaluates every index and pointer operand on the left before storing anything. The
-differences, all about side effects within one statement:
+**Order of evaluation.** Calls, method calls and channel receives run left to right, and
+`a, b = ...` evaluates every index and pointer operand on the left before storing anything.
+Within one statement, these run in an order that matters only for side effects:
 
-- `a[i] = f()`: `f()` runs before the index `i` is evaluated (Go: `i` first).
+- `a[i] = f()`: `f()` runs before the index `i` is evaluated.
 - `getm()[key()]`, read or write: the key is evaluated before the map.
 - `getch() <- v`: `v` is evaluated before the channel.
 - Keyed composite literals (`T{b: f(), a: g()}`, `int[3]{2: f(), 0: g()}`) evaluate their elements
@@ -600,8 +632,8 @@ differences, all about side effects within one statement:
 
 If the order matters, compute the operands into variables first.
 
-**Floating-point `min` and `max`** don't implement Go's special cases: with a NaN operand the result
-is not necessarily NaN, and `min(0.0, -0.0)` may return either zero.
+**Floating-point `min` and `max`** don't treat NaN or signed zeros specially: with a NaN operand
+the result is not necessarily NaN, and `min(0.0, -0.0)` may return either zero.
 
 ### Builtins
 
@@ -621,7 +653,7 @@ for v in ch { }            // a channel's values until it is closed
 for i in 0..n { }          // 0, 1, …, n-1; n is evaluated once
 for i in lo..hi { }        // lo, …, hi-1 (both integers of one type; an untyped one takes the other's)
 for _ in 0..3 { }
-for i := n - 1; i >= 0; i-- { }   // the three-clause loop, as in Go
+for i := n - 1; i >= 0; i-- { }   // init; condition; post
 while cond { }
 loop { }                   // until break or return
 outer: for ... { break outer }    // labels on for, while, loop, switch and select
@@ -639,11 +671,11 @@ with deadline 2 * time.second { }
   change the iteration). One variable is the element, except over a channel or a range, where it
   is the value. Over an array the loop reads the array itself, not a copy: changes made in the
   loop are seen by later iterations (copying would put a second array on the stack); loop over a
-  copy explicitly if you need Go's behaviour.
-- A map loop may delete entries as it goes, as in Go. Inserting a *new* key inside the loop may
+  copy explicitly if the loop must not see its own changes.
+- A map loop may delete entries as it goes. Inserting a *new* key inside the loop may
   make it skip or repeat entries (to reuse deleted slots, a map with many deletions compacts
   itself on insert); collect the keys first if you need both.
-- `select` works as in Go: it waits until one of its sends or receives can proceed (a random one
+- `select` waits until one of its sends or receives can proceed (a random one
   if several can), `default` runs if none can, nil channels are never ready, and `break` leaves
   it. `select {}` blocks forever. Cases may mix per-thread and shared channels. For a timeout,
   `case <-time.after(d):` runs if no other case is ready within d; since there is no heap to make
@@ -652,10 +684,11 @@ with deadline 2 * time.second { }
 - `defer` is not allowed inside loops. Its arguments must live until the function returns. The
   builtins it takes are `close`, `panic`, `print` and `println` (defer a function that calls
   `delete`, `copy` or a vector method), and a variadic call needs its arguments as a slice
-  (`defer f(xs...)`).
+  (`defer f(xs...)`). Results aren't named, so a deferred call can't change what the function
+  returns: the return values are computed before the deferred calls run.
 - A panic ends the program at once: deferred calls don't run while panicking (there is no
   `recover`, and the operating system closes the program's files and sockets), except in an
-  `isolate` task (§4), where it unwinds and ends only that goroutine.
+  `isolate` task (§4), where it unwinds and ends only that task.
 - `start f(args)`: `f` must be a task. Arguments must not reference stack or arena memory.
 - Channel sends: the value must not reference stack or arena memory.
 - `with deadline d { ... }` (`d` a `time.Duration`): blocking I/O in the block, and in everything
@@ -664,7 +697,7 @@ with deadline 2 * time.second { }
   read, and an expired deadline (`d <= 0`) fails only the calls that would wait. Blocks nest, and
   the sooner deadline wins: an inner block can shorten the outer deadline but not extend it.
   Leaving the block in any way (its end, `return`, `break`, `continue`) restores the outer one.
-  The deadline belongs to the goroutine, so a task started inside the block doesn't inherit it.
+  The deadline belongs to the task, so a task started inside the block doesn't inherit it.
   It doesn't affect `time.sleep`, channel operations (use `select` with `time.after`, and
   `runtime.deadline_left()` for the time left) or `blocking` C calls, which can't be interrupted.
 - There is no `goto` and no `fallthrough`.
@@ -683,7 +716,7 @@ must not outlive the memory it points to:
   result points into argument 1") and checks them against your arguments.
 - **Arenas:** memory from `with arena x` lives until the end of that block. A package arena is
   static.
-- **Goroutines and channels:** only static memory crosses goroutines.
+- **Tasks and channels:** only static memory passes between tasks.
 
 ### Error messages and fixes
 
@@ -700,14 +733,14 @@ must not outlive the memory it points to:
 | `converting s to u8[] copies it` | `copy(buf[:], s)`, or `u8[](s) in a` |
 | `recursion is not allowed` | loop with an explicit stack (`var stack T[..64]`) |
 | `start needs a task` | declare the function `task f(...) pool N` |
-| `goroutine … can outlive this function` | pass only static data, or values without references (ints, structs of ints) |
+| `task … can outlive this function` | pass only static data, or values without references (ints, structs of ints) |
 | `cannot copy int[str; 8] storage` | pass a view: `fn f(m int[str])` and call `f(store)` |
 | `cannot copy x: T contains … storage` | pass or keep a pointer (`*T`); loop over the indexes and use `&xs[i]` |
 | `cannot copy the elements of xs` | keep a slice of pointers (`*T[]`), or of views for map/chan elements |
 | `cannot call m on a copy of x` | give m a `&self` receiver: `fn m(&self)` |
 | `methods go in an impl block` | `impl T { fn m(&self, ...) { ... } }`, after the type |
 | `a method takes self … or &self … first` | `fn m(self, ...)` or `fn m(&self, ...)`; a function without a receiver goes outside the impl |
-| `named result r holds … storage` | return an unnamed `T{...}`, or take a `*T` parameter and fill it |
+| `results aren't named` | write the types (`-> (int, bool)`, `-> int !`), declare the variables in the body and return them |
 | `append exceeds capacity` (runtime panic) | larger storage, or `append(...) in a` |
 | `mismatched types f32x4 and f32` | broadcast the scalar: `v * f32x4(k)` |
 | `integer vectors have no division` | divide lane by lane in a loop, or multiply by a reciprocal in a float vector |
@@ -761,7 +794,7 @@ n, _ := f.read_full(data[:])
 // command-line flags: the values are kept in the flag package's fixed storage
 port := flag.int_flag("port", 8080, "port to listen on")   // names and usage: constant strings
 idle := flag.duration_flag("idle", 30*time.second, "idle timeout")
-flag.parse()                     // -h prints the usage; a bad flag prints Go's message and exits 2
+flag.parse()                     // -h prints the usage; a bad flag prints why, and exits 2
 serve(*port, *idle, flag.args()) // flag.arg(i) and flag.n_arg() for the positional arguments
 
 // a function returning a new slice: take the output buffer
@@ -806,7 +839,7 @@ if err != nil {
     return NoUser
 }
 
-// HTTP server: Go 1.22 patterns ("METHOD /path/{param}"), 404 and 405 answered for you
+// HTTP server: patterns "METHOD /path/{param}", with 404 and 405 answered for you
 fn get_note(w *http.ResponseWriter, r *http.Request) {
     id, ok := r.path_int("id")       // r.path_value("id") for the string; r.query_param("q") decoded
     if not ok {
@@ -858,11 +891,11 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 
 ## 9. Runtime behaviour
 
-- One OS thread by default. Goroutines are cooperative and switch at blocking operations (and in
-  preemptible tasks' loops). Netpoll is kqueue on macOS and epoll on Linux. One goroutine may
+- One OS thread by default. Tasks are cooperative and switch at blocking operations (and in
+  preemptible tasks' loops). Netpoll is kqueue on macOS and epoll on Linux. One task may
   read a connection while another writes it. Closing a connection, file or listener wakes the
-  goroutines of the same thread blocked on it, whose `read`, `write` or `accept` returns an error
-  (`bad file descriptor`); a goroutine of another thread blocked on it isn't woken, so close a
+  tasks of the same thread blocked on it, whose `read`, `write` or `accept` returns an error
+  (`bad file descriptor`); a task of another thread blocked on it isn't woken, so close a
   descriptor on the thread that uses it.
 - Addresses are `host:port`, `[ipv6]:port` or `:port`. `net.listen(":port")` takes IPv6 and IPv4
   connections on one socket (IPv4 alone where the system has no IPv6). `net.dial` looks names up
@@ -870,43 +903,44 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   then DNS over UDP (TCP for a long reply) on the poller, with resolv.conf's name servers, search
   domains, `ndots`, `timeout` and `attempts`, so a Kubernetes service name resolves as it does for
   C programs. It then tries each address, IPv4 first, until one connects.
-- A watchdog thread asks a goroutine that has run for a time slice to yield (only preemptible
-  tasks do), and prints a warning naming the task when a goroutine has held its thread for 100ms
-  while other goroutines waited on it. Both count the CPU time the thread actually got, so an
-  overloaded machine that doesn't run the thread doesn't make its goroutine look slow. A program
+- A watchdog thread asks a task that has run for a time slice to yield (only preemptible
+  tasks do), and prints a warning naming the task when a task has held its thread for 100ms
+  while other tasks waited on it. Both count the CPU time the thread actually got, so an
+  overloaded machine that doesn't run the thread doesn't make its task look slow. A program
   with nothing else to run isn't warned about. `runtime.gosched()` yields by hand.
 - `threads N` (1 to 1024, or `auto` for one per CPU, below) runs N scheduler threads (shards) in
   one process. The directive says the program is written for threads; without it a program runs one
   thread. `threads auto` is the usual choice: one thread per CPU, and `SQUARK_THREADS=N` in the
-  environment overrides the count at run time (like `GOMAXPROCS`). `SQUARK_THREADS` also
+  environment overrides the count at run time. `SQUARK_THREADS` also
   overrides `threads N`, except that with a `budget` it can't go above N, the count the budget
   was proven for. It has no effect on programs without the directive. Each shard runs `main`
-  with its own `thread` variables (§4), goroutine pools, timers and poller; goroutines never move
+  with its own `thread` variables (§4), task pools, timers and poller; tasks never move
   between shards, so rule 10 holds within each and nothing needs locks. Faults are shared (they're
   read-only). Listening on an address from every shard works: on Linux each shard gets its own
   socket (`SO_REUSEPORT`) and the kernel spreads connections; on macOS the shards share one
   socket. Port 0 is never shared: each shard listening on `":0"` gets its own port (`l.port()`),
   so a program that tests itself listens on one shard. A `net.Conn` is a descriptor and can be
   sent to another shard on a shared channel; use it on one shard at a time, and close it on the
-  shard that uses it (see above). Each shard also has about 350 KiB of runtime data (output
-  buffer, poller and idle-connection tables), counted in static data. `runtime.shard()` and
-  `runtime.shards()` report where a goroutine runs. The process exits when every shard's `main`
-  has returned (a shard whose `main` returns stops its goroutines), at the first panic, or at
-  `os.exit`. The memory budget counts static data and stacks once per shard (and `threads auto`
-  can't be combined with `budget`). `threads` and `workers` combine: workers × threads shards in
-  all. Shards share only constants, `shared` variables and shared channels. A shard whose
-  goroutines all wait on shared channels sleeps until another shard wakes them, so a deadlock
-  across shards hangs instead of reporting `all goroutines are asleep` (with one thread, a
-  goroutine blocked on a shared channel is reported like any other). Externs are called from
-  whichever shard runs the goroutine (or a helper thread, for `blocking` externs), so C libraries
+  shard that uses it (see above). Each shard also has about 100 KiB of runtime data (output
+  buffer, poller, timers, signal stack), counted in static data, plus the idle-connection queue in
+  a program that uses `net`: 4 bytes per connection with `connections N`, 256 KiB without.
+  `runtime.shard()` and `runtime.shards()` report where a task runs. The process exits when
+  every shard's `main` has returned (a shard whose `main` returns stops its tasks), at the
+  first panic, or at `os.exit`. The memory budget counts static data and stacks once per shard
+  (and `threads auto` can't be combined with `budget`). `threads` and `workers` combine: workers ×
+  threads shards in all. Shards share only constants, `shared` variables and shared channels. A
+  shard whose tasks all wait on shared channels sleeps until another shard wakes them, so a
+  deadlock across shards hangs instead of reporting `all tasks are asleep` (with one thread, a
+  task blocked on a shared channel is reported like any other). Externs are called from
+  whichever shard runs the task (or a helper thread, for `blocking` externs), so C libraries
   must be thread-safe (libc and SQLite are; each shard opens its own SQLite connection:
   `thread db sqlite.DB`).
 - **CPUs for `auto`:** `threads auto` and `workers auto` count the CPUs the process may use. On
   Linux that is the smaller of the CPUs it may run on (its affinity: `taskset`, cpusets) and its
   cgroup's CPU limit rounded up (a container's `--cpus 1.5` or a Kubernetes pod's `limits.cpu:
-  1500m` gives 2), much as Go 1.25 sets `GOMAXPROCS`; elsewhere it is the CPUs online.
+  1500m` gives 2); elsewhere it is the CPUs online.
 - `workers N` (1 to 1024, or `auto` for one per CPU) starts N processes before any squark code
-  runs; each has its own package variables, goroutines and connections. Listening sockets use
+  runs; each has its own package variables, tasks and connections. Listening sockets use
   `SO_REUSEPORT`, so the kernel spreads connections across the workers (on Linux; macOS sends them
   all to one). The starting process supervises: SIGINT, SIGTERM and SIGHUP are passed on to every
   worker, and if one exits with a non-zero status the others are stopped and that status is the
@@ -914,7 +948,7 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   once and everything else once per worker; `workers auto` can't be combined with `budget`. SQLite
   connections wait up to 5 seconds for another worker's lock.
 - Each task pool has N stacks of a size proven at compile time, each with a guard page. A C function
-  that exceeds its `stack` budget hits the guard: `fatal error: stack overflow in goroutine [pool]`.
+  that exceeds its `stack` budget hits the guard: `fatal error: stack overflow in task [pool]`.
 - **Loops and SIMD.** clang vectorizes loops, so a loop over slices often runs as SIMD code. A loop
   gets an unchecked copy, which clang can vectorize, when it counts by one (`for i in lo..hi`,
   `for i, x in s`, `for i := a; i < b; i++` with `<=` too, or `for i := a; i >= b; i--` with
@@ -931,8 +965,8 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   every index the counter can reach is in range (and `p` isn't nil), so a loop that would go out
   of range still panics at the same iteration. Floating-point sums stay in source order, so they
   don't vectorize: write them with SIMD types (§3).
-- Panics print `panic: <message>` with the goroutine and source position, then exit with status 2
-  (or, in an `isolate` task, end only that goroutine: §4).
+- Panics print `panic: <message>` with the task and source position, then exit with status 2
+  (or, in an `isolate` task, end only that task: §4).
   There is no `recover`. A nil dereference becomes `panic: runtime error: invalid memory address or
   nil pointer dereference`.
 - **Graceful stop.** SIGTERM and SIGINT end a program at once, unless it has called
@@ -941,7 +975,7 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   period (`shutdown 20s` in the program header, or `SQUARK_SHUTDOWN` such as `20s` or `500ms`,
   which overrides it; 10s by default) to finish and return from
   main, after which it exits with status 1. A second signal ends it at once. During the stop,
-  every goroutine's blocking I/O (blocked already or later) times out with `net.Timeout` a
+  every task's blocking I/O (blocked already or later) times out with `net.Timeout` a
   tenth of the grace period before its end, as if under `with deadline`, so a handler stuck on a
   slow upstream can still answer. An HTTP server stops
   accepting, finishes the requests in progress (answering `Connection: close`), closes its idle
@@ -964,7 +998,7 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   `workers N`) is more than the CPU limit, it prints a warning and runs (the threads are only
   throttled). `SQUARK_IGNORE_LIMITS=1` skips both. With `threads auto` or `workers auto` the
   worst case isn't known at build time and memory isn't checked.
-- When every goroutine is blocked with nothing to wake it: `fatal error: all goroutines are asleep -
+- When every task is blocked with nothing to wake it: `fatal error: all tasks are asleep -
   deadlock!`.
 - `SQ_STACKCHECK=1` reports, per pool, the proven and the deepest observed stack use at exit.
 - C libraries (e.g. SQLite) can use malloc. squark code, the runtime and the shims never do, and the

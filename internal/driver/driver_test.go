@@ -495,7 +495,7 @@ fn main() {
 	}
 }
 
-// TestStdinDoesNotBlock: a goroutine waiting on an idle stdin pipe parks alone; others keep running.
+// TestStdinDoesNotBlock: a task waiting on an idle stdin pipe parks alone; others keep running.
 func TestStdinDoesNotBlock(t *testing.T) {
 	dir := t.TempDir()
 	src := `program
@@ -727,7 +727,7 @@ func TestNotes(t *testing.T) {
 	}
 }
 
-// TestStaleFdEvent: after WaitReadable times out, data arriving later must not wake the goroutine
+// TestStaleFdEvent: after WaitReadable times out, data arriving later must not wake the task
 // from an unrelated wait (here time.Sleep). On Linux the epoll registration has to be disarmed.
 func TestStaleFdEvent(t *testing.T) {
 	dir := t.TempDir()
@@ -1302,7 +1302,7 @@ func TestThreadsEnv(t *testing.T) {
 }
 
 // TestBlocking runs testdata/blocking: blocking externs run on helper threads, so a slow C call
-// neither stops the other goroutines of its thread nor waits for another slow call. It runs on
+// neither stops the other tasks of its thread nor waits for another slow call. It runs on
 // one thread, on four, and on four under ThreadSanitizer.
 func TestBlocking(t *testing.T) {
 	src := "../../testdata/blocking"
@@ -1347,9 +1347,9 @@ func TestBlocking(t *testing.T) {
 	}
 }
 
-// TestSQLiteThreads runs testdata/sqlite_threads: 4 threads × 8 goroutines insert into one database
+// TestSQLiteThreads runs testdata/sqlite_threads: 4 threads × 8 tasks insert into one database
 // and read each row back. Locked writers wait on helper threads while the connection lock keeps
-// other goroutines out of their statement; every read must match and every row must be there.
+// other tasks out of their statement; every read must match and every row must be there.
 func TestSQLiteThreads(t *testing.T) {
 	dir := t.TempDir()
 	run := func(name, sanitize string, runs int) {
@@ -1388,7 +1388,7 @@ func TestSQLiteThreads(t *testing.T) {
 
 // TestSQLiteSlow runs testdata/sqlite_slow: a slow query and a slow write inside a transaction move
 // to a helper thread mid-call (sq_detach), so a ticker on the same thread keeps running; also under
-// ThreadSanitizer, since the goroutine changes OS threads in the middle of SQLite.
+// ThreadSanitizer, since the task changes OS threads in the middle of SQLite.
 func TestSQLiteSlow(t *testing.T) {
 	dir := t.TempDir()
 	want := "2000001000000\nslow read ok\nslow write in a transaction ok\n1000000 500000500000\n"
@@ -1418,7 +1418,7 @@ func TestSQLiteSlow(t *testing.T) {
 	}
 }
 
-// TestDetach runs testdata/detach: C code moves its goroutine to a helper thread mid-call and back
+// TestDetach runs testdata/detach: C code moves its task to a helper thread mid-call and back
 // (sq_detach, sq_reattach), without blocking externs; on one thread, four, and under TSan.
 func TestDetach(t *testing.T) {
 	dir := t.TempDir()
@@ -1458,7 +1458,7 @@ func TestDetach(t *testing.T) {
 
 // TestPreempt runs testdata/preempt: a preemptible task's loop yields to a ticker on its thread, an
 // ordinary task's loop can't be interrupted (rule 10) and the watchdog names it, and Gosched yields.
-// A goroutine running alone gets no warning: nothing waits for it. Also under TSan (the watchdog
+// A task running alone gets no warning: nothing waits for it. Also under TSan (the watchdog
 // thread reads the schedulers' state).
 func TestPreempt(t *testing.T) {
 	dir := t.TempDir()
@@ -1493,7 +1493,7 @@ func TestPreempt(t *testing.T) {
 		if out != want || strings.Contains(errs, "ThreadSanitizer") {
 			t.Fatalf("%s: got\n%s\nwant\n%s\n%s", sanitize, out, want, errs)
 		}
-		if !strings.Contains(errs, "goroutine [main.hog] has run for") || strings.Contains(errs, "main.cruncher") {
+		if !strings.Contains(errs, "task [main.hog] has run for") || strings.Contains(errs, "main.cruncher") {
 			t.Errorf("%s: watchdog warnings:\n%s", sanitize, errs)
 		}
 	}
@@ -1501,7 +1501,7 @@ func TestPreempt(t *testing.T) {
 	os.MkdirAll(alone, 0o755)
 	os.WriteFile(filepath.Join(alone, "main.sq"), []byte("program\n\nuse time\n\nfn main() {\n\tstart := time.now()\n\tn := 0\n\twhile time.since(start).milliseconds() < 150 {\n\t\tn++\n\t}\n\tprintln(n > 0)\n}\n"), 0o644)
 	if out, errs := run(alone, "aloneprog", ""); out != "true\n" || errs != "" {
-		t.Errorf("a goroutine running alone: output %q, stderr %q (want no warning)", out, errs)
+		t.Errorf("a task running alone: output %q, stderr %q (want no warning)", out, errs)
 	}
 }
 

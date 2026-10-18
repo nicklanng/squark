@@ -1,7 +1,7 @@
 {
   "name": "squark",
   "displayName": "squark",
-  "description": "Syntax highlighting for squark, a Go-shaped language without a heap",
+  "description": "Syntax highlighting for squark, a language without a heap",
   "version": "0.1.0",
   "publisher": "nicklanng",
   "license": "MIT",

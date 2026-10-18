@@ -3,13 +3,13 @@
 //
 // A slow statement must not stop its scheduler thread. Statements start inline (fast ones finish
 // there); one that runs longer than SLOW_NS (the progress handler checks every 1000 VM steps) or
-// must wait for another connection's lock (the busy handler) moves its goroutine to a helper
+// must wait for another connection's lock (the busy handler) moves its task to a helper
 // thread mid-call with sq_detach, and carries on there; sq_reattach brings it back before the
 // call returns. Open, Prepare, Finalize and Close always run on a helper (blocking externs).
 //
-// A goroutine parked in a blocking call lets another reach the same connection, so each connection
-// has a lock (a goroutine lock: waiters park). A statement takes it at its first Bind or Step and
-// gives it back at Reset, so Bind, Step, Column, Changes and LastInsertRowID see one goroutine's
+// A task parked in a blocking call lets another reach the same connection, so each connection
+// has a lock (a task lock: waiters park). A statement takes it at its first Bind or Step and
+// gives it back at Reset, so Bind, Step, Column, Changes and LastInsertRowID see one task's
 // work; the lock calls run on the scheduler thread, before the blocking call they protect.
 #include <sqlite3.h>
 #include <stdint.h>
@@ -68,7 +68,7 @@ static void release(conn *c) {
 	if (--c->active == 0) sq_gmutex_unlock(&c->mu);
 }
 
-// owned reports whether the running goroutine is using st (so its columns are its own).
+// owned reports whether the running task is using st (so its columns are its own).
 static int owned(stmt *s) { return s->active && sq_gmutex_held(&s->c->mu); }
 
 // lock calls, made on the scheduler thread around blocking ones
@@ -230,8 +230,8 @@ int64_t sq_sqlite_finalize(stmt *s) {
 	return rc;
 }
 
-// Column calls read the row the running goroutine stepped to; on a statement it isn't using
-// (after Reset, or another goroutine's) they return nothing rather than touch it.
+// Column calls read the row the running task stepped to; on a statement it isn't using
+// (after Reset, or another task's) they return nothing rather than touch it.
 int64_t sq_sqlite_column_int(stmt *s, int64_t i) { return owned(s) ? sqlite3_column_int64(s->st, (int)i) : 0; }
 int64_t sq_sqlite_column_type(stmt *s, int64_t i) { return owned(s) ? sqlite3_column_type(s->st, (int)i) : SQLITE_NULL; }
 int64_t sq_sqlite_column_count(stmt *s) { return sqlite3_column_count(s->st); } // fixed at prepare

@@ -1,6 +1,6 @@
 program
 
-// Blocking externs run on helper threads: while one goroutine waits in a 300ms C call, the others
+// Blocking externs run on helper threads: while one task waits in a 300ms C call, the others
 // on its thread keep running (the ticker ticks), and two slow calls overlap.
 
 use time
@@ -27,7 +27,7 @@ task sleeper(ms int) pool 2 {
 
 fn main() {
 	var buf u8[8]
-	slow_fill(&buf[0], len(buf), 7) // arguments point into the goroutine's stack
+	slow_fill(&buf[0], len(buf), 7) // arguments point into the task's stack
 	println(buf[0], buf[7])
 
 	start := time.now()
@@ -41,7 +41,7 @@ fn main() {
 		println("slow calls did not overlap:", elapsed, "ms")
 	}
 	if ticks < 15 {
-		println("other goroutines were blocked: ticks", ticks)
+		println("other tasks were blocked: ticks", ticks)
 	}
 	println("ok")
 }

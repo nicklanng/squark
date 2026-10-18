@@ -100,7 +100,7 @@ impl Gauge {
 
 // write_text writes every metric in Prometheus' text format (version 0.0.4) to w, anything with a
 // write(u8[]) method (an http.ResponseWriter, a bytes.Buffer, a net.Conn), one line at a time:
-// the program's metrics, then the runtime's: squark_pool_goroutines, _capacity, _peak and
+// the program's metrics, then the runtime's: squark_pool_running, _capacity, _peak and
 // _started_total for each task pool, squark_sockets_open and _limit (with connections N),
 // squark_idle_connections, squark_memory_worst_case_bytes, squark_threads, squark_stopping, and
 // process_cpu_seconds_total.
@@ -133,8 +133,8 @@ pub fn write_text(w anytype) {
 	// the runtime's
 	pools := pool_count()
 	const p_capacity, p_live, p_peak, p_started = 0, 2, 3, 4
-	families := str[4]{"squark_pool_goroutines", "squark_pool_capacity", "squark_pool_peak", "squark_pool_started_total"}
-	helps := str[4]{"Goroutines running in a task's pool.", "Goroutines a task's pool can run at once (every thread's).", "The most goroutines that ran at once in a task's pool, on one thread.", "Goroutines a task's pool has started."}
+	families := str[4]{"squark_pool_running", "squark_pool_capacity", "squark_pool_peak", "squark_pool_started_total"}
+	helps := str[4]{"Tasks running in the pool.", "Tasks the pool can run at once (every thread's).", "The most tasks that ran at once in the pool, on one thread.", "Tasks the pool has started."}
 	stats := int[4]{p_live, p_capacity, p_peak, p_started}
 	for f in 0..4 {
 		typ := "gauge"

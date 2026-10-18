@@ -70,7 +70,7 @@ impl Response {
 // given to dial or new_client: the status line, headers and body together must fit in it (bodies
 // are de-chunked in place), or the request fails with HeaderTooLarge or BodyTooLarge. The
 // request line and headers are built in the same buffer before the response arrives; a request
-// body is sent from the caller's memory. A Client is used by one goroutine at a time.
+// body is sent from the caller's memory. A Client is used by one task at a time.
 //
 // After an error the connection is closed, since its state is unknown. A Client from dial then
 // dials again for its next request; a GET or HEAD sent on a reused connection that the server had

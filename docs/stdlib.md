@@ -53,10 +53,10 @@ fn cut(s str, sep str) -> (str, str, bool) in s
 fn cut_prefix(s str, prefix str) -> (str, bool) in s
 // cut_suffix returns s without suffix and true, or s and false if s doesn't end with suffix.
 fn cut_suffix(s str, suffix str) -> (str, bool) in s
-// append_repeat appends n copies of s (Go's Repeat, into the caller's memory).
+// append_repeat appends n copies of s.
 fn append_repeat(dst u8[], s str, n int) -> u8[] in dst
-// append_pad_right appends s and then pad until s fills width characters, counted in runes as
-// Go's fmt counts a width (%-*s), so "crème" takes 5; a longer s is appended whole. For padding
+// append_pad_right appends s and then pad until s fills width characters, counted in runes, so
+// "crème" takes 5; a longer s is appended whole. For padding
 // on the left, strconv.AppendIntPad and AppendUintPad pad numbers, and append_repeat anything.
 fn append_pad_right(dst u8[], s str, width int, pad u8) -> u8[] in dst
 // equal_fold reports ASCII case-insensitive equality.
@@ -64,15 +64,14 @@ fn equal_fold(a str, b str) -> bool
 // append_lower appends the ASCII-lowercased s to dst.
 fn append_lower(dst u8[], s str) -> u8[] in dst
 // split splits s around sep into out, returning the used part of out. An empty sep splits after
-// each UTF-8 sequence, as in Go. It stops when out is full; the last element then holds the
+// each UTF-8 sequence (an invalid byte is a sequence of its own). It stops when out is full; the last element then holds the
 // unsplit remainder.
 fn split(s str in out, sep str, out str[]) -> str[] in out
 // fields splits s around runs of ASCII whitespace into out, returning the used part of out. It
 // stops when out is full and drops the fields after that (unlike split, which keeps the
 // remainder); size out for the most fields you accept.
 fn fields(s str in out, out str[]) -> str[] in out
-// count counts the non-overlapping instances of sub in s; an empty sub counts the runes plus one,
-// as in Go.
+// count counts the non-overlapping instances of sub in s; an empty sub counts the runes plus one.
 fn count(s str, sub str) -> int
 
 // Package bufio reads lines through a buffer the caller provides, from any source with a
@@ -93,8 +92,8 @@ impl Reader {
 	// read_line returns the next line from src, without its "\n" or "\r\n", as a view of the buffer
 	// that stays valid until the next call. Lines complete before the source's error come first.
 	// At the end of the input (io.EOF) a last line without a newline is returned, without a final
-	// "\r", as Go's bufio.Scanner does. On any other error (a timeout, a reset) a partial last line is
-	// dropped, unlike Go's Scanner, so a line protocol never acts on a line cut short. The error is
+	// "\r". On any other error (a timeout, a reset) a partial last line is dropped, so a line
+	// protocol never acts on a line cut short. The error is
 	// then returned, and again on every later call. A line longer than the buffer (not counting its
 	// "\n" or "\r\n") is skipped and reported as TooLong; the next call reads the line after it.
 	// A line that fills the buffer exactly is followed by one or two 1-byte reads to find its end.
@@ -160,16 +159,15 @@ fault Range 34 "value out of range"
 fault Base 22 "invalid base"
 
 // parse_float converts s ("1.5", "-2e-10", "Inf", "NaN") to the nearest float64 (half to even),
-// as Go's strconv.parse_float(s, 64) does for decimal input. Syntax if s isn't a number;
-// Range (with ±Inf) if it is too large. Unlike Go, hexadecimal floats ("0x1p4") and
-// underscores ("1_000") are not accepted (Syntax).
+// correctly rounded. Syntax if s isn't a number; Range (with ±Inf) if it is too large.
+// Hexadecimal floats ("0x1p4") and underscores ("1_000") are not accepted (Syntax).
 fn parse_float(s str) -> f64 !
 // append_int appends the decimal form of v to dst.
 fn append_int(dst u8[], v int) -> u8[] in dst
 // append_uint appends the decimal form of v to dst.
 fn append_uint(dst u8[], v u64) -> u8[] in dst
-// append_int_base appends v in base 2 to 36 (lower-case letters for digits over 9), as Go's
-// strconv.append_int(dst, v, base) does. Base 16 gives hex.
+// append_int_base appends v in base 2 to 36 (lower-case letters for digits over 9, a '-' for a
+// negative v). Base 16 gives hex.
 fn append_int_base(dst u8[], v int, base int) -> u8[] in dst
 // append_uint_base appends v in base 2 to 36.
 fn append_uint_base(dst u8[], v u64, base int) -> u8[] in dst
@@ -181,16 +179,16 @@ fn append_int_pad(dst u8[], v int, width int, pad u8) -> u8[] in dst
 fn append_uint_pad(dst u8[], v u64, base int, width int, pad u8) -> u8[] in dst
 // format_int writes v in decimal into buf and returns it as a string view of buf.
 fn format_int(buf u8[], v int) -> str in buf
-// append_float appends v with prec digits after the decimal point, like Go's
-// strconv.append_float(dst, v, 'f', prec, 64): the exact binary value rounded half to even. The
+// append_float appends v with prec digits after the decimal point and no exponent: the exact
+// binary value rounded half to even. The
 // result can be long (1e300 has 301 digits), so size dst for it. prec -1 gives the shortest digits
 // that read back to v, in plain notation for 1e-6 <= |v| < 1e21 and exponent notation outside
 // (1.5e+300), as JSON and JavaScript write numbers; other negative precs count as 0.
 fn append_float(dst u8[], v f64, prec int) -> u8[] in dst
 // atoi parses a base-10 integer.
 fn atoi(s str) -> int !
-// parse_int parses an integer in the given base (2 to 36). Unlike Go there is no base 0, so no
-// prefixes and no '_' separators.
+// parse_int parses an integer, with an optional sign, in the given base (2 to 36). There are no
+// prefixes (0x...) and no '_' separators.
 fn parse_int(s str, base int) -> int !
 // parse_bool accepts 1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False.
 fn parse_bool(s str) -> bool !
@@ -213,7 +211,7 @@ impl Buffer {
 	fn overflowed(&self) -> bool
 	fn reset(&self)
 
-	// truncate keeps the first n bytes; like Go it panics unless 0 <= n <= len().
+	// truncate keeps the first n bytes; it panics unless 0 <= n <= len().
 	fn truncate(&self, n int)
 	fn write(&self, p u8[]) -> int !
 	fn write_string(&self, s str) -> int !
@@ -305,8 +303,7 @@ impl File {
 	fn close(self) -> !
 
 	// read_full reads into p until it is full, returning how many bytes it read. If the file ends
-	// first, the error is io.EOF if nothing was read and io.UnexpectedEOF otherwise, as with Go's
-	// io.read_full.
+	// first, the error is io.EOF if nothing was read and io.UnexpectedEOF otherwise.
 	fn read_full(self, p u8[]) -> int !
 }
 
@@ -349,7 +346,7 @@ impl Duration {
 	fn milliseconds(self) -> int
 	fn seconds(self) -> f64
 
-	// string writes d as Go's Duration.string does ("1h2m3.5s", "1.5ms", "0s") into buf and returns
+	// string writes d in the form parse_duration reads ("1h2m3.5s", "1.5ms", "0s") into buf and returns
 	// it as a view of buf. 32 bytes hold any duration; a shorter buf gets the beginning.
 	fn string(self, buf u8[]) -> str in buf
 }
@@ -368,31 +365,31 @@ impl Time {
 
 fn now() -> time.Time
 fn since(t time.Time) -> time.Duration
-// sleep parks the calling goroutine for at least d.
+// sleep parks the calling task for at least d.
 fn sleep(d time.Duration)
 // after is for select only: `case <-time.after(d):` runs if no other case is ready within d.
 // (squark has no heap to make a channel per call, so the compiler turns the case into a timer;
 // anywhere else, after is an error.)
 fn after(d time.Duration) -> time.Time chan in static
-// parse_duration parses a duration as Go's time.parse_duration does: a signed sequence of decimal
+// parse_duration parses a duration: a signed sequence of decimal
 // numbers, each with an optional fraction and a unit ("300ms", "-1.5h", "2h45m"). The units are
 // "ns", "us" (or "µs"), "ms", "s", "m" and "h". A malformed, unitless (except "0") or
 // out-of-range string is InvalidDuration.
 fn parse_duration(s str) -> time.Duration !
 
 // Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
-// runs its own copy of main, with its own package variables and goroutines.
+// runs its own copy of main, with its own package variables and tasks.
 module runtime
 
-// shard returns the index of the calling goroutine's scheduler thread, from 0 to shards()-1.
+// shard returns the index of the calling task's scheduler thread, from 0 to shards()-1.
 extern fn shard() -> int stack 1024 c"sq_shard_id"
 // shards returns the number of scheduler threads in this process (threads N; 1 by default).
 extern fn shards() -> int stack 1024 c"sq_shard_total"
-// gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
-// Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
+// gosched yields: the scheduler runs the thread's other runnable tasks, then this one again.
+// Tasks otherwise switch only at blocking operations (or in preemptible tasks' loops).
 extern fn gosched() stack 1024 c"sq_gosched"
 // stop_gracefully makes SIGTERM and SIGINT start a graceful stop instead of ending the program at
-// once: stopping() becomes true, every goroutine blocked in net.Listener.accept (and every later
+// once: stopping() becomes true, every task blocked in net.Listener.accept (and every later
 // accept) gets net.Stopping, and the program has a grace period (SQUARK_SHUTDOWN, such as 20s or
 // 500ms; 10s by default) to finish its work and return from main. After that it ends with status
 // 1; a second signal ends it at once. http.serve calls it, so a server drains its requests when a
@@ -400,13 +397,13 @@ extern fn gosched() stack 1024 c"sq_gosched"
 extern fn stop_gracefully() stack 1024 c"sq_stop_gracefully"
 // stopping reports whether a graceful stop has begun (see stop_gracefully).
 fn stopping() -> bool
-// deadline_left returns how long the calling goroutine's blocking I/O has before it times out
+// deadline_left returns how long the calling task's blocking I/O has before it times out
 // (with deadline, or a graceful stop), and false if it has no deadline. It is 0 or less once the
 // deadline has passed.
 fn deadline_left() -> (time.Duration, bool)
 
-// Package flag parses command-line flags, as Go's flag package does for its default set
-// (flag.CommandLine, which exits on an error). Define flags, call parse, then read them:
+// Package flag parses command-line flags into one set for the program, exiting on an error. Define
+// flags, call parse, then read them:
 //
 // 	port := flag.int_flag("port", 8080, "port to listen on")
 // 	flag.parse()
@@ -420,7 +417,7 @@ fn deadline_left() -> (time.Duration, bool)
 // Parse accepts -name, --name, -name=value and -name value (not for bool flags, which take
 // -name or -name=false); flag parsing stops at the first argument that isn't a flag, or after
 // "--". -h and -help, unless defined, print the usage to stderr and exit 0. An undefined flag, a
-// missing value or a bad value prints Go's message ("flag provided but not defined: -x",
+// missing value or a bad value prints why ("flag provided but not defined: -x",
 // `invalid value "abc" for flag -port: parse error`) and the usage to stderr and exits 2.
 //
 // With threads N every scheduler thread runs main, so each parses into its own copy of the
@@ -432,8 +429,8 @@ const max_args = 1024
 
 thread usage fn()
 
-// Int defines an int flag. Its value is read as Go's strconv.ParseInt(s, 0, 64) reads it:
-// decimal, or with a 0x, 0o, 0b or 0 (octal) prefix, and _ between digits.
+// Int defines an int flag. Its value is an optional sign, then decimal, or a 0x, 0o, 0b or 0
+// (octal) prefix, with _ allowed between digits.
 fn int_flag(name str in static, value int, usage str in static) -> *int in static
 // String defines a string flag.
 fn str_flag(name str in static, value str in static, usage str in static) -> *str in static
@@ -457,7 +454,7 @@ fn arg(i int) -> str in static
 // max_args of them panics: use n_arg and arg.
 fn args() -> str[] in static
 // print_defaults prints, to stderr, each flag's name, type, usage and default (unless it is the
-// zero value), sorted by name, in Go's format:
+// zero value), sorted by name, like this:
 //
 // 	  -port int
 // 	    	port to listen on (default 8080)
@@ -513,8 +510,8 @@ fault TooLong 9 "json: string longer than the limit"
 // so the next call continues the same document. A call that fails with Full can be retried
 // after draining: set e.err = nil first.
 //
-// The output is compact unless set_indent is called first: then it is laid out as Go's
-// json.MarshalIndent lays out the same value, a member or element per line.
+// The output is compact unless set_indent is called first: then it has a member or element per
+// line, indented by nesting.
 struct Encoder {
 	err error
 	// fields that aren't pub
@@ -529,12 +526,10 @@ impl Encoder {
 	// somewhere, then call e.clear(), to stream a large document through a small buffer.
 	fn clear(&self)
 
-	// set_indent lays out the rest of the output as Go's json.MarshalIndent(v, prefix, indent) lays out
-	// the same value: each member or element of a non-empty object or array starts a new line holding
+	// set_indent lays out the rest of the output: each member or element of a non-empty object or array starts a new line holding
 	// prefix and then indent once per level of nesting, the closing bracket starts a line one level
 	// out, a colon is followed by a space, and empty objects and arrays stay {} and []. The first line
-	// has no prefix and the last no line break, as with MarshalIndent. Raw values are laid out the same
-	// way (as Go lays out a json.RawMessage). Call it before the first value: afterwards it sets
+	// has no prefix and the last no line break. Raw values are laid out the same way. Call it before the first value: afterwards it sets
 	// Misuse.
 	fn set_indent(&self, prefix str in self, indent str in self)
 
@@ -573,8 +568,8 @@ impl Encoder {
 
 	// raw writes b, one complete JSON value encoded already (from another Encoder, a database, a
 	// file), as the next value. It is checked as Decoder.skip checks a value: invalid JSON sets
-	// Syntax and writes nothing. It is written as it is, whitespace and all (Go's Marshal compacts
-	// a json.RawMessage), unless set_indent was called: then its whitespace is replaced by the layout's.
+	// Syntax and writes nothing. It is written as it is, whitespace and all, unless set_indent was
+	// called: then its whitespace is replaced by the layout's.
 	fn raw(&self, b u8[])
 
 	// raw_start is raw for a value the caller writes itself, for one too large to go through the
@@ -611,8 +606,8 @@ impl Decoder {
 	// new_decoder, Buffer if the arena is full.
 	fn key(&self) -> (str, bool) in self
 
-	// string decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD,
-	// as in Go. Buffer if the decoded string doesn't fit in buf.
+	// string decodes a JSON string into buf and returns a view of buf. Invalid UTF-8 becomes U+FFFD.
+	// Buffer if the decoded string doesn't fit in buf.
 	fn string(&self, buf u8[]) -> (str, bool) in buf
 
 	// text decodes a JSON string, as string does, into the decoder's arena (new_decoder_in) at its exact
@@ -664,7 +659,7 @@ fn new_encoder(dst u8[]) -> json.Encoder in dst
 // buffer stays allocated until a ends) otherwise. Full if a can't hold the larger buffer.
 fn new_encoder_in(dst u8[], a arena) -> json.Encoder in dst, a
 // append_string appends s as a quoted, escaped JSON string. Invalid UTF-8 becomes U+FFFD, and
-// U+2028 and U+2029 are escaped, as Go does.
+// U+2028 and U+2029 are escaped (\u2028), so the output is safe in JavaScript too.
 fn append_string(dst u8[], s str) -> u8[] in dst
 // write_string writes s to w as a JSON string literal, escaped as append_string does, without
 // building it in memory first: runs that need no escaping go straight to w. w is any writer with
@@ -723,7 +718,7 @@ fn counter(name str, labels str, help str) -> metrics.Counter
 fn gauge(name str, labels str, help str) -> metrics.Gauge
 // write_text writes every metric in Prometheus' text format (version 0.0.4) to w, anything with a
 // write(u8[]) method (an http.ResponseWriter, a bytes.Buffer, a net.Conn), one line at a time:
-// the program's metrics, then the runtime's: squark_pool_goroutines, _capacity, _peak and
+// the program's metrics, then the runtime's: squark_pool_running, _capacity, _peak and
 // _started_total for each task pool, squark_sockets_open and _limit (with connections N),
 // squark_idle_connections, squark_memory_worst_case_bytes, squark_threads, squark_stopping, and
 // process_cpu_seconds_total.
@@ -731,7 +726,7 @@ fn write_text(w anytype)
 
 // Package net provides TCP listeners and connections over IPv4 and IPv6, and name lookup
 // (lookup_ip: the hosts file, then DNS as resolv.conf says). Blocking calls park only the calling
-// goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
+// task; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
 module net
 
 fault NoSuchHost -21 "no such host"
@@ -783,7 +778,7 @@ struct Conn {
 impl Conn {
 	fn fd(self) -> int
 
-	// read reads into p. Like every blocking call here, it returns Timeout once the goroutine's
+	// read reads into p. Like every blocking call here, it returns Timeout once the task's
 	// deadline (with deadline) has passed.
 	fn read(self, p u8[]) -> int !
 
@@ -807,8 +802,8 @@ impl Conn {
 	fn wait_readable(self, grace time.Duration) -> bool
 
 	// park_idle hands c to the runtime's idle set with a tag (0..255) that next_idle returns with it,
-	// e.g. to say which server it belongs to. No goroutine waits for it: when it becomes readable it is
-	// returned by next_idle. The calling goroutine's stack is returned to the OS when it exits, so an
+	// e.g. to say which server it belongs to. No task waits for it: when it becomes readable it is
+	// returned by next_idle. The calling task's stack is returned to the OS when it exits, so an
 	// idle connection costs no memory beyond the kernel's socket.
 	fn park_idle(self, tag int)
 
@@ -844,7 +839,7 @@ fn parse_ip(s str) -> (net.IP, bool)
 fn ipv4(a u8, b u8, c u8, d u8) -> net.IP
 // ipv6_loopback returns ::1.
 fn ipv6_loopback() -> net.IP
-// append_host_port appends "host:port" to dst, as Go's JoinHostPort: a host containing ':' (an IPv6
+// append_host_port appends "host:port" to dst: a host containing ':' (an IPv6
 // literal) is put in brackets, "[::1]:80". An empty host gives ":port", which listen takes as
 // every interface.
 fn append_host_port(dst u8[], host str, port int) -> u8[] in dst
@@ -859,13 +854,13 @@ fn dial(addr str) -> net.Conn !
 // dial_ip connects to port at ip over TCP.
 fn dial_ip(ip net.IP, port int) -> net.Conn !
 // next_idle blocks until a parked connection becomes readable and returns it with its tag.
-// Only one goroutine may call next_idle at a time.
+// Only one task may call next_idle at a time.
 fn next_idle() -> (net.Conn, int)
 // idle_count reports how many connections are parked in the idle set.
 fn idle_count() -> int
 
 // Package http is an HTTP/1.1 server and client. The server runs each connection in its own
-// goroutine, whose read and write buffers live on its (statically sized) stack: no allocation per
+// task, whose read and write buffers live on its (statically sized) stack: no allocation per
 // request. The client (Dial, Client) reads responses into a buffer the caller provides.
 module http
 
@@ -938,7 +933,7 @@ impl Request {
 	// isn't one.
 	fn query_int(&self, key str) -> (int, bool)
 }
-// ResponseWriter stages the response in the connection goroutine's write buffer.
+// ResponseWriter stages the response in the connection task's write buffer.
 struct ResponseWriter {
 	// fields that aren't pub
 }
@@ -1005,7 +1000,7 @@ impl Response {
 // given to dial or new_client: the status line, headers and body together must fit in it (bodies
 // are de-chunked in place), or the request fails with HeaderTooLarge or BodyTooLarge. The
 // request line and headers are built in the same buffer before the response arrives; a request
-// body is sent from the caller's memory. A Client is used by one goroutine at a time.
+// body is sent from the caller's memory. A Client is used by one task at a time.
 //
 // After an error the connection is closed, since its state is unknown. A Client from dial then
 // dials again for its next request; a GET or HEAD sent on a reused connection that the server had
@@ -1103,7 +1098,7 @@ impl JSON {
 	fn finish(&self) -> !
 }
 
-// listen_and_serve listens on addr and serves each connection in its own goroutine. With a nil h it
+// listen_and_serve listens on addr and serves each connection in its own task. With a nil h it
 // dispatches to the patterns registered with handle_func. It returns nil after a graceful stop
 // (see serve).
 fn listen_and_serve(addr str, h http.HandlerFunc) -> !
@@ -1120,7 +1115,7 @@ fn set_ready(r bool)
 // answering during a graceful stop, until the program exits. It returns once listening; call it
 // before listen_and_serve. Kubernetes: point livenessProbe at /healthz, readinessProbe at /readyz.
 fn serve_admin(addr str) -> !
-// serve accepts connections on l and serves each in its own goroutine. Requests are read strictly:
+// serve accepts connections on l and serves each in its own task. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
 // Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
 // get a 400 and a closed connection. `Expect: 100-continue` is answered before the body is read;
@@ -1145,7 +1140,7 @@ fn new_client(conn net.Conn, host str, buf u8[]) -> http.Client in host, buf
 // append_request appends a request to dst as do would send it, for round_trip. It fails with
 // RequestTooLarge, appending nothing, if the request doesn't fit in cap(dst).
 fn append_request(dst u8[], method str, host str, path str, headers http.Header[], body u8[]) -> u8[] ! in dst
-// handle_func registers h for pattern, as Go's http.handle_func does (Go 1.22 patterns). Serve with
+// handle_func registers h for pattern ("GET /notes/{id}", "/static/{path...}"). Serve with
 // listen_and_serve(addr, nil) to dispatch to the registered patterns.
 //
 // A pattern is [METHOD ]PATH. A method matches only that method ("GET" also matches HEAD); without
@@ -1162,7 +1157,7 @@ fn append_request(dst u8[], method str, host str, path str, headers http.Header[
 // than max_routes, panics.
 fn handle_func(pattern str in static, h http.HandlerFunc)
 // Error replies with status code and its standard text as a plain-text body ("404 Not Found").
-// Like Go's http.Error, it doesn't end the handler: return after calling it.
+// It doesn't end the handler: return after calling it.
 fn send_error(w *http.ResponseWriter, code int)
 // port returns the listen address ":n" for listen_and_serve(http.port(8080), nil). The string is in
 // a buffer the next call reuses.
@@ -1179,7 +1174,7 @@ fn port(n int) -> str in static
 //
 // writes {"time":"2026-10-17T09:30:00.123Z","level":"info","msg":"served","path":"/x",
 // "status":200,"took":0.0021}. An entry is a value on the caller's stack (up to 1 KiB of JSON), so
-// goroutines that log at the same time can't mix their lines; it never allocates, and a line too
+// tasks that log at the same time can't mix their lines; it never allocates, and a line too
 // long for the entry keeps the fields that fit and ends with "truncated":true. Entries below
 // log.level cost a branch per call.
 module log
@@ -1235,7 +1230,7 @@ fn entry(l log.Level, msg str) -> log.Entry
 // or a package variable; a copy carries on from the same point in the sequence. New(seed) gives
 // the same sequence on every run and platform. The package-level functions use one generator per
 // scheduler thread, seeded from the clock, the process id and the thread index at its first use;
-// as in Go 1.20 and later there is no Seed function: use new(seed) for a repeatable sequence.
+// there is no seed function: use new(seed) for a repeatable sequence.
 module rand // use math/rand
 
 // Rand is a xoshiro256** generator. Make one with new: the zero value yields only zeros.
@@ -1253,18 +1248,17 @@ impl Rand {
 	// Int returns a non-negative int.
 	fn next(&self) -> int
 
-	// intn returns a value in [0, n), without modulo bias. It panics if n <= 0, as Go's does.
+	// intn returns a value in [0, n), without modulo bias. It panics if n <= 0.
 	fn intn(&self, n int) -> int
 
 	// float64 returns a value in [0, 1): one of the 2^53 multiples of 2^-53, uniformly.
 	fn float64(&self) -> f64
 
-	// perm fills dst with a random permutation of 0 .. len(dst)-1 and returns it (Go's perm(n),
-	// into the caller's memory).
+	// perm fills dst with a random permutation of 0 .. len(dst)-1 and returns it.
 	fn perm(&self, dst int[]) -> int[] in dst
 
 	// shuffle puts the elements of s (T[] for any T; a slice of an array or vector) in a random
-	// order, each order equally likely. Go's shuffle(n, swap) needs a closure; this takes the slice.
+	// order, each order equally likely.
 	fn shuffle(&self, s anytype)
 }
 
@@ -1299,7 +1293,7 @@ fn shuffle(s anytype)
 //    }
 //    rows.err()!
 //
-// A Conn is used by one goroutine at a time; a Pool shares a few between a thread's goroutines.
+// A Conn is used by one task at a time; a Pool shares a few between a thread's tasks.
 // Every call is blocking I/O on the poller, so with deadline bounds it, and a graceful stop's cap
 // cuts it off.
 module postgres
@@ -1377,7 +1371,7 @@ impl Rows {
 	// close reads the rest of the rows, so the connection can take the next query.
 	fn close(&self)
 }
-// Pool shares up to 16 connections to one server between a thread's goroutines: get takes one
+// Pool shares up to 16 connections to one server between a thread's tasks: get takes one
 // (connecting it if needed, waiting while all are in use), put gives it back. Declare it per
 // thread (`thread db postgres.Pool`) and init it in main.
 struct Pool {
@@ -1389,7 +1383,7 @@ impl Pool {
 	// its buffer (at least 8 KiB each). They connect when first taken.
 	fn init(&self, url str in self, n int, mem u8[] in self)
 
-	// get takes a connection, waiting while all n are in use (within the goroutine's deadline:
+	// get takes a connection, waiting while all n are in use (within the task's deadline:
 	// net.Timeout once it has passed), and connects it if it isn't.
 	fn get(&self) -> *postgres.Conn ! in self
 
@@ -1416,7 +1410,7 @@ fn connect(url str, buf u8[]) -> postgres.Conn ! in buf
 //
 // Waits use full jitter (each a random time up to its ceiling, so clients that failed together
 // don't retry together). A Backoff stops early, rather than wait for nothing, when the wait would
-// run past the goroutine's deadline (with deadline) or a graceful stop has begun.
+// run past the task's deadline (with deadline) or a graceful stop has begun.
 module retry
 
 // Policy says how often and how long to retry. Its zero value is a sensible default.
@@ -1434,7 +1428,7 @@ struct Backoff {
 impl Backoff {
 	// next reports whether to try (again). The first call returns true at once. Each later one
 	// waits first, and returns false instead when the tries are used up, the wait would run past
-	// the goroutine's deadline, or a graceful stop has begun.
+	// the task's deadline, or a graceful stop has begun.
 	fn next(&self) -> bool
 
 	// wait returns how long to wait before try n+1 (n >= 1): a ceiling of base·2^(n-1), at most
@@ -1549,13 +1543,13 @@ struct Result {
 
 // open opens (creating if needed) a database file. When the file is locked by another connection
 // (another thread or process, e.g. with threads N or workers N), statements wait up to 5 seconds
-// before failing with "database is locked"; only the calling goroutine waits.
+// before failing with "database is locked"; only the calling task waits.
 //
-// A connection serves one goroutine at a time: a statement holds it from its first Bind or step
-// until reset (so start with `defer st.reset()`), and other goroutines that use the connection
+// A connection serves one task at a time: a statement holds it from its first Bind or step
+// until reset (so start with `defer st.reset()`), and other tasks that use the connection
 // meanwhile wait for it. Stmt.exec runs a statement from start to end in one call and gives the
 // connection back before it returns. DB.exec, prepare, changes and last_insert_row_id hold it for
-// the call (or join the statement the goroutine is running: call changes and last_insert_row_id
+// the call (or join the statement the task is running: call changes and last_insert_row_id
 // before reset).
 fn open(path str) -> sqlite.DB !
 // Int, text and null make exec's arguments (SQLite copies text's string when it is bound).

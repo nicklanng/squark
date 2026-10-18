@@ -407,13 +407,13 @@ func TestIsolateHandlerPanic(t *testing.T) {
 		t.Fatalf("the server exited: %v\n%s", err, out.String())
 	default:
 	}
-	if n := strings.Count(out.String(), "the goroutine ends; the program goes on"); n != 3 {
+	if n := strings.Count(out.String(), "the task ends; the program goes on"); n != 3 {
 		t.Errorf("%d isolated panics reported, want 3:\n%s", n, out.String())
 	}
 }
 
-// TestIsolateReleasesLocks: a goroutine lock (sq_gmutex, which C shims such as sqlite's use) held
-// by an isolate task's goroutine when it panics is released, so others don't wait forever.
+// TestIsolateReleasesLocks: a task lock (sq_gmutex, which C shims such as sqlite's use) held
+// by an isolate task when it panics is released, so others don't wait forever.
 func TestIsolateReleasesLocks(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "lock.c"), []byte(`#include "sq_rt.h"
@@ -503,7 +503,7 @@ func TestServeAdmin(t *testing.T) {
 		t.Errorf("/readyz: %d", c)
 	}
 	get(addr, "/")
-	if c, b := get(admin, "/metrics"); c != 200 || !strings.Contains(b, `http_requests_total{code="2xx"}`) || !strings.Contains(b, `squark_pool_goroutines{task="http.serve_conn"}`) {
+	if c, b := get(admin, "/metrics"); c != 200 || !strings.Contains(b, `http_requests_total{code="2xx"}`) || !strings.Contains(b, `squark_pool_running{task="http.serve_conn"}`) {
 		t.Errorf("/metrics: %d\n%s", c, b)
 	}
 	// both serve_conn slots busy: the admin port still answers at once

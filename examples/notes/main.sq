@@ -9,7 +9,7 @@
 //	squark run examples/notes [-port 8080] [-db notes.db]
 //
 // It shows:
-//   - requests served without a heap: buffers on the connection goroutine's proven stack
+//   - requests served without a heap: buffers on the connection task's proven stack
 //   - a memory budget the build checks, with the connection pool sized to fit it
 //   - http.handle_func routing, w.json() and a JSON request body decoded into r.arena
 //   - SQLite prepared statements (Exec to write, Step to read rows), one connection per
@@ -84,7 +84,7 @@ fn internal_error(w *http.ResponseWriter, err error) {
 }
 
 // write_note writes the current row of st as {"id":..,"title":..,"body":..}. The column text is
-// copied into buffers on this goroutine's stack, sized for the longest note create_note accepts.
+// copied into buffers on this task's stack, sized for the longest note create_note accepts.
 fn write_note(j *http.JSON, st sqlite.Stmt) -> ! {
 	var title u8[max_title]
 	var body u8[max_body]

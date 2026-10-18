@@ -22,7 +22,7 @@ thread heard Who chan[64] // a peer's listener sends who heard each line
 // ---- peers ----
 
 // listen records what peer i hears. A peer hangs up from here, not from script: Close doesn't
-// wake a goroutine blocked in Read on the same connection.
+// wake a task blocked in Read on the same connection.
 task listen(i Who) pool 5 {
 	p := &peers[i]
 	var buf u8[max_nick + 2 + max_line] // the longest line the room sends

@@ -35,17 +35,17 @@ struct sq_g {
 	int64_t deadline;   // with deadline: when blocking I/O times out (sq_nanotime), or 0 for never
 	void *try_jb;       // the jmp_buf of the `v, ok := x in a` being evaluated, or NULL
 	struct sq_unwind *unwind; // the innermost unwind frame (isolate tasks; see sq_rt.h)
-	bool unwinding;           // a panic is unwinding this goroutine
-	struct sq_gmutex *held[8]; // goroutine locks it holds, released if it ends unwinding
+	bool unwinding;           // a panic is unwinding this task
+	struct sq_gmutex *held[8]; // task locks it holds, released if it ends unwinding
 	int nheld;
 	// netpoll
-	int wait_fd;        // fd this goroutine is parked on, or -1
-	bool armed;         // a kqueue/epoll registration for this goroutine is outstanding
-	int wake;           // why the goroutine was last woken (WAKE_*)
+	int wait_fd;        // fd this task is parked on, or -1
+	bool armed;         // a kqueue/epoll registration for this task is outstanding
+	int wake;           // why the task was last woken (WAKE_*)
 	bool guarded;       // guard page installed (done lazily on first use)
-	bool release_stack; // return the whole stack to the OS when this goroutine exits
-	void *tsan_fiber;   // ThreadSanitizer builds only: this goroutine's fiber
-	void *shard;        // the shard (scheduler thread) that runs this goroutine
+	bool release_stack; // return the whole stack to the OS when this task exits
+	void *tsan_fiber;   // ThreadSanitizer builds only: this task's fiber
+	void *shard;        // the shard (scheduler thread) that runs this task
 	void (*blk_fn)(void *); // a blocking extern call a helper thread runs for it (argument in elem)
 	struct sq_waiter *sel_timer; // in a select with a timeout: the timer's waiter
 };

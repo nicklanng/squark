@@ -1,7 +1,7 @@
 program
 
-// task ... isolate: a panic in one of its goroutines prints as usual (on stderr), runs that
-// goroutine's deferred calls from the innermost frame out, and ends only that goroutine: its pool
+// task ... isolate: a panic in such a task prints as usual (on stderr), runs that
+// task's deferred calls from the innermost frame out, and ends only that task: its pool
 // slot comes back and the program goes on. Frames without deferred calls are just dropped.
 
 thread done int chan[8]
@@ -32,12 +32,12 @@ task work(n int) pool 1 isolate {
 	}
 }
 
-fn finished(n int) { done <- n } // deferred: sends even when the goroutine panics
+fn finished(n int) { done <- n } // deferred: sends even when the task panics
 
 fn main() {
 	for n in int[]{0, 1, 2, 0} {
 		println("start", n)
-		start work(n) // a pool of 1: each start needs the slot the previous goroutine gave back
+		start work(n) // a pool of 1: each start needs the slot the previous task gave back
 		println("finished", <-done)
 	}
 }

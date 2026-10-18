@@ -28,8 +28,8 @@ impl Reader {
 	// read_line returns the next line from src, without its "\n" or "\r\n", as a view of the buffer
 	// that stays valid until the next call. Lines complete before the source's error come first.
 	// At the end of the input (io.EOF) a last line without a newline is returned, without a final
-	// "\r", as Go's bufio.Scanner does. On any other error (a timeout, a reset) a partial last line is
-	// dropped, unlike Go's Scanner, so a line protocol never acts on a line cut short. The error is
+	// "\r". On any other error (a timeout, a reset) a partial last line is dropped, so a line
+	// protocol never acts on a line cut short. The error is
 	// then returned, and again on every later call. A line longer than the buffer (not counting its
 	// "\n" or "\r\n") is skipped and reported as TooLong; the next call reads the line after it.
 	// A line that fills the buffer exactly is followed by one or two 1-byte reads to find its end.
@@ -56,7 +56,7 @@ impl Reader {
 				if self.start < self.end and self.err == io.EOF {
 					line := self.buf[self.start:self.end]
 					self.start = self.end
-					if line[len(line)-1] == '\r' { // as Go's Scanner: a last line drops a final "\r"
+					if line[len(line)-1] == '\r' { // a last line drops a final "\r"
 						line = line[:len(line)-1]
 					}
 					return str(line), nil

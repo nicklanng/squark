@@ -8,7 +8,7 @@
 // It shows:
 //   - a server spread over scheduler threads that share no memory (threads 4)
 //   - shared channels between threads, carrying fixed-size values
-//   - state owned by one goroutine (the hub's room) instead of locks
+//   - state owned by one task (the hub's room) instead of locks
 //   - a line protocol read with bufio.Reader, with login and idle timeouts
 //   - select with time.after, so one stuck relay can't hold up the room
 program {
@@ -80,7 +80,7 @@ impl Client {
 	fn nick(&self) -> str { return str(self.nick_buf[:self.nick_len]) }
 }
 
-// Hub is the room. It lives on the hub task's stack: no other goroutine can touch it.
+// Hub is the room. It lives on the hub task's stack: no other task can touch it.
 struct Hub {
 	room               Client[max_clients]
 	online, shards, rr int

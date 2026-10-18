@@ -9,7 +9,7 @@ import (
 )
 
 // TestWorstSaturates: a worst case too large for int64 saturates instead of wrapping (a wrapped
-// product once made 2^52 goroutines × 16 KiB report 0 B and pass a 64M budget).
+// product once made 2^52 tasks × 16 KiB report 0 B and pass a 64M budget).
 func TestWorstSaturates(t *testing.T) {
 	m := &MemoryReport{Budget: 64 << 20, Workers: 1024, Threads: 1024, Static: 1 << 40,
 		Pools: []PoolReport{{Name: "t", Count: 1 << 24, Touchable: 1 << 40}}}

@@ -139,7 +139,7 @@ pub fn cut_suffix(s, suffix str) -> (str, bool) in s {
 	return s, false
 }
 
-// append_repeat appends n copies of s (Go's Repeat, into the caller's memory).
+// append_repeat appends n copies of s.
 pub fn append_repeat(dst u8[], s str, n int) -> u8[] in dst {
 	for i := 0; i < n; i++ {
 		dst = append(dst, s...)
@@ -147,8 +147,8 @@ pub fn append_repeat(dst u8[], s str, n int) -> u8[] in dst {
 	return dst
 }
 
-// append_pad_right appends s and then pad until s fills width characters, counted in runes as
-// Go's fmt counts a width (%-*s), so "crème" takes 5; a longer s is appended whole. For padding
+// append_pad_right appends s and then pad until s fills width characters, counted in runes, so
+// "crème" takes 5; a longer s is appended whole. For padding
 // on the left, strconv.AppendIntPad and AppendUintPad pad numbers, and append_repeat anything.
 pub fn append_pad_right(dst u8[], s str, width int, pad u8) -> u8[] in dst {
 	dst = append(dst, s...)
@@ -187,7 +187,7 @@ pub fn append_lower(dst u8[], s str) -> u8[] {
 }
 
 // split splits s around sep into out, returning the used part of out. An empty sep splits after
-// each UTF-8 sequence, as in Go. It stops when out is full; the last element then holds the
+// each UTF-8 sequence (an invalid byte is a sequence of its own). It stops when out is full; the last element then holds the
 // unsplit remainder.
 pub fn split(s str in out, sep str, out str[]) -> str[] in out {
 	n := 0
@@ -253,8 +253,7 @@ pub fn fields(s str, out str[]) -> str[] {
 	return out[:n]
 }
 
-// count counts the non-overlapping instances of sub in s; an empty sub counts the runes plus one,
-// as in Go.
+// count counts the non-overlapping instances of sub in s; an empty sub counts the runes plus one.
 pub fn count(s, sub str) -> int {
 	if len(sub) == 0 {
 		n := 1

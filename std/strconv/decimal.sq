@@ -605,9 +605,8 @@ fn special(s str) -> (f64, bool) {
 }
 
 // parse_float converts s ("1.5", "-2e-10", "Inf", "NaN") to the nearest float64 (half to even),
-// as Go's strconv.parse_float(s, 64) does for decimal input. Syntax if s isn't a number;
-// Range (with ±Inf) if it is too large. Unlike Go, hexadecimal floats ("0x1p4") and
-// underscores ("1_000") are not accepted (Syntax).
+// correctly rounded. Syntax if s isn't a number; Range (with ±Inf) if it is too large.
+// Hexadecimal floats ("0x1p4") and underscores ("1_000") are not accepted (Syntax).
 pub fn parse_float(s str) -> f64 ! {
 	if f, ok := special(s); ok {
 		return f, nil

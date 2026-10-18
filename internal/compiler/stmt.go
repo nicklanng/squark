@@ -395,7 +395,7 @@ func (c *Checker) goStmt(s *GoStmt) {
 		return
 	}
 	if call.Callee == nil {
-		c.errorf(s.P, "start requires a direct call to a named function or method (the goroutine's stack is sized from its entry function)")
+		c.errorf(s.P, "start requires a direct call to a named function or method (the task's stack is sized from its entry function)")
 		return
 	}
 	if !call.Callee.IsTask {
@@ -457,7 +457,7 @@ func (c *Checker) returnStmt(s *ReturnStmt) {
 	}
 	res := c.sig.Results
 	if len(s.Results) == 0 {
-		if len(res) > 0 && len(c.namedRes) == 0 {
+		if len(res) > 0 {
 			c.errorf(s.P, "not enough return values\n\thave ()\n\twant %s", resultString(res))
 		}
 		return

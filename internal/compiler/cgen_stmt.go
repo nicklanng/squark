@@ -460,7 +460,7 @@ func (g *gen) goStmt(s *GoStmt) {
 	fmt.Fprintf(&g.goSites, "struct sq_ga%d { %s };\n", s.ID, strings.Join(fields, " "))
 	fmt.Fprintf(&g.goSites, "static %s;\n", g.proto(f))
 	if f.Isolate {
-		// the base of the goroutine's unwind frames: a panic in it ends here, and the goroutine exits
+		// the base of the task's unwind frames: a panic in it ends here, and the task exits
 		fmt.Fprintf(&g.goSites, "static void %s(void *p) { struct sq_ga%d *a = p; (void)a; sq_unwind u; sq_unwind_base(&u); if (!_setjmp(u.jb)) %s(%s); sq_unwind_end(&u); }\n", tramp, s.ID, f.CName, strings.Join(unpack, ", "))
 	} else {
 		fmt.Fprintf(&g.goSites, "static void %s(void *p) { struct sq_ga%d *a = p; (void)a; %s(%s); }\n", tramp, s.ID, f.CName, strings.Join(unpack, ", "))
@@ -611,17 +611,6 @@ func (g *gen) returnStmt(s *ReturnStmt) {
 		g.runDefers()
 		g.line("return;")
 		return
-	case len(s.Results) == 0:
-		// named results
-		if len(sig.Results) == 1 {
-			val = sig.Results[0].CName
-		} else {
-			var parts []string
-			for _, r := range sig.Results {
-				parts = append(parts, r.CName)
-			}
-			val = fmt.Sprintf("(%s){%s}", g.resultC(sig), strings.Join(parts, ", "))
-		}
 	case len(s.Results) == 1 && len(sig.Results) == 1:
 		val = g.coerce(s.Results[0], sig.Results[0].Type)
 	case len(s.Results) == 1:
@@ -649,21 +638,6 @@ func (g *gen) returnStmt(s *ReturnStmt) {
 	}
 	if !hasDefers {
 		g.line("return %s;", val)
-		return
-	}
-	if namedResults(sig) {
-		// as in Go: the values go to the named results first, so deferred calls can change them
-		g.line("{")
-		g.ind++
-		if len(s.Results) > 0 {
-			r := g.tmp()
-			g.line("%s %s = %s;", g.resultC(sig), r, val)
-			g.line("%s", g.assignNamedResults(sig, r))
-		}
-		g.runDefers()
-		g.line("return %s;", g.namedResultsValue(sig))
-		g.ind--
-		g.line("}")
 		return
 	}
 	r := g.tmp()
@@ -858,7 +832,7 @@ func (g *gen) switchStmt(s *SwitchStmt) {
 }
 
 // preemptCheck ends a loop iteration in a function a preemptible task may run: if the watchdog
-// asked this thread's goroutine to yield, a preemptible one does (sq_preempt).
+// asked this thread's task to yield, a preemptible one does (sq_preempt).
 func (g *gen) preemptCheck() {
 	if !g.fnPreempt {
 		return
@@ -1068,33 +1042,4 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 	}
 	g.line("sq_brk%d:;", id)
 	g.close()
-}
-
-// namedResults reports whether sig's results are named, and so visible to deferred calls.
-func namedResults(sig *Signature) bool {
-	return len(sig.Results) > 0 && sig.Results[0].Name != ""
-}
-
-// assignNamedResults is C that copies the result value r into the named results.
-func (g *gen) assignNamedResults(sig *Signature, r string) string {
-	if len(sig.Results) == 1 {
-		return fmt.Sprintf("%s = %s;", sig.Results[0].CName, r)
-	}
-	var b strings.Builder
-	for i, res := range sig.Results {
-		fmt.Fprintf(&b, "%s = %s.r%d; ", res.CName, r, i)
-	}
-	return strings.TrimSpace(b.String())
-}
-
-// namedResultsValue is the C value returning the named results as they are now.
-func (g *gen) namedResultsValue(sig *Signature) string {
-	if len(sig.Results) == 1 {
-		return sig.Results[0].CName
-	}
-	var parts []string
-	for _, r := range sig.Results {
-		parts = append(parts, r.CName)
-	}
-	return fmt.Sprintf("(%s){%s}", g.resultC(sig), strings.Join(parts, ", "))
 }

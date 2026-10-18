@@ -28,7 +28,7 @@ impl Buffer {
 		self.overflow = false
 	}
 
-	// truncate keeps the first n bytes; like Go it panics unless 0 <= n <= len().
+	// truncate keeps the first n bytes; it panics unless 0 <= n <= len().
 	pub fn truncate(&self, n int) {
 		if n < 0 or n > len(self.buf) {
 			panic("bytes.Buffer: truncation out of range")

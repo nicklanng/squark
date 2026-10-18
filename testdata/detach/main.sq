@@ -1,6 +1,6 @@
 program
 
-// Test program for TestDetach (internal/driver): C code that runs long moves its goroutine to a
+// Test program for TestDetach (internal/driver): C code that runs long moves its task to a
 // helper thread mid-call (sq_detach) and back (sq_reattach); meanwhile a ticker on the same thread
 // keeps running, and two such calls overlap. No blocking externs: the driver starts helper threads
 // because the C code uses sq_detach.

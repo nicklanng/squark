@@ -72,7 +72,7 @@ func freeAddr(t *testing.T) string {
 func wantDeadlock(t *testing.T, name, bin string) {
 	t.Helper()
 	_, stderr, code := runFor(t, 10*time.Second, bin)
-	if code != 2 || !strings.Contains(stderr, "all goroutines are asleep") {
+	if code != 2 || !strings.Contains(stderr, "all tasks are asleep") {
 		t.Errorf("%s: exit %d, stderr %q; want the deadlock report (exit 2)", name, code, stderr)
 	}
 }
@@ -94,7 +94,7 @@ func TestSharedChanDeadlock(t *testing.T) {
 }
 
 // TestWaitReadableDeadlock: a WaitReadable that timed out leaves nothing registered with the
-// poller, so a goroutine that then blocks for good is reported as a deadlock instead of hanging.
+// poller, so a task that then blocks for good is reported as a deadlock instead of hanging.
 func TestWaitReadableDeadlock(t *testing.T) {
 	bin := buildSource(t, `program
 

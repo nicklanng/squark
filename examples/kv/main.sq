@@ -110,8 +110,8 @@ fn err_line(out u8[], err error) -> u8[] {
 }
 
 // execute runs one command line and appends its reply to out. A failure is an error constant,
-// which the caller sends as a -ERR line; quit reports QUIT.
-fn execute(line str, out u8[]) -> (reply u8[], quit bool, err error) {
+// which the caller sends as a -ERR line; the bool reports QUIT.
+fn execute(line str, out u8[]) -> (u8[], bool) ! {
 	name, rest, _ := strings.cut(strings.trim_space(line), " ")
 	var fields str[2] // one more than any command takes, to notice extra arguments
 	args := strings.fields(rest, fields[:])
@@ -168,6 +168,7 @@ fn execute(line str, out u8[]) -> (reply u8[], quit bool, err error) {
 		}
 	case "incr":
 		if ok {
+			var err error
 			if n, err = strconv.atoi(v); err != nil {
 				return out, false, NotInteger
 			}

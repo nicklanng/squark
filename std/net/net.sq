@@ -1,6 +1,6 @@
 // Package net provides TCP listeners and connections over IPv4 and IPv6, and name lookup
 // (lookup_ip: the hosts file, then DNS as resolv.conf says). Blocking calls park only the calling
-// goroutine; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
+// task; the runtime multiplexes them with kqueue (macOS) or epoll (Linux).
 module net
 
 use io, os, strconv, strings, time
@@ -48,7 +48,7 @@ extern fn sys_idle_count() -> int stack 8K c"sq_idle_count"
 pub fault BadAddress 22 "invalid address (want host:port)"
 
 // Timeout is returned by read_timeout when nothing arrived in time, and by every blocking call
-// once the goroutine's deadline (with deadline) has passed.
+// once the task's deadline (with deadline) has passed.
 pub fault Timeout -20 "i/o timeout"
 
 const sq_e_timeout = 65536 // sq_read_timeout returns -sq_e_timeout for a timeout
@@ -99,7 +99,7 @@ fn split_host_port(addr str) -> (str, int) ! {
 	return host, port, nil
 }
 
-// append_host_port appends "host:port" to dst, as Go's JoinHostPort: a host containing ':' (an IPv6
+// append_host_port appends "host:port" to dst: a host containing ':' (an IPv6
 // literal) is put in brackets, "[::1]:80". An empty host gives ":port", which listen takes as
 // every interface.
 pub fn append_host_port(dst u8[], host str, port int) -> u8[] in dst {
@@ -221,7 +221,7 @@ fn dial_proto(ip IP, port int, udp int) -> Conn ! {
 impl Conn {
 	pub fn fd(self) -> int { return self.sysfd }
 
-	// read reads into p. Like every blocking call here, it returns Timeout once the goroutine's
+	// read reads into p. Like every blocking call here, it returns Timeout once the task's
 	// deadline (with deadline) has passed.
 	pub fn read(self, p u8[]) -> int ! {
 		n := sys_read(self.sysfd, p)
@@ -297,8 +297,8 @@ impl Conn {
 	}
 
 	// park_idle hands c to the runtime's idle set with a tag (0..255) that next_idle returns with it,
-	// e.g. to say which server it belongs to. No goroutine waits for it: when it becomes readable it is
-	// returned by next_idle. The calling goroutine's stack is returned to the OS when it exits, so an
+	// e.g. to say which server it belongs to. No task waits for it: when it becomes readable it is
+	// returned by next_idle. The calling task's stack is returned to the OS when it exits, so an
 	// idle connection costs no memory beyond the kernel's socket.
 	pub fn park_idle(self, tag int) {
 		park_idle(self.sysfd, tag)
@@ -334,7 +334,7 @@ impl TimedConn {
 }
 
 // next_idle blocks until a parked connection becomes readable and returns it with its tag.
-// Only one goroutine may call next_idle at a time.
+// Only one task may call next_idle at a time.
 pub fn next_idle() -> (Conn, int) {
 	v := sys_next_idle()
 	return Conn{sysfd: v & 0xffffffff}, v >> 32

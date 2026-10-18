@@ -1,5 +1,5 @@
 // load is the squark port of bench/load: an HTTP load generator with N keep-alive connections,
-// each driven by its own goroutine sending pre-built requests through the std http client and
+// each driven by its own task sending pre-built requests through the std http client and
 // timing the responses (whose bodies are read and dropped).
 //
 //	load -url http://127.0.0.1:8080/notes -c 64 -d 10s [-method GET] [-body '{...}'] [-mix] [-seed 1000] [-json]
@@ -14,7 +14,7 @@
 // counts to thread 0, which prints the total. SQUARK_THREADS=N limits the number of threads.
 program {
 	threads auto
-	pool http.serve_conn 1 // the http package's server goroutines: unused here
+	pool http.serve_conn 1 // the http package's server tasks: unused here
 }
 
 use http, json, os, runtime, strconv, strings, time
@@ -60,7 +60,7 @@ struct Seeded {
 	ids int[max_seed]
 }
 
-// Stats are one thread's results; its connection goroutines update them between requests.
+// Stats are one thread's results; its connection tasks update them between requests.
 struct Stats {
 	h        Hist
 	requests int

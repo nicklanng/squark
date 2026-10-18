@@ -120,7 +120,7 @@ fn main() {
 	read_for("no deadline, data arrives", deliver(c, s))
 }
 
-// deliver writes to s from another goroutine after a while, and returns c.
+// deliver writes to s from another task after a while, and returns c.
 fn deliver(c, s net.Conn) -> net.Conn {
 	start late(s)
 	return c

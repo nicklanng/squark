@@ -415,9 +415,9 @@ type Func struct {
 	Defers      []*DeferStmt
 	AddrTaken   bool
 	GoTarget    bool
-	Pool        int   // goroutine pool size if a go target
+	Pool        int   // task pool size if a go target
 	StackHint   int64 // //squark:stack N (for externs)
-	Blocking    bool  // extern ... blocking: called on a helper thread while the goroutine waits
+	Blocking    bool  // extern ... blocking: called on a helper thread while the task waits
 	Preemptible bool  // task ... preemptible: loops in it and its callees may yield after a time slice
 	Isolate     bool  // task ... isolate: a panic in it unwinds (running deferred calls) and ends only it
 	CName       string

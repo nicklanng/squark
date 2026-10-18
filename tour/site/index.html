@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Tour of squark</title>
+<meta name="description" content="Learn squark, a language without a heap: run every lesson, watch where each byte lives, and get the compiler to say no.">
+<link rel="stylesheet" href="tour.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23171a21'/%3E%3Crect x='6' y='9' width='6' height='14' fill='%23e8a33d'/%3E%3Crect x='13' y='9' width='5' height='14' fill='%2346b5a7'/%3E%3Crect x='19' y='9' width='7' height='14' fill='%238a93a6'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#/" aria-label="squark tour: first lesson">
+    <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="word">squark</span><span class="tour-word">tour</span>
+  </a>
+  <nav class="crumbs" aria-label="Where you are">
+    <button class="crumb-btn" id="contents-btn" aria-haspopup="dialog" aria-controls="contents">
+      <span id="crumb-chapter">Loading</span>
+      <span class="crumb-sep" aria-hidden="true">/</span>
+      <span id="crumb-lesson"></span>
+      <span class="crumb-count" id="crumb-count"></span>
+    </button>
+  </nav>
+  <div class="bar-right">
+    <span class="mode-pill" id="mode-pill" hidden></span>
+    <button class="icon-btn" id="theme-btn" title="Light or dark" aria-label="Switch between light and dark">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.4 5.4 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8C12.92 3.04 12.46 3 12 3z"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="layout">
+  <article class="lesson" id="lesson" aria-live="polite">
+    <div class="lesson-scroll">
+      <p class="lesson-num" id="lesson-num"></p>
+      <h1 id="lesson-title"></h1>
+      <div class="prose" id="lesson-body"></div>
+      <section class="goal" id="goal" hidden aria-label="Goal">
+        <div class="goal-head">
+          <span class="goal-icon" aria-hidden="true"></span>
+          <span class="goal-kind" id="goal-kind">Goal</span>
+          <span class="goal-state" id="goal-state">not yet</span>
+        </div>
+        <p class="goal-text" id="goal-text"></p>
+      </section>
+    </div>
+    <footer class="lesson-nav">
+      <button class="nav-btn" id="prev-btn"><span aria-hidden="true">←</span> <span id="prev-label">Back</span></button>
+      <button class="nav-btn primary" id="next-btn"><span id="next-label">Next</span> <span aria-hidden="true">→</span></button>
+    </footer>
+  </article>
+
+  <section class="work" aria-label="Code">
+    <div class="toolbar">
+      <span class="filename">main.sq</span>
+      <span class="check-status" id="check-status" role="status"></span>
+      <span class="spacer"></span>
+      <button class="tool" id="reset-btn" title="Back to the lesson's code">Reset</button>
+      <button class="tool" id="solution-btn" title="Show a solution" hidden>Solution</button>
+      <button class="tool run" id="run-btn" title="Run (Shift+Enter)"><span class="run-icon" aria-hidden="true"></span><span id="run-label">Run</span><kbd>⇧⏎</kbd></button>
+    </div>
+    <div class="editor" id="editor">
+      <div class="gutter" id="gutter" aria-hidden="true"></div>
+      <div class="code-wrap">
+        <div class="marks" id="marks" aria-hidden="true"></div>
+        <pre class="hl" id="hl" aria-hidden="true"></pre>
+        <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="squark source code; Shift+Enter runs it, Escape leaves the editor"></textarea>
+      </div>
+    </div>
+
+    <div class="results">
+      <section class="memory" id="memory" aria-label="Memory map">
+        <div class="mem-head">
+          <h2>Memory map</h2>
+          <span class="mem-total" id="mem-total"></span>
+          <span class="spacer"></span>
+          <button class="link-btn" id="report-btn" hidden aria-expanded="false">as squark build -v prints it</button>
+        </div>
+        <div class="mem-empty" id="mem-empty">Run the program to see the worst case: every byte it can ever use, and where it lives.</div>
+        <div class="mem-bar-wrap" id="mem-bar-wrap" hidden>
+          <div class="mem-bar" id="mem-bar"></div>
+          <div class="mem-budget" id="mem-budget" hidden><span></span></div>
+        </div>
+        <table class="mem-rows" id="mem-rows" hidden></table>
+        <pre class="mem-report" id="mem-report" hidden></pre>
+      </section>
+      <section class="console" id="console" aria-label="Output">
+        <div class="console-head">
+          <h2 id="console-title">Output</h2>
+          <span class="spacer"></span>
+          <span class="console-meta" id="console-meta"></span>
+        </div>
+        <div class="console-body" id="console-body"><p class="console-hint">Output appears here.</p></div>
+      </section>
+    </div>
+  </section>
+</main>
+
+<div class="contents-backdrop" id="contents-backdrop" hidden></div>
+<aside class="contents" id="contents" role="dialog" aria-modal="true" aria-labelledby="contents-title" hidden>
+  <div class="contents-head">
+    <h2 id="contents-title">Contents</h2>
+    <span class="contents-progress" id="contents-progress"></span>
+    <button class="icon-btn" id="contents-close" aria-label="Close contents">✕</button>
+  </div>
+  <ol class="toc" id="toc"></ol>
+  <p class="contents-foot">Keys: <kbd>⇧⏎</kbd> run · <kbd>Esc</kbd> leave the editor · <kbd>←</kbd> <kbd>→</kbd> lessons</p>
+</aside>
+
+<script src="tour.js"></script>
+</body>
+</html>

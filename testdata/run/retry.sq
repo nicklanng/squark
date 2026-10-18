@@ -2,7 +2,7 @@ program
 
 // std/retry: exponential waits up to the policy's max (exact with fixed, a random time up to the
 // ceiling with jitter), the tries a loop gets, after (a server's Retry-After), stopping early
-// rather than wait past the goroutine's deadline, and which errors and statuses are transient.
+// rather than wait past the task's deadline, and which errors and statuses are transient.
 
 use net, os, retry, time
 

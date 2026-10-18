@@ -1,21 +1,21 @@
 // Package runtime reports on the scheduler. With threads N each scheduler thread is a shard: it
-// runs its own copy of main, with its own package variables and goroutines.
+// runs its own copy of main, with its own package variables and tasks.
 module runtime
 
 use time
 
-// shard returns the index of the calling goroutine's scheduler thread, from 0 to shards()-1.
+// shard returns the index of the calling task's scheduler thread, from 0 to shards()-1.
 pub extern fn shard() -> int stack 1K c"sq_shard_id"
 
 // shards returns the number of scheduler threads in this process (threads N; 1 by default).
 pub extern fn shards() -> int stack 1K c"sq_shard_total"
 
-// gosched yields: the scheduler runs the thread's other runnable goroutines, then this one again.
-// Goroutines otherwise switch only at blocking operations (or in preemptible tasks' loops).
+// gosched yields: the scheduler runs the thread's other runnable tasks, then this one again.
+// Tasks otherwise switch only at blocking operations (or in preemptible tasks' loops).
 pub extern fn gosched() stack 1K c"sq_gosched"
 
 // stop_gracefully makes SIGTERM and SIGINT start a graceful stop instead of ending the program at
-// once: stopping() becomes true, every goroutine blocked in net.Listener.accept (and every later
+// once: stopping() becomes true, every task blocked in net.Listener.accept (and every later
 // accept) gets net.Stopping, and the program has a grace period (SQUARK_SHUTDOWN, such as 20s or
 // 500ms; 10s by default) to finish its work and return from main. After that it ends with status
 // 1; a second signal ends it at once. http.serve calls it, so a server drains its requests when a
@@ -31,7 +31,7 @@ extern fn sys_deadline_at() -> int stack 1K c"sq_deadline_at"
 
 extern fn sys_nanotime() -> int stack 1K c"sq_nanotime"
 
-// deadline_left returns how long the calling goroutine's blocking I/O has before it times out
+// deadline_left returns how long the calling task's blocking I/O has before it times out
 // (with deadline, or a graceful stop), and false if it has no deadline. It is 0 or less once the
 // deadline has passed.
 pub fn deadline_left() -> (time.Duration, bool) {

@@ -33,7 +33,7 @@ task worker(n int) pool 8 {
 }
 
 // keep_alive sends two requests on one connection with a pause between them, so the server parks
-// the connection in the idle set (releasing its goroutine's stack) and resumes it.
+// the connection in the idle set (releasing its task's stack) and resumes it.
 fn keep_alive(addr str, buf u8[]) -> int {
 	c, err := net.dial(addr)
 	if err != nil {

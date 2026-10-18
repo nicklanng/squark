@@ -6,7 +6,7 @@ task work(p *int) pool 1 {}
 
 fn main() {
 	x := 1
-	start work(&x) // ERROR "to a new goroutine, which can outlive this function"
+	start work(&x) // ERROR "to a new task, which can outlive this function"
 	results <- &x // ERROR "sent on a channel"
 	var g int
 	_ = g

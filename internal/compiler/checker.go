@@ -49,7 +49,6 @@ type Checker struct {
 	labels    map[string]Pos // labels seen in the current function
 	loopDepth int
 	varCount  int
-	namedRes  []*Var
 
 	calleeIdent *Ident    // identifier being checked as the callee of a direct call
 	goCall      *CallExpr // call being checked as the operand of a go statement
@@ -472,7 +471,7 @@ func (c *Checker) findTask(target string) *Func {
 // 1 TiB, far above any real machine and far below where size arithmetic would overflow.
 const MaxSize = 1 << 40
 
-// MaxPool bounds a task pool's goroutine count.
+// MaxPool bounds a task pool's size.
 const MaxPool = 1 << 24
 
 func (c *Checker) constSize(x Expr, what string) (int64, bool) {
@@ -494,7 +493,7 @@ func (c *Checker) checkPool(x Expr, n int64) {
 	if n < 1 {
 		c.errorf(x.Pos(), "pool size must be at least 1")
 	} else if n > MaxPool {
-		c.errorf(x.Pos(), "pool size %d is too large (at most %d goroutines)", n, MaxPool)
+		c.errorf(x.Pos(), "pool size %d is too large (at most %d tasks)", n, MaxPool)
 	}
 }
 
@@ -677,14 +676,14 @@ func (c *Checker) resolveDecls(pkg *Package) {
 		}
 		if d.Isolate {
 			if !fn.IsTask {
-				c.errorf(d.IsolatePos, "only tasks can be isolate (a panic unwinds to a goroutine's entry point)")
+				c.errorf(d.IsolatePos, "only tasks can be isolate (a panic unwinds to where the task started)")
 			}
 			fn.Isolate = true
 			c.prog.HasIsolate = true
 		}
 		if d.Preemptible {
 			if !fn.IsTask {
-				c.errorf(d.PreemptiblePos, "only tasks can be preemptible (a goroutine's entry point decides whether it may be interrupted)")
+				c.errorf(d.PreemptiblePos, "only tasks can be preemptible (the task a function runs in decides whether it may be interrupted)")
 			}
 			fn.Preemptible = true
 		}
@@ -1423,7 +1422,6 @@ func (c *Checker) funcBody(fn *Func) {
 	c.breakable = nil
 	c.labels = map[string]Pos{}
 	c.loopDepth = 0
-	c.namedRes = nil
 	defer func() { c.fn = nil; c.scope = c.pkg.Scope }()
 
 	declareParam := func(v *Var) {
@@ -1443,25 +1441,6 @@ func (c *Checker) funcBody(fn *Func) {
 	}
 	for _, p := range fn.Sig.Params {
 		declareParam(p)
-	}
-	for _, r := range fn.Sig.Results {
-		if r.Name != "" {
-			// a named result is a variable whose value is copied out on return, and a copy of used
-			// map or channel storage aliases the original
-			if s := storageIn(r.Type); s != nil && r.Name != "_" {
-				c.errorf(r.Pos, "named result %s holds %s storage, which can't be copied out on return; return an unnamed %s built by a literal, or take a %s parameter to fill", r.Name, s, r.Type, &Pointer{Elem: r.Type})
-			}
-			r.Depth = 2
-			r.CName = c.newVarName(r.Name)
-			if r.Name != "_" {
-				o := &Object{Kind: ObjVar, Name: r.Name, Type: r.Type, Pos: r.Pos, Var: r, Pkg: c.pkg}
-				r.Obj = o
-				if prev := c.scope.Insert(o); prev != nil {
-					c.errorf(r.Pos, "duplicate result %s", r.Name)
-				}
-			}
-			c.namedRes = append(c.namedRes, r)
-		}
 	}
 	c.depth = 2
 	c.stmtList(fn.Decl.Body.List)

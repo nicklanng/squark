@@ -2,7 +2,7 @@ program
 
 struct Point { x, y int }
 
-// package-level storage: static, usable from any goroutine
+// package-level storage: static, usable from any task
 thread events str chan[4]
 thread index int[str; 64]
 

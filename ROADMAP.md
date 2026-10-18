@@ -33,7 +33,7 @@ These are what a real deployment hits first. No language changes.
   - Runtime: UDP sockets (`sq_udp_dial`, send/recv on the poller), `sockaddr_in6`, and
     `listen` on `[::]`.
   - `net.lookup_host(name, out IP[]) -> int !` is public; `dial` uses it.
-  - Tests: a run test with a fake DNS server on 127.0.0.1 (a squark goroutine answering UDP),
+  - Tests: a run test with a fake DNS server on 127.0.0.1 (a squark task answering UDP),
     covering search domains, ndots, NXDOMAIN and truncation; `/etc/hosts` and `localhost`;
     IPv6 loopback dial and listen. Linux in Docker (real resolv.conf).
   - Done when: an example dials a service by name inside a container.
@@ -74,9 +74,9 @@ These are what a real deployment hits first. No language changes.
 Each needs a design pass first: the open questions below are decided in this file before code.
 
 - [x] **2.1 Deadlines.** — done: `with deadline d { }` (DeadlineStmt; a C cleanup variable restores
-  the outer deadline on every exit), a per-goroutine deadline that `wait_fd` turns into a timer,
+  the outer deadline on every exit), a per-task deadline that `wait_fd` turns into a timer,
   `net.Timeout` from read, write, accept, dial and lookups, `runtime.deadline_left()`; a
-  graceful stop caps every goroutine's I/O at 90% of the grace period (blocked ones get a timer).
+  graceful stop caps every task's I/O at 90% of the grace period (blocked ones get a timer).
   **Decided:** channels, `time.sleep` and `blocking` externs are not affected (select with
   `time.after` and `deadline_left()` cover channels; C calls can't be interrupted); a task started
   in the block doesn't inherit the deadline; the sooner of nested deadlines wins. tests:
@@ -87,11 +87,11 @@ Each needs a design pass first: the open questions below are decided in this fil
       resp := client.get("/stock")!       // net.Timeout once 2s have passed
   }
   ```
-  - A per-goroutine deadline stack; nested blocks take the earlier one.
+  - A per-task deadline stack; nested blocks take the earlier one.
   - Every blocking operation that has an error result (net reads, writes, dial and DNS; http
     client; `sqlite` busy waits) returns `net.Timeout` once the deadline passes. The runtime arms a
-    timer on the goroutine's existing timer heap.
-  - On shutdown (1.3), every goroutine's deadline becomes at most the remaining grace period.
+    timer on the task's existing timer heap.
+  - On shutdown (1.3), every task's deadline becomes at most the remaining grace period.
   - `runtime.deadline_left() -> time.Duration`.
   - Open: channel operations have no error result. Proposal: deadlines don't affect `<-ch`, and
     `select` gains no new case; code that must time out on a channel already uses `select` with a
@@ -175,8 +175,8 @@ Each needs a design pass first: the open questions below are decided in this fil
 
 - [x] **2.5 Isolated tasks.** — done: `task t() pool N isolate`; in a program with one, every
   function with deferred calls pushes an `sq_unwind` frame (`_setjmp`) and pops it on return; a
-  panic in an isolate goroutine prints as usual, then unwinds frame by frame running deferred
-  calls, ends at the task's entry (slot returned) and releases the goroutine locks it held.
+  panic in an isolate task prints as usual, then unwinds frame by frame running deferred
+  calls, ends at the task's entry (slot returned) and releases the task locks it held.
   `http.serve_conn` is isolate and closes the connection of a handler that panicked.
   **Decided:** deferred calls do run (Go's semantics; resources are released with `defer`, so
   no fd-ownership tracking is needed); no checker restriction on writing package or thread

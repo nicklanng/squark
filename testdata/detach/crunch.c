@@ -1,4 +1,4 @@
-// A C function that computes for a while: after 1ms it moves its goroutine to a helper thread
+// A C function that computes for a while: after 1ms it moves its task to a helper thread
 // (sq_detach), finishes there, and moves back (sq_reattach) before returning.
 #include <stdint.h>
 #include "sq_rt.h"

@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// httpProtoServer is the server for TestHTTPProtocol. Its pool of 4 connection goroutines lets the
+// httpProtoServer is the server for TestHTTPProtocol. Its pool of 4 connection tasks lets the
 // slowloris test fill it; the read deadlines are lowered to keep the test fast.
 const httpProtoServer = `program {
 	pool http.serve_conn 4
@@ -335,7 +335,7 @@ func TestHTTPProtocol(t *testing.T) {
 	})
 
 	// F13: connections that send their request slowly are closed at the read deadline, so they
-	// can't hold every connection goroutine (4 here) forever
+	// can't hold every connection task (4 here) forever
 	t.Run("slowloris", func(t *testing.T) {
 		var wg sync.WaitGroup
 		closed := make(chan time.Duration, 8)
@@ -368,7 +368,7 @@ func TestHTTPProtocol(t *testing.T) {
 		go slow("GET / HTTP/1.1\r\n", "Y")                                             // nor here
 		go slow("POST /body HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n", "z") // body never ends
 		time.Sleep(100 * time.Millisecond)
-		alive(t) // a fifth connection gets served once the deadlines free a goroutine
+		alive(t) // a fifth connection gets served once the deadlines free a task
 		wg.Wait()
 		close(closed)
 		for d := range closed {

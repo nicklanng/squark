@@ -1,7 +1,7 @@
 program
 
 // Test program for TestSQLiteSlow (internal/driver): a slow query and a slow write inside a
-// transaction, while a ticker goroutine on the same thread counts 5ms ticks. The slow statements
+// transaction, while a ticker task on the same thread counts 5ms ticks. The slow statements
 // move to a helper thread mid-call, so the ticker keeps ticking.
 
 use os, sqlite, time

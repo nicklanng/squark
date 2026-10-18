@@ -56,7 +56,7 @@ func CallGraphOrder(prog *Program) ([]*Func, error) {
 					pos = f.Decl.P
 				}
 				msg := "recursion is not allowed: " + strings.Join(names, " → ")
-				msg += "\n\tsquark sizes every goroutine stack at compile time, which needs an acyclic call graph; rewrite with a loop and an explicit fixed-size stack"
+				msg += "\n\tsquark sizes every task stack at compile time, which needs an acyclic call graph; rewrite with a loop and an explicit fixed-size stack"
 				errs = append(errs, &Error{pos, msg})
 			}
 			return

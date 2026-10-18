@@ -15,12 +15,12 @@ type Output struct {
 	Pools []*PoolInfo
 }
 
-// PoolInfo describes one goroutine pool (one per go-target function, plus main).
+// PoolInfo describes one task pool (one per go-target function, plus main).
 type PoolInfo struct {
 	CName       string   // C symbol of the sq_pool
 	Name        string   // display name (entry function)
-	Count       int      // max live goroutines
-	Trampolines []string // C functions that start goroutines in this pool
+	Count       int      // max live tasks
+	Trampolines []string // C functions that start tasks in this pool
 	Entry       *Func    // nil for the main pool
 	StackSize   int64    // filled by the driver
 }
@@ -609,8 +609,8 @@ func (g *gen) initSharedChans(expr string, t Type, ind int) {
 }
 
 // blockingWrapper declares a blocking extern and defines the wrapper its callers use: the
-// arguments and result live in a struct on the goroutine's stack, and a helper thread runs the
-// thunk (the real call) while the goroutine waits in sq_blocking.
+// arguments and result live in a struct on the task's stack, and a helper thread runs the
+// thunk (the real call) while the task waits in sq_blocking.
 func (g *gen) blockingWrapper(f *Func) string {
 	w := f.CName
 	f.CName = f.Extern
@@ -866,11 +866,6 @@ func (g *gen) function(f *Func) string {
 	var body strings.Builder
 	g.out = &body
 	g.ind = 1
-	for _, r := range f.Sig.Results {
-		if r.Name != "" {
-			g.line("%s = %s;", g.decl(r.Type, r.CNameOr(g.tmp())), g.zero(r.Type))
-		}
-	}
 	for _, d := range f.Defers {
 		g.topDecls = append(g.topDecls, fmt.Sprintf("%sbool _d%d_on = false;", g.volatile(), d.ID))
 	}
@@ -1051,7 +1046,7 @@ func StackPlan(prog *Program, pools []*PoolInfo, frames map[string]int64, runtim
 			return v
 		}
 		if f.Blocking {
-			// on the goroutine's stack: the wrapper and sq_blocking; the C function itself runs
+			// on the task's stack: the wrapper and sq_blocking; the C function itself runs
 			// on a helper thread (HelperStack)
 			memo[f] = frames[f.CName] + runtimeBudget
 			return memo[f]

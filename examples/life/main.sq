@@ -317,7 +317,7 @@ fn run_soup(seed u64) -> (int, int, int) {
 	return soup_gens, 0, soup[cur].population()
 }
 
-// run_census is the long run. A thread's goroutines switch only when one blocks, so a plain task
+// run_census is the long run. A thread's tasks switch only when one blocks, so a plain task
 // would hold the thread to the end; a preemptible one yields at a loop iteration once it has run
 // for a time slice, in its own loops and in those of everything it calls.
 task run_census() pool 1 preemptible {

@@ -6,7 +6,7 @@
 // or a package variable; a copy carries on from the same point in the sequence. New(seed) gives
 // the same sequence on every run and platform. The package-level functions use one generator per
 // scheduler thread, seeded from the clock, the process id and the thread index at its first use;
-// as in Go 1.20 and later there is no Seed function: use new(seed) for a repeatable sequence.
+// there is no seed function: use new(seed) for a repeatable sequence.
 module rand
 
 use os, runtime, time
@@ -57,7 +57,7 @@ impl Rand {
 	// Int returns a non-negative int.
 	pub fn next(&self) -> int { return int(self.uint64() >> 1) }
 
-	// intn returns a value in [0, n), without modulo bias. It panics if n <= 0, as Go's does.
+	// intn returns a value in [0, n), without modulo bias. It panics if n <= 0.
 	pub fn intn(&self, n int) -> int {
 		if n <= 0 {
 			panic("invalid argument to Intn")
@@ -97,8 +97,7 @@ impl Rand {
 		return f64(self.uint64()>>11) * (1.0 / (1 << 53))
 	}
 
-	// perm fills dst with a random permutation of 0 .. len(dst)-1 and returns it (Go's perm(n),
-	// into the caller's memory).
+	// perm fills dst with a random permutation of 0 .. len(dst)-1 and returns it.
 	pub fn perm(&self, dst int[]) -> int[] in dst {
 		for i, _ in dst {
 			j := self.intn(i + 1)
@@ -109,7 +108,7 @@ impl Rand {
 	}
 
 	// shuffle puts the elements of s (T[] for any T; a slice of an array or vector) in a random
-	// order, each order equally likely. Go's shuffle(n, swap) needs a closure; this takes the slice.
+	// order, each order equally likely.
 	pub fn shuffle(&self, s anytype) {
 		for i := len(s) - 1; i > 0; i-- {
 			j := self.intn(i + 1)

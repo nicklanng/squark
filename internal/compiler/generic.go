@@ -80,7 +80,7 @@ func (c *Checker) instantiate(e *CallExpr) (*Func, []bool) {
 	// instances without end, so report it here rather than in the call graph.
 	for in := c.inst; in != nil; in = in.InstFrom {
 		if in.GenericOf == gen {
-			c.errorf(e.P, "recursion is not allowed: %s calls itself (with %s arguments)\n\tsquark sizes every goroutine stack at compile time, which needs an acyclic call graph; rewrite with a loop and an explicit fixed-size stack", gen.FullName(), typeList(targs))
+			c.errorf(e.P, "recursion is not allowed: %s calls itself (with %s arguments)\n\tsquark sizes every task stack at compile time, which needs an acyclic call graph; rewrite with a loop and an explicit fixed-size stack", gen.FullName(), typeList(targs))
 			return nil, nil
 		}
 	}

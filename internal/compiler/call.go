@@ -765,7 +765,7 @@ func (c *Checker) makeBuiltin(e *CallExpr) {
 			c.errorf(e.P, "too many arguments to make(%s)", t)
 		}
 		if c.fn != nil || e.InArena != nil {
-			c.errorf(e.P, "make(%s) is only allowed in package-level variable declarations: channels are shared between goroutines, so their buffers live in static memory", t)
+			c.errorf(e.P, "make(%s) is only allowed in package-level variable declarations: channels are shared between tasks, so their buffers live in static memory", t)
 		}
 	default:
 		c.errorf(e.P, "invalid argument: cannot make %s; type must be slice, map, or channel", t)
