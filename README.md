@@ -397,4 +397,8 @@ docs/design.md      the language design and its rationale
 
 ## License
 
-MIT; see [LICENSE](LICENSE).
+MIT; see [LICENSE](LICENSE). Some code comes from the Go project under its BSD license: the
+float conversions in `std/strconv` are adapted from Go's, and the compiler, being a Go program,
+contains Go's runtime. [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) has the notice; keep it with
+copies of squark, and with programs you distribute that use `strconv` or `json` float
+conversions.

@@ -1,6 +1,7 @@
 // Exact decimal arithmetic for float formatting and parsing: shortest digits that read back to the
 // same float64, and correctly rounded parsing. Adapted from Go's strconv (decimal.go, ftoa.go,
-// atof.go): Copyright 2009 The Go Authors, BSD-style license (https://go.dev/LICENSE). The
+// atof.go): Copyright 2009 The Go Authors, under a BSD-style license whose full text is in
+// THIRD_PARTY_NOTICES at the root of the squark repository (and at https://go.dev/LICENSE). The
 // numbers live in fixed 800-digit buffers on the stack: no heap, no recursion.
 
 module strconv
