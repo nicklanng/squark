@@ -384,6 +384,5 @@ Postponed from the SIMD work (2026-10-17).
 - 2026-10-20: 3.5 TLS dropped (not needed). Sections 4 (tooling) and 5 (performance follow-ups)
   added; starting with 4.1.
 - 2026-10-20: 4.1-4.3 done (suite on macOS with ASan, fuzz 5000 clean after 4.1). Next: section 5.
-
 - 2026-10-21: 5.2-5.4 done (suite on macOS with ASan and Linux clang and gcc, fuzz 5000 clean).
   5.1 needs an x86-64 machine, 5.5 a quiet one.
