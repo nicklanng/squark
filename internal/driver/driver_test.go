@@ -1146,11 +1146,23 @@ func TestThreads(t *testing.T) {
 		t.Errorf("listen semantics with threads 2: %v\n%s", err, out)
 	}
 
-	// a panic on any shard ends the process
+	// a handler's panic, on any shard, ends only its connection (http.serve_conn is isolate:
+	// shards past 0 once ignored that, so this passed or hung depending on the shard)
 	cmd, addr, stderr = start()
-	http.Get("http://" + addr + "/crash")
-	if code := wait(cmd); code != 2 || !strings.Contains(stderr.String(), "panic: crash requested") {
-		t.Errorf("after a panic: exit status %d, stderr %q", code, stderr.String())
+	for i := 0; i < 8; i++ { // fresh connections, so several shards serve one
+		cl := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+		if resp, err := cl.Get("http://" + addr + "/crash"); err == nil {
+			resp.Body.Close()
+		}
+	}
+	if resp, err := http.Get("http://" + addr + "/"); err != nil {
+		t.Errorf("after handler panics: %v\n%s", err, stderr.String())
+	} else {
+		resp.Body.Close()
+	}
+	cmd.Process.Signal(syscall.SIGTERM)
+	if code := wait(cmd); code != 0 || !strings.Contains(stderr.String(), "panic: crash requested") || !strings.Contains(stderr.String(), "the program goes on") {
+		t.Errorf("after handler panics: exit status %d, stderr %q", code, stderr.String())
 	}
 }
 

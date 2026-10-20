@@ -322,7 +322,9 @@ static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t a
 static void pool_init(sq_pool *p) {
 	p->free = NULL;
 	size_t total = (size_t)(p->count * p->slot_size);
-	void *mem = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	// reserved inaccessible: each stack is made writable when its slot is first used (sq_go), so
+	// the guards (and stacks never used) are address space only
+	void *mem = mmap(NULL, total, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
 	if (mem == MAP_FAILED) {
 		err_write("fatal error: cannot reserve task stacks for pool ");
 		err_write(p->name);
@@ -333,9 +335,7 @@ static void pool_init(sq_pool *p) {
 	for (int64_t i = p->count - 1; i >= 0; i--) {
 		sq_g *g = &p->gs[i];
 		uint8_t *slot = p->stacks + i * p->slot_size;
-		long pagesz = sysconf(_SC_PAGESIZE);
-		// the guard page at the low end of every stack is installed on first use (see sq_go)
-		g->stack_lo = slot + pagesz;
+		g->stack_lo = slot + p->guard_size; // the guard is the low end of the slot
 		g->heap_index = -1;
 		g->wait_fd = -1;
 		g->stack_hi = slot + p->slot_size;
@@ -382,8 +382,12 @@ void sq_go(sq_pool *p, void (*entry)(void *), const void *args, size_t argsize) 
 	sq_g *g = p->free;
 	p->free = g->next;
 	if (!g->guarded) {
-		long pagesz = sysconf(_SC_PAGESIZE);
-		mprotect(g->stack_lo - pagesz, (size_t)pagesz, PROT_NONE);
+		if (mprotect(g->stack_lo, (size_t)(g->stack_hi - g->stack_lo), PROT_READ | PROT_WRITE) != 0) {
+			err_write("fatal error: cannot map a task stack for pool ");
+			err_write(p->name);
+			err_write("\n");
+			_exit(2);
+		}
 		g->guarded = true;
 	}
 	if (stackcheck) memset(g->stack_lo, 0xA5, (size_t)(g->stack_hi - g->stack_lo));
@@ -493,7 +497,21 @@ static sq_shard *_Atomic all_shards[SQ_MAX_SHARDS]; // (defined with the threads
 
 // exit_flush writes every shard's buffered output (this thread's first) before the process exits.
 // It may run in a signal handler that interrupted out(), so it never waits long for a lock: a
-// buffer it can't lock is skipped. The locks it takes are kept, so nothing is added meanwhile.
+// buffer it can't lock is skipped. The locks it takes are kept, so nothing is added meanwhile,
+// and recorded: a panic in an isolate task doesn't end the process, so it releases them
+// (exit_flush_release).
+static _Thread_local uint64_t flush_held[(SQ_MAX_SHARDS + 1 + 63) / 64]; // bit k+1: shard k (bit 0: sq_self)
+
+static void exit_flush_release(void) {
+	for (int64_t k = -1; k < sq_shard_count; k++) {
+		uint64_t bit = (uint64_t)1 << ((k + 1) & 63);
+		if (!(flush_held[(k + 1) / 64] & bit)) continue;
+		flush_held[(k + 1) / 64] &= ~bit;
+		sq_shard *s = k < 0 ? sq_self : atomic_load(&all_shards[k]);
+		atomic_flag_clear_explicit(&s->outlock, memory_order_release);
+	}
+}
+
 static void exit_flush(void) {
 	for (int64_t k = -1; k < sq_shard_count; k++) {
 		sq_shard *s = k < 0 ? sq_self : atomic_load(&all_shards[k]);
@@ -507,7 +525,10 @@ static void exit_flush(void) {
 			struct timespec ts = {0, 10000};
 			nanosleep(&ts, NULL);
 		}
-		if (locked) flush_locked(s);
+		if (locked) {
+			flush_locked(s);
+			flush_held[(k + 1) / 64] |= (uint64_t)1 << ((k + 1) & 63);
+		}
 	}
 }
 
@@ -653,6 +674,7 @@ static SQ_NORETURN void die(const char *file, int line) {
 		err_write("the task ends; the program goes on (task ");
 		err_write(g->pool->name);
 		err_write(" is isolate)\n");
+		exit_flush_release();
 		g->unwinding = true;
 		sq_unwind_resume();
 	}
@@ -793,18 +815,17 @@ static _Thread_local sq_g *helper_g; // a helper thread's detached task (see sq_
 static void on_fault(int sig, siginfo_t *si, void *uctx) {
 	(void)uctx;
 	uintptr_t addr = (uintptr_t)si->si_addr;
-	long pagesz = sysconf(_SC_PAGESIZE);
 	sq_shard *home = sq_self ? sq_self : helper_g ? helper_g->shard : NULL; // a detached task's
 	for (int64_t i = 0; home && i < sq_npools; i++) {
 		sq_pool *p = home->pools[i];
 		uintptr_t lo = (uintptr_t)p->stacks, hi = lo + (uintptr_t)(p->count * p->slot_size);
 		if (addr >= lo && addr < hi) {
 			uintptr_t off = (addr - lo) % (uintptr_t)p->slot_size;
-			if (off < (uintptr_t)pagesz) {
+			if (off < (uintptr_t)p->guard_size) {
 				exit_flush();
 				err_write("fatal error: stack overflow in task [");
 				err_write(p->name);
-				err_write("] (a C function used more stack than its //squark:stack budget)");
+				err_write("] (an extern used more stack than its `stack N`; in squark code it is a compiler bug)");
 				die(NULL, 0);
 			}
 		}
@@ -3263,6 +3284,9 @@ static sq_shard *shard_new(void) {
 		c->count = t->count;
 		c->stack_size = t->stack_size;
 		c->slot_size = t->slot_size;
+		c->guard_size = t->guard_size;
+		c->preemptible = t->preemptible;
+		c->isolate = t->isolate;
 		c->index = i;
 		c->gs = (sq_g *)m;
 		m += align16((size_t)t->count * sizeof(sq_g));

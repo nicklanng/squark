@@ -1036,6 +1036,42 @@ func HelperStack(prog *Program, frames map[string]int64, externDefault int64) in
 	return need
 }
 
+// MaxFrames gives, for each pool, the largest single C frame its tasks can run (floor is the
+// least, for runtime and library frames). A task stack's guard below it must be at least that
+// large: an unprobed frame that overflows the stack lands in the guard, not in another stack.
+func MaxFrames(prog *Program, pools []*PoolInfo, frames map[string]int64, floor int64) map[*PoolInfo]int64 {
+	memo := map[*Func]int64{}
+	var walk func(f *Func) int64
+	walk = func(f *Func) int64 {
+		if v, ok := memo[f]; ok {
+			return v
+		}
+		memo[f] = floor // no recursion, but keep a cycle from looping
+		v := max(floor, frames[f.CName])
+		if f.Extern == "" {
+			for _, c := range prog.Callees(f) {
+				v = max(v, walk(c))
+			}
+		}
+		memo[f] = v
+		return v
+	}
+	out := map[*PoolInfo]int64{}
+	for _, p := range pools {
+		var v int64
+		if p.Entry == nil {
+			v = max(frames["sq_program_main"], frames["sq_init_globals"], walk(prog.MainFunc), walk(prog.InitFunc))
+		} else {
+			v = walk(p.Entry)
+			for _, t := range p.Trampolines {
+				v = max(v, frames[t])
+			}
+		}
+		out[p] = v
+	}
+	return out
+}
+
 func StackPlan(prog *Program, pools []*PoolInfo, frames map[string]int64, runtimeBudget, externDefault int64) (map[*PoolInfo]int64, []string) {
 	memo := map[*Func]int64{}
 	var notes []string

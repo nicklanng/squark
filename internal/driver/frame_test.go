@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,5 +68,48 @@ func TestLargePackageArena(t *testing.T) {
 	}
 	if res.Memory.Static < bytes {
 		t.Errorf("static data %d bytes, less than the %s arena", res.Memory.Static, size)
+	}
+}
+
+// TestStackProofGuards: prog.c isn't probed, so a short proof must still fault rather than write
+// into the next stack. readStackUsage keeps frames whose source path contains a tab (it dropped
+// them, proving 9 KB for a 1.6 MB frame), and each pool's guard is as large as its largest frame.
+func TestStackProofGuards(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tab\tdir")
+	os.MkdirAll(dir, 0o755)
+	src := "program\n\nthread done int chan[1]\n\n//squark:noinline\nfn deep(n int) -> int { var t int[200000]; for i in 0..200000 { t[i] = i * n }; return t[n] }\n\n" +
+		"task worker(n int) pool 3 { done <- deep(n) }\n\nfn main() { start worker(5); println(<-done) }\n"
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
+	work := t.TempDir()
+	bin := filepath.Join(dir, "p")
+	res, err := Build(Options{Dir: dir, Output: bin, WorkDir: work})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range res.Pools {
+		if p.Name == "main.worker" && p.Stack < 1600000 {
+			t.Errorf("main.worker proven at %d bytes, less than deep's 1.6 MB frame", p.Stack)
+		}
+	}
+	if out, err := exec.Command(bin).CombinedOutput(); err != nil || string(out) != "25\n" {
+		t.Errorf("run: %v, output %q", err, out)
+	}
+	pools, err := os.ReadFile(filepath.Join(work, "pools.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(pools), "\n") {
+		if !strings.Contains(line, `.name = "main.worker"`) {
+			continue
+		}
+		var guard int64
+		i := strings.Index(line, ".guard_size = ")
+		if i < 0 {
+			t.Fatalf("no guard_size: %s", line)
+		}
+		fmt.Sscanf(line[i+len(".guard_size = "):], "%d", &guard)
+		if guard < 1600000 {
+			t.Errorf("main.worker's guard is %d bytes, smaller than its 1.6 MB frame", guard)
+		}
 	}
 }

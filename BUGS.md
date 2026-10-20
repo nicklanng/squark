@@ -1088,6 +1088,262 @@ self-contained.
   rejected). The doc is printed from the template, which is never analysed. It should show the
   provenance of an instance, or none.
 
+## V: third whole-project review (2026-10-20)
+
+Seven reviewers, one per area (front end, lifetimes, loops/SIMD, runtime, net std, data std,
+driver/CLI/tour), over everything since section F. Each item was reproduced on macOS arm64 at
+`ada69b5` unless marked unverified; the reviewers' repro directories were session scratch, so the
+essentials are inline. The lifetime checker itself held up: every escape tried was rejected.
+
+### P0: memory safety, crashes, hangs, security
+
+- [x] **V1. Without stack probes, a short stack proof writes into the next task's stack** (bug;
+  introduced by Q5) — fixed: each pool's guard below its stacks is as large as the largest frame
+  its tasks run (`compiler.MaxFrames`, `.guard_size`); pools are mapped PROT_NONE and a slot is
+  made writable on first use, so guards are address space only. test: `TestStackProofGuards`
+  A frame larger than the one guard page, in a function the proof under-counted (V2, V3), jumped
+  the guard: a victim task's `int[64]` summed 554 instead of 448.
+- [x] **V2. A task's by-value arguments weren't in the stack proof** (bug) — fixed: the trampoline's
+  frame counts `T_args` (generated `sizeof(struct sq_gaN)`, read from prog.o) plus a return slot;
+  test: `testdata/run/task_args_by_value.sq`
+  `task worker(a int[100000]) pool 2` was proven at 806544 B; g_prepare copies the 800000 B of
+  arguments above the frame: stack overflow (and the memory report under-counted every slot).
+- [x] **V3. readStackUsage dropped .su lines it couldn't parse** (bug) — fixed: fields are split
+  from the right (a `#line` path may contain a tab) and an unparseable line fails the build;
+  test: `TestStackProofGuards` (builds from `tab\tdir`)
+  From a directory with a tab in its name every user frame was dropped: a 1.6 MB frame proven
+  at 9 KB.
+- [x] **V4. With threads N, a panic in an isolate task kept every shard's output lock** (bug: hang)
+  — fixed: `exit_flush` records the locks it takes and `die` releases them before unwinding;
+  test: `testdata/run/isolate_threads.sq`
+  The next `println` or log line on any shard spun for ever: one handler panic in a threaded
+  server that logs hung it at 100% CPU.
+- [x] **V5. Shards past 0 ignored `isolate` and `preemptible`** (bug) — fixed: `shard_new` copies
+  both flags (and the guard size); tests: `testdata/run/isolate_threads.sq`,
+  `testdata/run/preempt_threads.sq`; TestThreads now expects a handler panic to end only its
+  connection (it had expected the process to exit, and passed only when shard ≥1 served /crash:
+  the flaky "process did not exit" under gcc).
+- [ ] **V6. Loop versioning: an offset `a - b + i` is range-checked as `-b`** (bug: silent OOB)
+  `cgen_loop.go:453` stores `off = ix.X` = `k - z`; `offsetC` (565-573) treats any SUB offset as
+  `k*iv - y` and emits `-(z)`. `for i := 0; i < len(xs); i++ { s += xs[k - z + i] }` with k=2,
+  z=0 over `int[4]` read the next package array (307); the store form overwrote it. Fix: record
+  the negation in `loopIndex` (`off = ix.Y, neg = true`). Test: `panic_loop_version_offset.sq`
+  (also `a - b + 2*i`).
+- [ ] **V7. Loop versioning: `len(p.m)` of a map field is taken as a fixed bound** (bug: OOB read)
+  `cgen_loop.go:380-384` accepts any `header(x)`; `p.m[1000+i] = 1` in the body grows the map
+  and `memSafe` allows it. `for i := 0; i < len(p.m); i++ { p.m[1000+i] = 1; s += xs[i]; ... }`
+  read past `xs` (310). Channel views likely too. Fix: accept header bounds only for slices and
+  strings. Test: `panic_loop_version_maplen.sq`.
+- [ ] **V8. A `!` return inside `v, ok := x in a` leaves `try_jb` pointing at a dead frame** (bug)
+  `cgen_expr.go:1192` (tryExpr) returns between `sq_try_enter` and `sq_try_leave`. `v, ok :=
+  f(true)! + "x" in a` in `h`, then a full arena in the caller's own `v, ok := ... in a`: longjmp
+  into h's returned frame, SIGABRT. Fix: a stack of active try regions in `gen`; the early return
+  emits `sq_try_leave(outermost saved)` first. Test: `in_try_return.sq` (+ ASan).
+- [ ] **V9. `append(...) in a` leaves the new capacity uninitialized** (bug: garbage pointers)
+  `sq_arena_grow` (`sq_rt.c`) zeroes neither path; a stack arena is uninitialized memory. `s =
+  append(s, &x) in a; t := s[:cap(s)]; *t[1]` dereferenced stale stack data (0x4141414141). Fix:
+  zero `[used_bytes, new_bytes)` on copy, `[old_bytes, new_bytes)` in place. Test:
+  `arena_append_cap_zero.sq` (pointer, int, string slices; ASan).
+- [ ] **V10. postgres: a long SCRAM nonce from the server panics the client** (bug)
+  `postgres.sq:722` appends `full_nonce` (up to ~256 B) into `final_bare u8[160]`: "append
+  exceeds capacity (need 183, capacity 160)". Fix: `Protocol` error when the nonce doesn't fit
+  (or size from `cap(server_first)`). Test: fake server sending a 200-byte nonce extension.
+- [ ] **V11. http: silent and idle keep-alive connections are never closed** (bug: DoS)
+  `http.sq:618-625` parks a quiet connection (`park_idle`, no timer, `sq_rt.c:2072`);
+  `read_header_timeout` starts only at the first byte. 30 silent connections under `connections
+  32` stopped the server answering; under `ulimit -n 48` new connections were reset. Fix: an idle
+  timeout for parked connections (sweep or timer, default ~60s) and the header timeout from
+  accept. Test: a 300ms idle timeout; silent and idle keep-alive connections reach EOF in 1s.
+- [ ] **V12. http: writes have no timeout; clients that don't read pin every serve_conn** (bug: DoS)
+  `conn.write`/`write2` (`http.sq:278-331`, `write_fd`, `sq_writev2`) wait only for the task's
+  deadline, which serve_request doesn't set; with the pool full `start serve_conn` blocks
+  accepting. 20 pipelining non-readers hung a pool-16 server (and 2 non-reading scrapers hang the
+  admin port). Fix: a write deadline per response (`with deadline` around handler + flushes), close
+  on Timeout. Test: pool 1, 300ms write timeout, a 10MB response nobody reads.
+- [ ] **V13. tour: any client can compile and run code by sending `Host: localhost`** (bug: security)
+  `internal/tour/server.go:85,95` checks only the Host header. With `-http :3999` that is remote
+  code execution, and on 127.0.0.1 any local user can do it. Fix: require a loopback
+  `RemoteAddr`, refuse (or require a flag for) a non-loopback `-http`, add a per-launch token in
+  the URL and the run header. Test: RemoteAddr 203.0.113.7 with `Host: localhost` → 403.
+- [ ] **V14. Calling a function where a constant is evaluated crashes the compiler** (bug)
+  `const c = f()` (also `enum E { a = f() }`, `struct S { a int[f()] }`, `X: int[f()]`, `arena
+  a f()`): nil `*Signature` at `call.go:47/164`, since constants resolve before signatures.
+  Expected "f() is not constant". Test: `testdata/errors/const_call.sq`.
+- [ ] **V15. A package variable whose type mentions itself overflows the Go stack** (bug)
+  `thread m int[int; m]`, `thread a int[len(a)]`, `thread a int[..a]`, mutual `len(b)`/`len(a)`,
+  `thread int int[int]`: `declaredVarType` (`expr.go:188`) has no in-progress mark. Fix: mark
+  before `typExpr`, report the cycle. Test: errors annotations.
+- [ ] **V16. Constant shift counts are unbounded** (bug: compiler panic or OOM)
+  `u16(1 << (1<<63 - 30))` panics in `constant.Shift`; `1 << (1 << 40)` gets the compiler killed
+  (`expr.go:1637`). Fix: "invalid shift count" above ~1100. Test: `testdata/errors/shift_const.sq`.
+
+### P1: wrong results, C compiler failures, broken std
+
+- [ ] **V17. The graceful-stop cap misses I/O that already has a timer** (bug)
+  `stop_shard` (`sq_rt.c`) caps only tasks with `heap_index < 0`; `sq_wait_idle` ignores
+  `stop_cap`. A read under `with deadline 60s` or `read_timeout(.., 60s)` during a stop isn't
+  cut at 0.9 × grace, so the program is killed (exit 1). Fix: clamp `wake_at` of waiting tasks to
+  the cap (heap_up), and clamp `sq_wait_idle`'s timer to `effective_deadline`. Test: SIGTERM with
+  both kinds of read; Timeout at ~0.9 × grace, exit 0.
+- [ ] **V18. With threads, listener backlogs use up `connections N`** (bug)
+  `sq_listen_tcp` reserves `min(128, N/16)` per listening shard (and on macOS the shards share one
+  socket): 16 shards × N/16 = N, so dial and accept fail ("too many connections"). Fix: one
+  backlog per address on macOS; split it across shards on Linux; keep the report consistent.
+  Test: threads 16, connections 256, all shards listen, dial + accept succeed.
+- [ ] **V19. postgres Pool connections share buffer memory** (bug)
+  `Pool.init` (`postgres.sq:865`) slices `mem[i*size:(i+1)*size]` without capping, and `connect`
+  (`:378`) extends `buf[:cap(buf)]`: connection 0's buffer covers connection 1's. A query on `a`
+  overwrote `b`'s buffered rows. Fix: 3-index slice and/or use `len(buf)`; check `bufio.sq:21`,
+  `http_client.sq:103,116` for the same habit. Test: interleaved two-connection fake server.
+- [ ] **V20. sqlite: double finalize/close is use-after-free; a failed prepare gives a NULL handle**
+  (bug: memory unsafety via API misuse) `shim.c:227` frees the Stmt, `:127` the DB; `Stmt`/`DB` are
+  copyable handles. `st.finalize(); st.finalize()` → SIGSEGV; `st.step()` after a failed
+  `prepare` → NULL dereference in C. Fix: `&self` methods that nil the handle, NULL checks
+  returning SQLITE_MISUSE in the shim. Test: run test under ASan.
+- [ ] **V21. Loop versioning treats a range's value variable as unchanged** (bug: C compile error)
+  `cgen_loop.go:285-341`: `for i, k in xs { s += ys[i+k] }`, `for i, r in rows { t += r.cells[i] }`
+  → "use of undeclared identifier 'k_5'". Fix: pass the range's Key/Value vars to `planLoop` as
+  changed. Test: `loop_version_range_value.sq` (offset, slice, field shapes).
+- [ ] **V22. Loop versioning evaluates `len(f())` of an array-returning call an extra time** (bug)
+  `cgen_loop.go:371-373` (`case *Array: return true`) puts `(void)f()` in the range test: a loop
+  that runs zero times still calls f. Fix: require `!hasCall(arg)`, or emit the constant length.
+  Test: `loop_version_len_call.sq` with call counts.
+- [ ] **V23. `break` inside `start ... else { }` is missed by the missing-return check** (bug)
+  `hasBreak` (`stmt.go:977`) has no `*GoStmt` case: `loop { start t() else { break } }` as the last
+  statement of `fn g() -> int` compiles and falls off the end (printed `00`). Test:
+  `testdata/errors/start_else_return.sq`.
+- [ ] **V24. Package faults and error constants accept non-constant codes and messages** (bug: C
+  compile error) `fault G n "y"`, `fault H 2 msg()`, `error[2]{error(n, "a"), ...}`:
+  `isErrorConstExpr` (`checker.go:373`) and `errorCtor` don't check constness. Test: errors
+  annotations.
+- [ ] **V25. `v, ok := x in a` doesn't check that x has a value or a typed constant** (bug)
+  `rhsTypes` `*InExpr` case (`stmt.go:212`): `v, ok := f(a) in a` with a void f → C error; `v, ok
+  := 5 in a; println(v)` → "untyped int"; `1 << 70 in a` accepted. Fix: `c.value(u)` then
+  `defaultUntyped`. Test: errors file + run test (`5 true`).
+- [ ] **V26. SQUARK_THREADS raises the thread count past the worst case the program reports**
+  (bug) Without a budget `threadsMax` isn't set (`driver.go:459`), and `check_limits` runs before
+  `threads_from_env`: `threads 2` run with SQUARK_THREADS=8 reports the 2-thread worst case in
+  `squark_memory_worst_case_bytes`, the start-up cgroup check and `-manifest`. Fix: clamp to N
+  whenever the worst case is known, or scale per-thread costs at run time after resolving.
+- [ ] **V27. The tour lesson budgets/over-budget fails with gcc** (bug: test) gcc's frames are
+  larger, so the solution's 256 × 44 KiB stacks exceed its 8 MiB budget (fails at `0e8df6b` too).
+  Fix: give the lesson headroom that fits both compilers. Test: `CC=gcc scripts/test-linux.sh`.
+
+### P2: lesser bugs
+
+- [ ] **V28. The admin port stops answering at the stop cap, not at exit** (bug) `accept_always`
+  waits under `stop_cap` (`sq_rt.c:2633`/`1868`): /readyz fails from 0.9 × grace. Fix: exempt the
+  admin listener and its connections from the cap. Test: GET /readyz at 0.95 × grace → 503.
+- [ ] **V29. `workers N`: the supervisor swallows a repeated SIGTERM/SIGINT** (bug)
+  `sq_rt.c:3191` forwards only a different signal; the spec says a second one ends the program at
+  once. Fix: forward by count. Test: two SIGTERMs → exit 143 within ~200ms.
+- [ ] **V30. Deferred calls run under the deadline of a `with deadline` block `return` just left**
+  (bug) `cgen_stmt.go:104-110`: defers run before the block's cleanup. Fix: save `g->deadline` at
+  entry of functions with both, restore before running defers. Test: `deadline.sq` cases.
+- [ ] **V31. Isolate unwinding doesn't restore the deadline (or `try_jb`) before deferred calls**
+  (bug) `sq_unwind_resume` longjmps past `sq_deadline_restore`. Fix: record both in `sq_unwind`
+  at push, restore before the jump. Test: extend `isolate.sq`.
+- [ ] **V32. `v, ok := x in a` rewrites `__FILE__, __LINE__` by text, string literals too** (bug)
+  `cgen_stmt.go:324`: `"__FILE__, __LINE__" + s in a` printed `__FILE__, -__LINE_!`. Fix: a gen
+  flag so allocation sites emit `-__LINE__`. Test: `in_try_literal.sq`.
+- [ ] **V33. http mux: `path_value`/`query_param` take `len(raw)` of the 16K request arena per call**
+  (bug) `mux.sq:365`: a 9 KB escaped path read twice → "arena scratch is full", no response. Fix:
+  allocate the decoded length, decode once. Test: 7–9 KB escaped values read twice → 200.
+- [ ] **V34. metrics: labels over 79 bytes are cut mid-label; HELP isn't escaped** (bug) `char l[80]`
+  in `sq_metric_register`, raw HELP in `metrics.sq:174-188`: the whole scrape becomes invalid.
+  Fix: panic at registration when it doesn't fit; escape `\` and newline. Test: both cases.
+- [ ] **V35. DNS: A/AAAA records are accepted for any owner name** (bug) `dns.sq:501-521` skips
+  owner names and doesn't follow CNAMEs: an unrelated `A 6.6.6.6` was returned for foo.example
+  (a self-pointing owner name too). Fix: follow the chain, match owners. Test: `dns_test` modes.
+- [ ] **V36. DNS: the TCP fallback isn't bounded by resolv.conf's timeout** (bug; unverified)
+  `exchange_tcp` (`dns.sq:449,454`) dials and writes with no deadline: a firewall dropping TCP/53
+  stalls lookups for the OS connect timeout. Fix: `with deadline` around the body.
+- [ ] **V37. postgres ignores `sslmode=require`/`verify-full` and sends the password in cleartext**
+  (bug: security) `postgres.sq:331` drops the query string. Fix: `BadURL` unless sslmode is
+  absent/disable/allow/prefer. Test: `parse_url` table.
+- [ ] **V38. postgres URLs aren't percent-decoded** (bug) user `my%40user` was sent literally; a
+  password with `?` or `#` can't be written. Fix: decode into fixed storage. Test: `parse_url`.
+- [ ] **V39. The no-heap check is a deny-list that misses allocators** (bug) `heapSymbols`
+  (`driver.go:193`): `reallocf`, `malloc_zone_malloc`, `fopen`, `opendir`, `realpath(p, NULL)`,
+  `open_memstream`, `getline` all pass (and likely `__asprintf_chk`). Fix: add them, or an
+  allow-list. Test: table test, one C package per symbol.
+- [ ] **V40. The worst case leaves memory out** (bug) shared libraries' data, each scheduler
+  thread's own stack (netpoll's frame is 8 KiB), the watchdog's 64 KiB, TLS, and `ldflags "-lfoo"`
+  libraries (neither counted nor listed); `workers auto` + `threads auto` "per core" is really per
+  core². Fix: per-thread line for scheduler stacks, list `-l` libraries as not counted, reword
+  both-auto. Test: FormatMemory cases.
+- [ ] **V41. `f32x4.min()`/`.max()` reduce as a tree; the builtin folds left to right** (bug: spec)
+  With a NaN lane they disagree (`{1, nan, 2, 0}.min()` = 1, `min(1, nan, 2, 0)` = 0). Fix: fold
+  sequentially for floats, or say tree order in the spec. Test: `simd_values.sq`.
+- [ ] **V42. A hex literal before `..` lexes as a hex float** (bug) `for i in 0x0..0x3` → "mantissa
+  requires a 'p' exponent" (`lexer.go:353`). Test: `range_hex.sq`.
+- [ ] **V43. A leading zero means octal** (bug: spec) `println(010, 0644)` prints `8 420`
+  (`expr.go:97`, Go's legacy octal); the spec lists only decimal, 0x, 0o, 0b. Fix: reject
+  ("write 0o644"). Test: errors annotation.
+- [ ] **V44. A keyword-spelled member at the end of a line gets no semicolon** (bug) `k := K.case`
+  then a newline → "expected ;" (`lexer.go:183`). Fix: after `.`, lex a keyword as IDENT. Test:
+  `keyword_members_eol.sq`.
+- [ ] **V45. A struct field named `fn` is taken for a method** (bug) `struct P { fn int }` →
+  "methods go in an impl block" (`parser.go:792`). Fix: a method only when `fn NAME (`. Test: run
+  test with fields `fn` and `pub fn`.
+
+### P3: minor / polish
+
+- [ ] **V46. A task holding more than 8 task locks loses the extras on unwind** (bug; unverified)
+  `held_add` (`sq_rt.c:1076`) drops locks past `held[8]`. Fix: fatal error when full.
+- [ ] **V47. The start-up CPU-limit warning counts threads wrongly** (bug; unverified, Linux)
+  ignores SQUARK_THREADS and counts `workers auto` as 1.
+- [ ] **V48. http mux: HEAD goes to a `GET` pattern even when a `HEAD` pattern exists** (bug)
+  `more_specific` (`mux.sq:254`) ties GET and HEAD. Test: either registration order.
+- [ ] **V49. http mux: `{name...}` passes `..` segments through** (bug: traversal trap) `GET
+  /files/%2e%2e/%2e%2e/etc` → `../../etc`. Fix: 400 for `.`/`..` segments, or document.
+- [ ] **V50. http: 1xx accepted as a final status; many reason phrases are "Unknown"** (bug)
+  `http.sq:157`, `status_text` (`:898`): 408/502/504 (retry's transient codes) print "Unknown".
+- [ ] **V51. http request-line edge cases** (bug: RFC 9112) a leading CRLF → 400; absolute-form
+  target → 404; Transfer-Encoding → 400 rather than 501.
+- [ ] **V52. `http_requests_total` misses requests rejected before the handler** (bug) `reject`
+  and the 408 path don't call `count_status`.
+- [ ] **V53. DNS resilience** (bug) a lost AAAA reply waits the full timeout although A answered;
+  FORMERR to EDNS isn't retried without OPT; hosts lines past 15 names are ignored.
+- [ ] **V54. `log.Entry.str` panics when the key needs escaping** (bug) the budget counts
+  `len(k)`, the escaped key is up to 6× longer: "vector is full" (`log.sq:99-110`).
+- [ ] **V55. metrics: a long task name panics `write_text`; a counter and gauge can share a name**
+  (bug) `var lb u8[96]` (`metrics.sq:146`).
+- [ ] **V56. `retry` wait overflows when `max` is the largest Duration** (bug) `rand.intn(int(
+  ceiling) + 1)` (`retry.sq:90`) → "invalid argument to Intn".
+- [ ] **V57. postgres: rows over 64 columns fail as "unexpected reply" and close the connection**
+  (bug) `int[..64]` (`postgres.sq:470`). Fix: document, distinct error, drain to `Z`.
+- [ ] **V58. `time.parse_duration` wraps past 2^63** (bug) `"9223372036854775808ns" × 2` → 0, no
+  error (`time.sq:254`).
+- [ ] **V59. SCRAM passwords aren't SASLprep'd** (bug; unverified) non-ASCII passwords that
+  SASLprep changes fail against a real server. Fix: implement, or document ASCII only.
+- [ ] **V60. json: truncated input reports `Type`, not `Syntax`** (bug) `{` then `field`, `[1,`
+  then `int` → "unexpected value type". Test: extend `json_strict.sq`.
+- [ ] **V61. The storage-copy hint for a range over a channel or map says "use &rc[i]"** (bug:
+  message) `stmt.go:787`.
+- [ ] **V62. CLI flags are silently ignored; -manifest is checked after the build** (bug) one
+  FlagSet for every subcommand (`cmd/squark/main.go:87`): `run -o … -static -manifest bogus`
+  runs; `build -manifest nomad` writes the binary, then fails.
+- [x] **V63. The stack-overflow message names `//squark:stack` and blames only C** (bug: message)
+  — fixed with V1: "an extern used more stack than its `stack N`; in squark code it is a compiler
+  bug".
+- [ ] **V64. README's memory example is stale** (docs) `examples/notes` now reports 113.8 MiB with
+  sqlite's heap and the admin pools.
+- [ ] **V65. The spec's keyword list omits `impl`** (docs) §1.
+- [ ] **V66. arm64 `-cpu` above the host dies with SIGILL and no message** (bug) the CPU check is
+  x86-only. Fix: HWCAP/sysctl check, or document.
+- [ ] **V67. An extern clashing with a libc prototype is blamed on squark** (bug: message)
+  `extern fn getpid() -> int` → "C compiler failed on prog.c (this is a squark compiler bug)".
+- [ ] **V68. tour runs have no concurrency cap or rlimits** (bug; unverified) only compiles are
+  capped (`run.go:70,170`).
+- [ ] **V69. `extern fn main()` and `task main()` are accepted** (bug) the first fails in clang;
+  `checker.go:112`.
+- [ ] **V70. Front-end message polish** (bug: messages) `fn f() int` says "write -> identifier
+  int"; the directive list omits shutdown/connections/sockbuf/heap; `shutdown 3000000000000000ms`
+  overflows to negative; overflow errors print 30,000-digit constants; `squark doc` shows `Temp:
+  f64` for `Temp: Celsius`; `for i, j in 0..3` and `for x in 0..1.5` cascade; the missing-main
+  error is at `dir:0:0`.
+
 ## Progress log
 
 Append one line per work session: date, items closed, anything left half-done.
@@ -1132,3 +1388,7 @@ Append one line per work session: date, items closed, anything left half-done.
   arenas resident, and clang on arm64 lays out frames that are a multiple of 4 GiB wrongly with or
   without the probe (12G still failed under `-fno-stack-check`, unlike the repro note says; 5G,
   6G and 13G work), hence the 4 GiB frame limit.
+- 2026-10-20: third whole-project review logged as section V (V1–V70). V1–V5 and V63 fixed
+  the same day (V1 was a hole Q5 opened: guards now match each pool's largest frame). Also found
+  while testing on Linux and fixed in `ada69b5`: TestRunASan/isolate's ASan report (the runtime
+  now unpoisons a task stack before its longjmps). Next: V6 onward, P0 first.

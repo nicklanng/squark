@@ -391,7 +391,31 @@ func Build(opt Options) (*Result, error) {
 	// runtime calls nest at most a few frames deep, plus libc syscall wrappers
 	runtimeBudget := 3*rtMax + 2048
 	const externDefault = 64 << 10
+	// a task's arguments are copied to the top of its stack, above the trampoline's frame (and
+	// on x86-64 a return slot): count them in the trampoline's frame
+	var tramps []string
+	for _, p := range out.Pools {
+		if p.Entry != nil { // the main pool's "trampoline" is sq_program_main, started with no arguments
+			tramps = append(tramps, p.Trampolines...)
+		}
+	}
+	if len(tramps) > 0 {
+		names := make([]string, len(tramps))
+		for i, t := range tramps {
+			names[i] = t + "_args"
+		}
+		argSizes, err := readConsts(filepath.Join(work, "prog.o"), names)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range tramps {
+			frames[t] += (argSizes[t+"_args"]+15)&^15 + 16
+		}
+	}
 	sizes, _ := compiler.StackPlan(prog, out.Pools, frames, runtimeBudget, externDefault)
+	// prog.c isn't probed, so a frame larger than the guard could step over it into the next
+	// stack if a proof were short: each pool's guard is as large as the largest frame it runs
+	guards := compiler.MaxFrames(prog, out.Pools, frames, rtMax)
 	// blocking externs run on helper threads: helpersPerThread per scheduler thread, each with
 	// a stack proven for the largest of them (plus libc's share of the thread)
 	helperStack := compiler.HelperStack(prog, frames, externDefault)
@@ -435,7 +459,8 @@ func Build(opt Options) (*Result, error) {
 			need = need*4 + 256<<10
 		}
 		usable := (need + page - 1) / page * page
-		slot := usable + page // guard page
+		guard := max(page, (guards[p]+page-1)/page*page)
+		slot := usable + guard
 		p.StackSize = need
 		total += p.Count
 		// stacks are reserved with one mmap per pool at startup (a multi-GiB BSS would collide
@@ -444,7 +469,7 @@ func Build(opt Options) (*Result, error) {
 		preemptible := p.Entry != nil && p.Entry.Preemptible
 		anyPreemptible = anyPreemptible || preemptible
 		isolate := p.Entry != nil && p.Entry.Isolate
-		fmt.Fprintf(&pools, "sq_pool %s = {.name = %q, .count = %d, .stack_size = %d, .slot_size = %d, .gs = sq_gs%d, .index = %d, .preemptible = %t, .isolate = %t};\n\n", p.CName, p.Name, p.Count, need, slot, i, i, preemptible, isolate)
+		fmt.Fprintf(&pools, "sq_pool %s = {.name = %q, .count = %d, .stack_size = %d, .slot_size = %d, .guard_size = %d, .gs = sq_gs%d, .index = %d, .preemptible = %t, .isolate = %t};\n\n", p.CName, p.Name, p.Count, need, slot, guard, i, i, preemptible, isolate)
 		names = append(names, "&"+p.CName)
 		res.Pools = append(res.Pools, PoolReport{Name: p.Name, Count: p.Count, Stack: need, Slot: slot, Touchable: usable})
 	}
@@ -563,9 +588,9 @@ func Build(opt Options) (*Result, error) {
 	}
 	mem.Code, mem.Static, err = segmentSizes(absOut)
 	if err == nil {
-		var globals int64
-		globals, err = globalsSize(filepath.Join(work, "prog.o"))
-		mem.Static += globals
+		var c map[string]int64
+		c, err = readConsts(filepath.Join(work, "prog.o"), []string{"sq_globals_size"})
+		mem.Static += c["sq_globals_size"]
 	}
 	if err != nil {
 		if prog.Budget > 0 {
@@ -626,19 +651,26 @@ func segmentSizes(bin string) (code, static int64, err error) {
 	return code, static, nil
 }
 
-// globalsSize reads sq_globals_size, the size of one thread's package variables, from the
-// compiled prog.o (the linked binary has folded it away). They are mapped at start-up, so the
-// binary's segments don't include them.
-func globalsSize(obj string) (int64, error) {
-	var sec io.ReaderAt
-	var off uint64
+// readConsts reads size_t constants from a compiled object (the linked binary may have folded
+// them away): sq_globals_size, the size of one thread's package variables, and each task
+// trampoline's T_args, the size of the arguments copied to the top of its stacks.
+func readConsts(obj string, names []string) (map[string]int64, error) {
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	type loc struct {
+		sec io.ReaderAt
+		off uint64
+	}
+	found := map[string]loc{}
 	if f, err := macho.Open(obj); err == nil {
 		defer f.Close()
 		if f.Symtab != nil {
 			for _, sym := range f.Symtab.Syms {
-				if sym.Name == "_sq_globals_size" && sym.Sect > 0 && int(sym.Sect) <= len(f.Sections) {
-					s := f.Sections[sym.Sect-1]
-					sec, off = s, sym.Value-s.Addr
+				if n := strings.TrimPrefix(sym.Name, "_"); want[n] && sym.Sect > 0 && int(sym.Sect) <= len(f.Sections) {
+					sec := f.Sections[sym.Sect-1]
+					found[n] = loc{sec, sym.Value - sec.Addr}
 				}
 			}
 		}
@@ -646,20 +678,25 @@ func globalsSize(obj string) (int64, error) {
 		defer f.Close()
 		syms, _ := f.Symbols()
 		for _, sym := range syms {
-			if sym.Name == "sq_globals_size" && int(sym.Section) > 0 && int(sym.Section) < len(f.Sections) {
-				s := f.Sections[sym.Section]
-				sec, off = s, sym.Value-s.Addr
+			if want[sym.Name] && int(sym.Section) > 0 && int(sym.Section) < len(f.Sections) {
+				sec := f.Sections[sym.Section]
+				found[sym.Name] = loc{sec, sym.Value - sec.Addr}
 			}
 		}
 	}
-	b := make([]byte, 8)
-	if sec == nil {
-		return 0, fmt.Errorf("%s has no sq_globals_size", obj)
+	out := map[string]int64{}
+	for _, n := range names {
+		l, ok := found[n]
+		if !ok {
+			return nil, fmt.Errorf("%s has no %s", obj, n)
+		}
+		b := make([]byte, 8)
+		if _, err := l.sec.ReadAt(b, int64(l.off)); err != nil {
+			return nil, fmt.Errorf("reading %s from %s: %v", n, obj, err)
+		}
+		out[n] = int64(binary.LittleEndian.Uint64(b))
 	}
-	if _, err := sec.ReadAt(b, int64(off)); err != nil {
-		return 0, fmt.Errorf("reading sq_globals_size from %s: %v", obj, err)
-	}
-	return int64(binary.LittleEndian.Uint64(b)), nil
+	return out, nil
 }
 
 // FormatMemory renders the worst-case memory breakdown.
@@ -756,16 +793,24 @@ func readStackUsage(path string, allowDynamic bool) (frames, rt map[string]int64
 	rtNames := map[string]bool{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		parts := strings.Split(sc.Text(), "\t")
-		if len(parts) < 3 {
+		// "loc<TAB>bytes<TAB>qualifiers", split from the right: a source path (in loc) may
+		// contain tabs. A line that doesn't parse fails the build: dropping a frame would make
+		// the proof short.
+		line := sc.Text()
+		if line == "" {
 			continue
 		}
-		loc := parts[0]
+		parts := strings.Split(line, "\t")
+		if len(parts) < 3 {
+			return nil, nil, fmt.Errorf("reading stack usage: cannot parse %q", line)
+		}
+		loc := strings.Join(parts[:len(parts)-2], "\t")
+		parts = []string{loc, parts[len(parts)-2], parts[len(parts)-1]}
 		full := loc[strings.LastIndex(loc, ":")+1:]
 		name, _, _ := strings.Cut(full, ".")
 		n, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
-			continue
+			return nil, nil, fmt.Errorf("reading stack usage: cannot parse %q", line)
 		}
 		if strings.Contains(parts[2], "dynamic") && !strings.Contains(parts[2], "bounded") && !allowDynamic {
 			return nil, nil, fmt.Errorf("function %s has a dynamically sized stack frame; cannot prove its stack size", name)

@@ -1,0 +1,27 @@
+program {
+	threads 2
+}
+
+// An isolate task's panic on shard 1 ends only that task (shards past 0 once lost the pool's
+// isolate flag), and printing goes on afterwards (the panic report once kept every shard's output
+// lock, so the next println spun for ever).
+use runtime
+
+thread done int chan[8]
+
+task work(n int) pool 1 isolate {
+	defer finished(n)
+	var xs int[2]
+	println("work reads", xs[n*5])
+}
+
+fn finished(n int) { done <- n }
+
+fn main() {
+	if runtime.shard() != 1 {
+		return
+	}
+	start work(1)
+	println("finished", <-done)
+	println("after")
+}

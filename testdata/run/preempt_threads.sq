@@ -1,0 +1,23 @@
+program {
+	threads 2
+}
+
+// A preemptible task on shard 1 yields (shards past 0 once lost the pool's preemptible flag, so
+// the spinning task kept shard 1's main from running again).
+use runtime, time
+
+task spin() pool 1 preemptible {
+	x := 0
+	loop {
+		x++
+	}
+}
+
+fn main() {
+	if runtime.shard() != 1 {
+		return
+	}
+	start spin()
+	time.sleep(10 * time.millisecond)
+	println("shard 1 main woke")
+}

@@ -1,0 +1,22 @@
+program
+
+// A task's arguments are copied to the top of its stack: the stack proof counts them (an
+// int[50000] argument once overflowed a stack proven without it).
+thread big int[50000]
+thread sums int chan[1]
+
+task worker(a int[50000]) pool 2 {
+	s := 0
+	for x in a {
+		s += x
+	}
+	sums <- s
+}
+
+fn main() {
+	for i in 0..50000 {
+		big[i] = i % 7
+	}
+	start worker(big)
+	println(<-sums)
+}

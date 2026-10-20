@@ -273,7 +273,8 @@ typedef struct sq_pool {
 	const char *name;      // entry function
 	int64_t count;         // max live tasks
 	int64_t stack_size;    // usable bytes per stack (proven by the compiler)
-	int64_t slot_size;     // stack_size rounded to pages + guard page
+	int64_t slot_size;     // guard + stack_size rounded to pages
+	int64_t guard_size;    // PROT_NONE below each stack: a page, or the largest frame its tasks run
 	uint8_t *stacks;       // count * slot_size, statically allocated
 	sq_g *gs;              // count task descriptors
 	sq_g *free;

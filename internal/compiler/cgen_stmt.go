@@ -458,6 +458,8 @@ func (g *gen) goStmt(s *GoStmt) {
 		fields = append(fields, "char none;")
 	}
 	fmt.Fprintf(&g.goSites, "struct sq_ga%d { %s };\n", s.ID, strings.Join(fields, " "))
+	// the arguments are copied to the top of the task's stack (g_prepare): the driver adds this
+	fmt.Fprintf(&g.goSites, "const size_t %s_args = sizeof(struct sq_ga%d);\n", tramp, s.ID)
 	fmt.Fprintf(&g.goSites, "static %s;\n", g.proto(f))
 	if f.Isolate {
 		// the base of the task's unwind frames: a panic in it ends here, and the task exits
