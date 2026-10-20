@@ -25,6 +25,7 @@ import (
 	"squark"
 	"squark/internal/compiler"
 	"squark/internal/driver"
+	"squark/internal/lsp"
 	"squark/internal/tour"
 )
 
@@ -34,6 +35,7 @@ func usage() {
   squark run [-v] [-cpu c] dir [args...]                     compile and run
   squark test [-run re] [-v] [-asan] [-timeout d] [-p n] [-cpu c] [dir|dir/... ...]   run the tests in _test.sq files
   squark fmt [-l] [-w] [file|dir|dir/... ...]       format source files (print, list or rewrite)
+  squark lsp                                        the language server, for editors (stdin and stdout)
   squark check [dir]                                type and lifetime check only
   squark doc [dir] [pkg]                            list functions with their reference provenance
   squark emit-c [dir]                               print the generated C
@@ -128,7 +130,7 @@ func main() {
 		dir = fs.Arg(0)
 	}
 	// flags must come before the directory; only run (program arguments) and doc (package) take more
-	maxArgs := map[string]int{"build": 1, "check": 1, "emit-c": 1, "doc": 2, "tour": 0}
+	maxArgs := map[string]int{"build": 1, "check": 1, "lsp": 0, "emit-c": 1, "doc": 2, "tour": 0}
 	if n, ok := maxArgs[cmd]; ok && fs.NArg() > n {
 		fmt.Fprintf(os.Stderr, "squark %s: unexpected arguments %q (flags go before the directory)\n", cmd, fs.Args()[n:])
 		os.Exit(2)
@@ -223,6 +225,11 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Print(src)
+	case "lsp":
+		if err := lsp.Serve(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "squark lsp:", err)
+			os.Exit(1)
+		}
 	case "fmt":
 		os.Exit(format(fs.Args(), *list, *write))
 	case "test":

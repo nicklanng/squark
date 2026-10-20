@@ -400,3 +400,35 @@ func faultInit(p *Package, v *Var) string {
 	}
 	return "..."
 }
+
+// DocComment returns the doc comment above the declaration o names, a line per line ("" if it
+// has none).
+func (o *Object) DocComment() string {
+	var doc []string
+	switch {
+	case o.Func != nil && o.Func.Decl != nil:
+		doc = o.Func.Decl.Doc
+	case o.Var != nil && o.Var.Spec != nil:
+		doc = o.Var.Spec.Doc
+	case o.TypeDecl != nil:
+		doc = o.TypeDecl.Doc
+	case o.PkgRef != nil && len(o.PkgRef.Files) > 0:
+		for _, f := range o.PkgRef.Files {
+			if len(f.Doc) > 0 {
+				doc = f.Doc
+				break
+			}
+		}
+	default:
+		if cd, ok := o.decl.(constDecl); ok {
+			doc = cd.spec.Doc
+		}
+	}
+	return strings.Join(doc, "\n")
+}
+
+// ExprType is the type the checker gave x (nil before checking or after an error in it).
+func ExprType(x Expr) Type { return x.info().T }
+
+// ExprString writes an expression (or a type) back as source, shortened where long.
+func ExprString(x Expr) string { return exprString(x) }

@@ -1029,6 +1029,7 @@ squark build [-o out] [-v] [-work dir] [-cpu c] [-static] [-manifest k8s|systemd
 squark run [-v] [-cpu c] dir [args...]
 squark test [-run re] [-v] [-asan] [-timeout d] [-p n] [dir|dir/... ...]   # run the tests
 squark fmt [-l] [-w] [file|dir|dir/... ...]     # format: print, list (-l) or rewrite (-w)
+squark lsp                                      # the language server, for editors
 squark check [dir]                              # type and lifetime check only
 squark doc [dir] [pkg]                          # API with provenance; `squark doc std` for the stdlib
 squark emit-c [dir]                             # the generated C
@@ -1080,6 +1081,12 @@ line in a row and none at the start or end of a block, one space between tokens 
 keys, consecutive one-line functions' bodies and trailing comments aligned across consecutive
 lines. Where spacing carries meaning it is kept as written: `a*b + c`, `T{1}` against `if x {`.
 It formats only a file that parses, and never changes its tokens.
+
+**Editors.** `squark lsp` speaks the Language Server Protocol over stdin and stdout. It checks
+each package as it is edited (unsaved buffers included; a module with its tests) and publishes
+the errors, shows a declaration's signature with its provenance and its doc comment on hover,
+goes to definitions (the standard library's too) and formats with `squark fmt`.
+`editors/vscode` runs it.
 
 `-static` (Linux) links everything into the binary, libc and C libraries such as SQLite included,
 so it runs in an empty image (`FROM scratch`): the runtime needs nothing from the system at run

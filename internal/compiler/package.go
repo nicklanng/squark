@@ -100,6 +100,9 @@ type Loader struct {
 	MainDir string
 	// Tests loads the main package's _test.sq files too, and a file whose TestEntry runs them
 	Tests bool
+	// Overlay holds file contents (by absolute path) that replace or add to what is on disk: an
+	// editor's unsaved buffers
+	Overlay map[string][]byte
 
 	tests   []TestFunc
 	pkgs    map[string]*Package
@@ -136,12 +139,25 @@ func (l *Loader) readDir(dir string, std bool) (names []string, read func(string
 	if err != nil {
 		return nil, nil, err
 	}
+	seen := map[string]bool{}
 	for _, e := range ents {
 		if !e.IsDir() {
 			names = append(names, e.Name())
+			seen[e.Name()] = true
 		}
 	}
-	return names, func(n string) ([]byte, error) { return os.ReadFile(filepath.Join(dir, n)) }, nil
+	abs, _ := filepath.Abs(dir)
+	for p := range l.Overlay {
+		if n := filepath.Base(p); filepath.Dir(p) == abs && !seen[n] {
+			names = append(names, n) // a new file not saved yet
+		}
+	}
+	return names, func(n string) ([]byte, error) {
+		if src, ok := l.Overlay[filepath.Join(abs, n)]; ok {
+			return src, nil
+		}
+		return os.ReadFile(filepath.Join(dir, n))
+	}, nil
 }
 
 // localKey is the cache key of the package in dir: its absolute path, so the same directory reached

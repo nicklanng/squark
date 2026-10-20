@@ -305,9 +305,16 @@ shows the compiler's errors as they type.
   and the tour's programs are formatted. tests: `TestFormatCases` (each rule),
   `TestFormatIdempotent` (std, examples, testdata and doxasq: a fixed point after one pass),
   `TestFormatted`, `TestLessonsFormatted`, `TestCLIFmt`.
-- [ ] **4.3 A language server.** `squark lsp` speaks LSP over stdin: diagnostics from `check` as
-  you type (in-memory file contents), hover with a declaration's signature, its doc comment and
-  its provenance (what `squark doc` shows), go to definition. `editors/vscode` starts it.
+- [x] **4.3 A language server.** — done: `squark lsp` (`internal/lsp`, the standard library
+  only): diagnostics as you type (the loader takes an overlay of unsaved buffers; each package is
+  checked as a test build, so a module and its tests are checked too; checks wait 150ms after a
+  keystroke), hover (signature with provenance as `squark doc` shows it, doc comment; fields
+  in selectors and struct literals), go to definition (the standard library is written out
+  read-only to a temporary directory so its files open), formatting with `squark fmt`.
+  `editors/vscode` 0.2.0 starts it with its own small JSON-RPC client (`rpc.js`), not
+  Microsoft's `vscode-languageclient`, so the extension has no dependencies. tests:
+  `TestServer`, `TestModuleDiagnostics`, `TestPositions` (UTF-16 columns),
+  `editors/vscode/test/lsp.test.mjs` (the extension's client against the real server).
 
 ## 5. Performance follow-ups (2026-10-20)
 
@@ -349,3 +356,4 @@ Postponed from the SIMD work (2026-10-17).
 - 2026-10-20: 3.5 TLS deferred: no vendored libraries; a mesh or sidecar handles TLS for now.
 - 2026-10-20: 3.5 TLS dropped (not needed). Sections 4 (tooling) and 5 (performance follow-ups)
   added; starting with 4.1.
+- 2026-10-20: 4.1-4.3 done (suite on macOS with ASan, fuzz 5000 clean after 4.1). Next: section 5.

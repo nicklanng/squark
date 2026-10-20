@@ -56,8 +56,10 @@ server.
 Requires Go 1.27+ and clang. The `sqlite` package links Homebrew's libsqlite3; edit the `link`,
 `cflags` and `ldflags` lines in `std/sqlite/sqlite.sq` for other setups.
 
-Editor support: `editors/vscode` is a VS Code extension with syntax highlighting (see its README to
-install).
+Editor support: `squark lsp` is a language server (the compiler's errors as you type, hover with
+signatures and provenance, go to definition, formatting), and `editors/vscode` is a VS Code
+extension that runs it, with syntax highlighting (see its README to install). Other editors can
+run `squark lsp` as any LSP server.
 
 ## Where memory lives
 

@@ -1,19 +1,32 @@
 {
   "name": "squark",
   "displayName": "squark",
-  "description": "Syntax highlighting for squark, a language without a heap",
-  "version": "0.1.0",
+  "description": "squark, a language without a heap: highlighting, and the compiler's errors, hover, go to definition and formatting through squark lsp",
+  "version": "0.2.0",
   "publisher": "nicklanng",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/nicklanng/squark" },
-  "engines": { "vscode": "^1.70.0" },
-  "categories": ["Programming Languages"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nicklanng/squark"
+  },
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "squark",
-        "aliases": ["squark", "Squark"],
-        "extensions": [".sq"],
+        "aliases": [
+          "squark",
+          "Squark"
+        ],
+        "extensions": [
+          ".sq"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -23,13 +36,27 @@
         "scopeName": "source.squark",
         "path": "./syntaxes/squark.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "squark",
+      "properties": {
+        "squark.path": {
+          "type": "string",
+          "default": "",
+          "description": "The squark compiler to run as the language server (squark lsp). Empty: bin/squark in a workspace folder, else squark on the PATH."
+        }
+      }
+    }
   },
   "scripts": {
-    "test": "node test/grammar.test.mjs"
+    "test": "node test/grammar.test.mjs && node test/lsp.test.mjs"
   },
   "devDependencies": {
     "vscode-oniguruma": "2.0.1",
     "vscode-textmate": "9.2.0"
-  }
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:squark"
+  ]
 }

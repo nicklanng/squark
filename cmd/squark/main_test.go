@@ -188,6 +188,8 @@ func TestCLIFlagsPerCommand(t *testing.T) {
 		{"build", "-run", "x", dir},
 		{"test", "-run", "(", dir},
 		{"fmt", "-v", dir},
+		{"lsp", "-v"},
+		{"lsp", dir},
 	} {
 		cmd := exec.Command(bin, args...)
 		msg, err := cmd.CombinedOutput()
