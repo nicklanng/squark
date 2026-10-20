@@ -3,12 +3,13 @@
 // with their number and line, and skipped.
 //
 //	squark run examples/jsonq [FILE]     (no FILE: a built-in sample with bad records)
+//	squark test examples/jsonq           (the tests in jsonq_test.sq)
 //
 // It shows:
-//   - the json pull decoder, decoding strings straight into an arena (NewDecoderIn, TextMax)
+//   - the json pull decoder, decoding strings straight into an arena (new_decoder_in, text_max)
 //   - one arena holding every decoded string and item slice, sized from the input
 //   - json.Encoder writing JSON without hand-placed quotes and commas
-//   - error values with codes, and try
+//   - error values with codes, and !
 //   - sort.slice with plain functions as comparators
 program
 

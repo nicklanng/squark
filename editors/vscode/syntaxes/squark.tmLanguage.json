@@ -415,7 +415,7 @@
     "self": { "match": "(?<![\\w)\\]]\\.)\\bself\\b", "name": "variable.language.self.squark" },
 
     "builtins": {
-      "match": "(?<![\\w)\\]]\\.)\\b(len|cap|append|copy|make|delete|close|panic|print|println|min|max|new)\\b(?=\\s*\\()",
+      "match": "(?<![\\w)\\]]\\.)\\b(len|cap|append|copy|make|delete|close|panic|assert|print|println|min|max|new)\\b(?=\\s*\\()",
       "name": "support.function.builtin.squark"
     },
 

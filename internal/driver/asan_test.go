@@ -8,12 +8,6 @@ import (
 	"testing"
 )
 
-// asanOptions makes AddressSanitizer catch what the lifetime checker exists to prevent: a reference
-// used after its frame returned (detect_stack_use_after_return) or its block ended. The runtime
-// installs its own (static) signal stack, so ASan must not manage one: it would munmap ours when a
-// scheduler thread exits.
-const asanOptions = "detect_stack_use_after_return=1:detect_stack_use_after_scope=1:use_sigaltstack=0:exitcode=86"
-
 // needClangASan skips a test under gcc: gcc's AddressSanitizer loses track of the fake stack across
 // squark's task stack switches ("False positive error reports may follow"), clang's doesn't.
 func needClangASan(t *testing.T) {

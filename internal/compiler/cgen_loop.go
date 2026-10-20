@@ -333,7 +333,7 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, changed []*Var, bounds ...Expr)
 			case s.Builtin == "make" || s.Builtin == "new" || s.Builtin == "append":
 				ok = false
 			case s.Conversion, s.Builtin == "len", s.Builtin == "cap", s.Builtin == "min", s.Builtin == "max",
-				s.Builtin == "print", s.Builtin == "println", s.Builtin == "panic", strings.HasPrefix(s.Builtin, "simd."):
+				s.Builtin == "print", s.Builtin == "println", s.Builtin == "panic", s.Builtin == "assert", strings.HasPrefix(s.Builtin, "simd."):
 			default:
 				memSafe = false // a call can store anywhere
 			}

@@ -119,6 +119,7 @@ type CallExpr struct {
 	Args     []Expr
 	Ellipsis bool // f(xs...)
 	P        Pos
+	Text     string // assert(cond): cond as written
 
 	// filled by checker
 	Builtin    string // builtin name for builtin calls

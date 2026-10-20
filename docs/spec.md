@@ -135,7 +135,8 @@ arena ...
 - A package is a directory of `.sq` files. Every file starts with the same header: `program` for
   the main package, `module NAME` for a library (its name, as importers use it). The `{ ... }`
   block of directives is optional and may be in any of the package's files. `.c` files in the
-  same directory are compiled and linked as C shims.
+  same directory are compiled and linked as C shims. Files whose names end in `_test.sq` hold the
+  package's tests and are compiled only by `squark test` (§10).
 - `use` lists imports: unquoted paths (`math/rand`, `./lib`, `../util`), or quoted ones for paths
   with other characters. `use ( ... )` takes one per line.
 - `fn main()` in the program is the entry point; when it returns, the program exits.
@@ -638,10 +639,21 @@ the result is not necessarily NaN, and `min(0.0, -0.0)` may return either zero.
 ### Builtins
 
 `len`, `cap`, `append`, `copy` (also `copy(dst u8[], src str)`), `delete`, `close`, `min`, `max`,
-`panic(x)` (x is a string, integer, bool or error), `print`/`println` (write to **stdout** a line
+`panic(x)` (x is a string, integer, bool or error), `assert(cond)` and `assert(cond, msg)` (below),
+`print`/`println` (write to **stdout** a line
 at a time, so threads' lines don't mix; a partial line is written before other output to stdout,
 and every thread's at exit or a panic; accept numbers, strings, bools, pointers, errors and `u8[]`),
 `new`/`make` (arena only).
+
+`assert(cond)` panics if `cond` is false, with the condition as written. When the condition is a
+comparison of values `print` accepts, it also shows each side that isn't a constant (strings
+quoted); `msg`, a string, is added after the condition. It works anywhere, not only in tests.
+
+```squark
+assert(len(v) == 3, "after the push")
+// panic: assertion failed: len(v) == 3: after the push
+//         left:  2
+```
 
 ## 6. Statements
 
@@ -775,6 +787,8 @@ must not outlive the memory it points to:
 | `the brackets go after the element type` | `T[]`, `T[N]`, `V[K]` |
 | `a struct type is declared struct T { ... }` | `struct T { ... }` |
 | `a named type is declared T: U` | `Celsius: f64`, not `type Celsius f64` |
+| `test t must be fn t() or fn t() -> !` | a test takes no parameters and returns nothing or an error; a helper with parameters is named without `test_` |
+| `assert needs a condition` | `assert(x == y)`, `assert(ok)`: a bool |
 | `this function's stack frame is … must be under 4 GiB` | move the large `with arena` or local array to package level (`arena big 8G`) |
 
 ## 8. Idioms
@@ -1013,10 +1027,49 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 ```sh
 squark build [-o out] [-v] [-work dir] [-cpu c] [-static] [-manifest k8s|systemd] [dir]   # -v prints the memory breakdown (always printed with a budget)
 squark run [-v] [-cpu c] dir [args...]
+squark test [-run re] [-v] [-asan] [-timeout d] [-p n] [dir|dir/... ...]   # run the tests
 squark check [dir]                              # type and lifetime check only
 squark doc [dir] [pkg]                          # API with provenance; `squark doc std` for the stdlib
 squark emit-c [dir]                             # the generated C
 ```
+
+**Tests.** A test is `fn test_NAME()` or `fn test_NAME() -> !` at package level in a file whose
+name ends in `_test.sq`; such files have the package's header and see its unexported names. A
+module is tested like a program (a program's `main` doesn't run). `squark test` builds the package
+with its tests, then runs each test in its own process, in the package's directory, with a
+temporary directory of its own as `TMPDIR`: a test fails if it returns an error, panics (an
+`assert` that fails, an index out of range, ...) or runs past `-timeout` (1m), and its package
+variables start from their initial values every time. The test build has one worker and one
+scheduler thread, whatever the header says, and no memory budget (test code isn't the program's).
+`std/testing` has `expect_panic(text)`, for a test that passes only if it panics with a message
+containing text, and `skip(reason)`.
+
+```squark
+// stack_test.sq, next to stack.sq
+module stack
+
+use testing
+
+fn test_push_pop() {
+    var s Stack
+    s.push(1)
+    assert(s.pop() == 1)
+}
+
+fn test_overflow() {
+    testing.expect_panic("vector is full")
+    var s Stack
+    for i in 0..65 {
+        s.push(i)
+    }
+}
+```
+
+`squark test` prints the failures with their output and a line per package (`ok   dir  2 tests
+(84ms)`) and exits with status 1 if any test failed. `-run re` runs the tests whose names match,
+`-v` reports every test with its output and its proven stack, `-p n` runs n tests at once, and
+`-asan` builds with AddressSanitizer. `dir/...` tests every directory under dir that has
+`_test.sq` files.
 
 `-static` (Linux) links everything into the binary, libc and C libraries such as SQLite included,
 so it runs in an empty image (`FROM scratch`): the runtime needs nothing from the system at run

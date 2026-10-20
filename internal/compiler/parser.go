@@ -1632,7 +1632,11 @@ func (p *parser) postfix(x Expr, start Pos) Expr {
 			p.exprLev++
 			call := &CallExpr{Fun: x, P: pos}
 			for p.tok.tok != RPAREN {
+				from := p.tok.pos
 				call.Args = append(call.Args, p.expr())
+				if len(call.Args) == 1 && isIdent(x, "assert") {
+					call.Text = p.lx.text(from, p.prevEnd)
+				}
 				if p.got(ELLIPSIS) {
 					call.Ellipsis = true
 				}

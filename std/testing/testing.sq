@@ -1,0 +1,42 @@
+// Package testing is for tests run by squark test: a test is fn test_NAME() or
+// fn test_NAME() -> ! in a _test.sq file, and fails if it returns an error or panics. assert(cond)
+// is the usual check. These functions tell the runner what else to expect; outside squark test
+// they do nothing (skip still ends the program).
+//
+//	fn test_full() {
+//		testing.expect_panic("vector is full")
+//		var v int[..1]
+//		v.push(1)
+//		v.push(2)
+//	}
+module testing
+
+use os, strconv
+
+// runner is the descriptor squark test reads these messages from, when SQUARK_TEST is set.
+const runner = 3
+
+// expect_panic says the test must panic with a message containing text: it passes if it does,
+// and fails if it returns.
+pub fn expect_panic(text str) { tell("expect_panic", text) }
+
+// skip ends the test, which is reported as skipped, with reason.
+pub fn skip(reason str) {
+	tell("skip", reason)
+	os.exit(0)
+}
+
+// tell writes "kind len\ntext\n" for the runner.
+fn tell(kind, text str) {
+	if os.getenv("SQUARK_TEST") == "" {
+		return
+	}
+	f := os.from_fd(runner)
+	var head u8[64]
+	h := append(append(head[:0], kind...), ' ')
+	h = strconv.append_int(h, len(text))
+	h = append(h, '\n')
+	f.write(h)
+	f.write_string(text)
+	f.write_string("\n")
+}

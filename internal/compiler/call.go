@@ -613,6 +613,24 @@ func (c *Checker) builtin(e *CallExpr, name string) {
 				c.errorf(e.Args[0].Pos(), "panic argument must be a string, number, bool or error (have %s)", t)
 			}
 		}
+	case "assert":
+		e.T, e.Mode = tInvalid, ModeNoValue
+		if nargs < 1 || nargs > 2 {
+			c.errorf(e.P, "assert takes a condition and an optional message: assert(cond) or assert(cond, \"why\")")
+			return
+		}
+		if c.valueExpr(e.Args[0], tBool) {
+			c.defaultUntyped(e.Args[0])
+			if t := e.Args[0].info().T; !isBoolean(t) {
+				c.errorf(e.Args[0].Pos(), "assert needs a condition (have %s of type %s)", exprString(e.Args[0]), t)
+			}
+		}
+		if nargs == 2 && c.valueExpr(e.Args[1], tString) {
+			c.defaultUntyped(e.Args[1])
+			if t := e.Args[1].info().T; !isString(t) {
+				c.errorf(e.Args[1].Pos(), "assert's message must be a string (have %s of type %s)", exprString(e.Args[1]), t)
+			}
+		}
 	case "print", "println":
 		e.T, e.Mode = tInvalid, ModeNoValue
 		for _, a := range e.Args {

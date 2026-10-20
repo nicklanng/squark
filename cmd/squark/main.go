@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -29,6 +30,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
   squark build [-o output] [-v] [-work dir] [-cpu c] [-static] [-manifest k8s|systemd] [dir]   compile a program
   squark run [-v] [-cpu c] dir [args...]                     compile and run
+  squark test [-run re] [-v] [-asan] [-timeout d] [-p n] [-cpu c] [dir|dir/... ...]   run the tests in _test.sq files
   squark check [dir]                                type and lifetime check only
   squark doc [dir] [pkg]                            list functions with their reference provenance
   squark emit-c [dir]                               print the generated C
@@ -99,9 +101,13 @@ func main() {
 	httpAddr := fs.String("http", "127.0.0.1:3999", "tour: the address to serve on")
 	openBrowser := fs.Bool("open", true, "tour: open the tour in a browser")
 	export := fs.String("export", "", "tour: write a static copy of the tour, with every lesson's output baked in, into this directory")
+	run := fs.String("run", "", "test: run only the tests whose names match this regular expression")
+	asan := fs.Bool("asan", false, "test: build with AddressSanitizer")
+	timeout := fs.Duration("timeout", time.Minute, "test: fail a test that runs longer than this")
+	parallel := fs.Int("p", 1, "test: run this many tests at once")
 	fs.Parse(os.Args[2:])
 	// each subcommand takes its own flags: one it ignores would be a silent surprise
-	takes := map[string]string{"build": "o v work opt cpu manifest static", "run": "v work opt cpu", "tour": "http open export"}
+	takes := map[string]string{"build": "o v work opt cpu manifest static", "run": "v work opt cpu", "tour": "http open export", "test": "run v asan timeout p cpu"}
 	fs.Visit(func(f *flag.Flag) {
 		if !slices.Contains(strings.Fields(takes[cmd]), f.Name) {
 			fmt.Fprintf(os.Stderr, "squark %s: -%s doesn't apply to %s\n", cmd, f.Name, cmd)
@@ -212,6 +218,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Print(src)
+	case "test":
+		os.Exit(test(fs.Args(), *run, *verbose, *asan, *timeout, *parallel, *cpu))
 	case "tour":
 		if err := serveTour(*httpAddr, *openBrowser, *export); err != nil {
 			fmt.Fprintln(os.Stderr, "squark tour:", err)
@@ -220,6 +228,50 @@ func main() {
 	default:
 		usage()
 	}
+}
+
+// test runs the tests of each directory, and returns the exit status: 1 if any failed or didn't
+// build.
+func test(args []string, run string, verbose, asan bool, timeout time.Duration, parallel int, cpu string) int {
+	var re *regexp.Regexp
+	if run != "" {
+		var err error
+		if re, err = regexp.Compile(run); err != nil {
+			fmt.Fprintf(os.Stderr, "squark test: -run: %v\n", err)
+			return 2
+		}
+	}
+	if len(args) == 0 {
+		args = []string{"."}
+	}
+	dirs, err := driver.TestDirs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "squark test:", err)
+		return 1
+	}
+	if len(dirs) == 0 {
+		fmt.Fprintf(os.Stderr, "squark test: no _test.sq files in %s\n", strings.Join(args, " "))
+		return 1
+	}
+	opt := driver.TestOptions{Run: re, Verbose: verbose, Timeout: timeout, Parallel: parallel, CPU: cpu, Out: os.Stdout}
+	if asan {
+		opt.Sanitize = "address"
+	}
+	status := 0
+	for _, d := range dirs {
+		opt.Dir = d
+		sum, err := driver.Test(opt)
+		if err != nil {
+			fmt.Printf("FAIL %s  build failed\n", d)
+			for _, line := range strings.Split(strings.TrimRight(err.Error(), "\n"), "\n") {
+				fmt.Printf("    %s\n", line)
+			}
+			status = 1
+		} else if sum.Failed > 0 {
+			status = 1
+		}
+	}
+	return status
 }
 
 func serveTour(addr string, openBrowser bool, export string) error {

@@ -8,7 +8,9 @@ don't write Go syntax, and don't assume Go's behaviour). Before writing or chang
 - `docs/stdlib.md`: the standard library API with reference provenance (generated; don't edit by
   hand, run `docs/gen.sh`).
 
-Check your work with `bin/squark check <dir>` (types and lifetimes) and `bin/squark run <dir>`. Build
+Check your work with `bin/squark check <dir>` (types and lifetimes), `bin/squark run <dir>` and
+`bin/squark test <dir>` (the `fn test_*()` functions in its `_test.sq` files; `assert(cond)` is
+the check). Build
 the compiler with `go build -o bin/squark ./cmd/squark`. Compiler errors name the fix; the spec's
 error table maps each one to the usual rewrite.
 

@@ -84,6 +84,11 @@ type Program struct {
 	// module's heap directive is a default the program's overrides
 	Heaps map[string]int64
 
+	// Testing says this is a test build (Loader.Tests), of the main package's Tests: its entry
+	// is TestEntry, not main, and the main package can be a module
+	Testing bool
+	Tests   []TestFunc
+
 	GoSites   []*GoStmt
 	MakeSites []*CallExpr
 	NumDefers int
@@ -93,7 +98,10 @@ type Program struct {
 type Loader struct {
 	Std     fs.FS // standard library root (contains std/<pkg>/*.sq)
 	MainDir string
+	// Tests loads the main package's _test.sq files too, and a file whose TestEntry runs them
+	Tests bool
 
+	tests   []TestFunc
 	pkgs    map[string]*Package
 	loading map[string]bool
 	order   []*Package
@@ -106,10 +114,10 @@ func (l *Loader) Load() (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	if mainPkg.Name != "main" {
+	if mainPkg.Name != "main" && !l.Tests {
 		return nil, fmt.Errorf("%s: this is module %s, not a program", l.MainDir, mainPkg.Name)
 	}
-	prog := &Program{Packages: l.order, Main: mainPkg, Workers: 1, Threads: 1}
+	prog := &Program{Packages: l.order, Main: mainPkg, Workers: 1, Threads: 1, Tests: l.tests, Testing: l.Tests}
 	return prog, nil
 }
 
@@ -161,10 +169,11 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 	}
 	sort.Strings(names)
 	pkg := &Package{Path: importPath, Dir: dir, Std: isStd}
+	testing := l.Tests && importPath == "main"
 	var errs ErrorList
 	for _, n := range names {
 		switch {
-		case strings.HasSuffix(n, ".sq") && !strings.HasSuffix(n, "_test.sq"):
+		case strings.HasSuffix(n, ".sq") && (testing || !strings.HasSuffix(n, "_test.sq")):
 			src, err := read(n)
 			if err != nil {
 				return nil, err
@@ -224,6 +233,18 @@ func (l *Loader) load(key, importPath, dir string, isStd bool) (*Package, error)
 	}
 	if len(pkg.Files) == 0 {
 		return nil, fmt.Errorf("no squark files in %s", dir)
+	}
+	if testing {
+		tests, errs := findTests(pkg.Files)
+		if len(errs) > 0 {
+			return nil, errs
+		}
+		f, err := testMain(dir, pkg.Name, tests)
+		if err != nil {
+			return nil, err
+		}
+		pkg.Files = append(pkg.Files, f)
+		l.tests = tests
 	}
 	// load imports
 	seen := map[string]*Package{}

@@ -1599,4 +1599,23 @@ fn open(path str) -> sqlite.DB !
 fn integer(v int) -> sqlite.Value in static
 fn text(s str) -> sqlite.Value in s
 fn null() -> sqlite.Value in static
+
+// Package testing is for tests run by squark test: a test is fn test_NAME() or
+// fn test_NAME() -> ! in a _test.sq file, and fails if it returns an error or panics. assert(cond)
+// is the usual check. These functions tell the runner what else to expect; outside squark test
+// they do nothing (skip still ends the program).
+//
+// 	fn test_full() {
+// 		testing.expect_panic("vector is full")
+// 		var v int[..1]
+// 		v.push(1)
+// 		v.push(2)
+// 	}
+module testing
+
+// expect_panic says the test must panic with a message containing text: it passes if it does,
+// and fails if it returns.
+fn expect_panic(text str)
+// skip ends the test, which is reported as skipped, with reason.
+fn skip(reason str)
 ```

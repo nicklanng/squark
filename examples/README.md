@@ -30,6 +30,8 @@ Every example follows the same layout, so they read alike:
 - **`selftest.sq`** (same package) holds what only the test needs: scripted clients, fixed
   input, test-mode switches. `main` calls into it in one place. An example whose normal run is
   its test (`hello`, `jobs`, `life`) has none.
+- **`*_test.sq`** holds tests of the program's pieces, run by `squark test examples/<name>`
+  (`jsonq` has them).
 - **Order:** header comment, `program` with its directives (`budget`, `pool`, `threads`), `use`, constants,
   types and package variables, then the code grouped by topic under `// ---- topic ----`
   markers, with `main` last.

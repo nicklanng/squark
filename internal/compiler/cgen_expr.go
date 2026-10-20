@@ -519,25 +519,83 @@ func (g *gen) comparison(e *BinaryExpr) string {
 	if isUntyped(t) {
 		t = y.info().T
 	}
-	a, b := g.coerce(x, t), g.coerce(y, t)
+	return g.compareC(e.Op, t, g.coerce(x, t), g.coerce(y, t))
+}
+
+// compareC compares a and b, C values of type t (neither nil), with op.
+func (g *gen) compareC(op Tok, t Type, a, b string) string {
 	if isString(t) {
-		switch e.Op {
+		switch op {
 		case EQL:
 			return fmt.Sprintf("sq_str_eq(%s, %s)", a, b)
 		case NEQ:
 			return fmt.Sprintf("(!sq_str_eq(%s, %s))", a, b)
 		}
-		return fmt.Sprintf("(sq_str_cmp(%s, %s) %s 0)", a, b, e.Op)
+		return fmt.Sprintf("(sq_str_cmp(%s, %s) %s 0)", a, b, op)
 	}
 	switch t.Underlying().(type) {
 	case *Struct, *Array, *ErrorType:
 		eq := g.eqExpr(t, a, b)
-		if e.Op == NEQ {
+		if op == NEQ {
 			return "(!" + eq + ")"
 		}
 		return eq
 	}
-	return fmt.Sprintf("(%s %s %s)", a, e.Op, b)
+	return fmt.Sprintf("(%s %s %s)", a, op, b)
+}
+
+// assertC is the C for assert(cond) or assert(cond, msg). A failed comparison of printable
+// values prints both operands (but not a constant one: the condition's text shows it).
+func (g *gen) assertC(text string, cond, msg Expr) string {
+	if text == "" {
+		text = exprString(cond)
+	}
+	begin := fmt.Sprintf("sq_assert_begin(SQ_STR(%s, %d))", cString(text), len(text))
+	if msg != nil {
+		begin += fmt.Sprintf("; sq_assert_message(%s)", g.coerce(msg, tString))
+	}
+	if e, ok := unparen(cond).(*BinaryExpr); ok && isComparison(e.Op) && simdOf(e.X.info().T) == nil && !isNilLit(e.X) && !isNilLit(e.Y) {
+		t := e.X.info().T
+		if isUntyped(t) {
+			t = e.Y.info().T
+		}
+		if isUntyped(t) {
+			t = defaultType(t)
+		}
+		if printable(t) && !isNilType(t) {
+			ct := g.ctype(t)
+			l, r := g.tmp(), g.tmp()
+			var b strings.Builder
+			fmt.Fprintf(&b, "({ %s %s = %s; %s %s = %s; if (!%s) { %s; ", ct, l, g.coerce(e.X, t), ct, r, g.coerce(e.Y, t), g.compareC(e.Op, t, l, r), begin)
+			for i, side := range []Expr{e.X, e.Y} {
+				if side.info().Const != nil {
+					continue
+				}
+				v, label := l, "left:  "
+				if i == 1 {
+					v, label = r, "right: "
+				}
+				fmt.Fprintf(&b, "sq_assert_operand(%s); ", cString(label))
+				if isString(t) {
+					fmt.Fprintf(&b, "sq_print_quoted(%s); ", v)
+				} else {
+					fmt.Fprintf(&b, "%s; ", g.printArgC(v, t))
+				}
+			}
+			b.WriteString("sq_assert_fail(__FILE__, __LINE__); } })")
+			return b.String()
+		}
+	}
+	return fmt.Sprintf("({ if (!(%s)) { %s; sq_assert_fail(__FILE__, __LINE__); } })", g.expr(cond), begin)
+}
+
+// printable reports whether print can show a value of type t.
+func printable(t Type) bool {
+	switch t.Underlying().(type) {
+	case *Basic, *Pointer, *ErrorType:
+		return true
+	}
+	return false
 }
 
 func (g *gen) compositeLit(e *CompositeLit) string {
@@ -1005,6 +1063,12 @@ func (g *gen) builtinCall(e *CallExpr) string {
 			return panicC(g.coerce(x, tString), t)
 		}
 		return panicC(g.expr(x), t)
+	case "assert":
+		var msg Expr
+		if len(args) > 1 {
+			msg = args[1]
+		}
+		return g.assertC(e.Text, args[0], msg)
 	case "print", "println":
 		// like Go, evaluate every argument before printing anything
 		var b strings.Builder

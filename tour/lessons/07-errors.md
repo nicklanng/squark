@@ -119,3 +119,61 @@ fn main() {
 > A server can't let one bad request end the whole program. A task marked `isolate` turns a panic
 > into the end of that task only: its deferred calls run, and the rest of the program carries
 > on. The HTTP server's connection task is `isolate`.
+
+## Assertions and tests
+goal: prints "the assertion holds"
+
+`assert(cond)` panics when `cond` is false. The panic shows the condition as you wrote it, and for
+a comparison the values on each side, so you can see what went wrong without adding prints.
+`assert(cond, "why")` adds a message.
+
+Run it, then fix `mean` so the assertion holds.
+
+```squark editor
+program
+
+fn mean(xs int[]) -> int {
+	sum := 0
+	for x in xs {
+		sum += x
+	}
+	return sum / (len(xs) + 1)
+}
+
+fn main() {
+	assert(mean(int[]{2, 4, 6}) == 4, "mean of 2, 4, 6")
+	println("the assertion holds")
+}
+```
+
+```squark solution
+program
+
+fn mean(xs int[]) -> int {
+	sum := 0
+	for x in xs {
+		sum += x
+	}
+	return sum / len(xs)
+}
+
+fn main() {
+	assert(mean(int[]{2, 4, 6}) == 4, "mean of 2, 4, 6")
+	println("the assertion holds")
+}
+```
+
+Tests use the same check. A test is `fn test_NAME()` (or `fn test_NAME() -> !`, failing if it
+returns an error) in a file whose name ends in `_test.sq`, next to the code it tests:
+
+```squark
+program
+
+fn test_mean() {
+	assert(mean(int[]{2, 4, 6}) == 4)
+	assert(mean(int[]{5}) == 5)
+}
+```
+
+`squark test dir` runs each test in its own process, so a panic ends only that test, and reports
+the ones that fail with their output. `squark test -v` also prints each test's proven stack.

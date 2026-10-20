@@ -1,0 +1,77 @@
+program
+
+// The pieces of the report, one at a time: squark test examples/jsonq
+
+// bytes copies s into buf, as input arrives.
+fn bytes(buf u8[], s str) -> u8[] in buf {
+	return buf[:copy(buf, s)]
+}
+
+fn test_scanner() -> ! {
+	var buf u8[64]
+	s := Scanner{data: bytes(buf[:], "[{\"a\": [1, \"]\"]},\n 3]"), line: 1, pos: 1}
+	rec, line, ok := s.next()!
+	assert(ok)
+	assert(str(rec) == "{\"a\": [1, \"]\"]}", "nested brackets and a ] in a string")
+	assert(line == 1)
+	rec, line, ok = s.next()!
+	assert(str(rec) == "3")
+	assert(line == 2)
+	_, _, ok = s.next()!
+	assert(not ok, "the closing ] ends the array")
+	return nil
+}
+
+fn test_scanner_errors() {
+	var buf u8[16]
+	s := Scanner{data: bytes(buf[:], "[1, 2"), line: 1, pos: 1}
+	s.next()
+	_, _, ok, err := s.next()
+	assert(not ok)
+	assert(err == Truncated)
+	s = Scanner{data: bytes(buf[:], "[1] x"), line: 1, pos: 1}
+	s.next()
+	_, _, _, err = s.next()
+	assert(err == Trailing)
+}
+
+fn test_decode_order() -> ! {
+	var buf u8[256]
+	rec := bytes(buf[:], `{"id": 7, "customer": "ann", "status": "shipped", "gift": [1, {}],
+		"items": [{"sku": "a1", "qty": 2, "price": 350}, {"sku": "b7", "qty": 1, "price": 1299}]}`)
+	with arena a 1K {
+		o := decode_order(rec, a)!
+		assert(o.id == 7)
+		assert(o.customer == "ann")
+		assert(statuses[o.status] == "shipped")
+		assert(len(o.items) == 2)
+		assert(o.items[1].sku == "b7")
+		assert(o.total() == 2*350 + 1299)
+	}
+	return nil
+}
+
+fn test_decode_errors() {
+	var buf u8[256]
+	with arena a 1K {
+		_, err := decode_order(bytes(buf[:], "42"), a)
+		assert(err == NotObject)
+		_, err = decode_order(bytes(buf[:], `{"customer": "a customer name of more than sixty-four bytes, which the report refuses"}`), a)
+		assert(err == LongName)
+	}
+}
+
+fn test_validate() {
+	var seen bool[int; 4]
+	items := Item[]{{sku: "a1", qty: 1, price: 350}}
+	o := Order{id: 1, customer: "ann", status: 0, items: items}
+	assert(validate(&o, seen) == nil)
+	seen[1] = true
+	assert(validate(&o, seen) == DupID)
+	o.id = 2
+	o.status = status_index("lost")
+	assert(validate(&o, seen) == BadStatus)
+	o.status = 0
+	items[0].qty = 0
+	assert(validate(&o, seen) == BadQty)
+}

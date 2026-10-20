@@ -109,6 +109,11 @@ SQ_NORETURN void sq_panic_slice(int64_t lo, int64_t hi, int64_t max, int64_t cap
 SQ_NORETURN void sq_panic_append(int64_t need, int64_t cap, const char *file, int line);
 SQ_NORETURN void sq_panic_divide(const char *file, int line);
 SQ_NORETURN void sq_panic_nil(const char *file, int line);
+void sq_assert_begin(sq_string cond);
+void sq_assert_message(sq_string msg);
+void sq_assert_operand(const char *label);
+void sq_print_quoted(sq_string s);
+SQ_NORETURN void sq_assert_fail(const char *file, int line);
 
 static inline int64_t sq_idx(int64_t i, int64_t n, const char *file, int line) {
 	if (__builtin_expect((uint64_t)i >= (uint64_t)n, 0)) sq_panic_index(i, n, file, line);

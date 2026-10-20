@@ -1,0 +1,50 @@
+program
+
+// assert(cond) passes silently for every kind of condition; operands are evaluated once
+
+enum Dir { north, east }
+
+struct P {
+	x, y int
+}
+
+fault Gone 404 "gone"
+
+thread calls int
+
+fn next() -> int {
+	calls++
+	return calls
+}
+
+fn main() {
+	assert(true)
+	assert(1 < 2, "constants")
+	v := int[]{1, 2, 3}
+	assert(len(v) == 3)
+	assert(v[1] != 7, "message")
+	f := 1.5
+	assert(f > 1.0)
+	assert(f32(f) <= 1.5)
+	s := "abc"
+	assert(s == "abc")
+	assert(s < "abd")
+	assert("ab" + "c" == s)
+	d := Dir.east
+	assert(d == .east)
+	var err error = Gone
+	assert(err == Gone)
+	assert(err != nil)
+	var p *int
+	assert(p == nil)
+	q := &v[0]
+	assert(q != nil and *q == 1)
+	assert(P{1, 2} == P{x: 1, y: 2})
+	b := false
+	assert(not b)
+	u := u8(200)
+	assert(u > 100)
+	assert(next() == 1)
+	assert(calls == 1)
+	println("ok")
+}

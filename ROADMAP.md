@@ -235,11 +235,9 @@ Each needs a design pass first: the open questions below are decided in this fil
   static libc); glibc static works because `net` never calls getaddrinfo/NSS. musl wasn't needed.
   test: `TestStatic` (no PT_INTERP, no shared libraries, SQLite included; it runs). Plan: `squark build -static` links statically (musl on Linux; libsqlite3
   static too), so the image can be `FROM scratch`. `examples/` gets a Dockerfile.
-- [ ] **3.5 TLS for outbound calls.** — deferred (2026-10-20): no third-party library is vendored
-  into the repo, so the options are linking the system's OpenSSL (its allocations in a counted
-  `heap ssl N`, like `sqlite`) or a TLS 1.3 client written in squark. Until one is chosen, TLS is
-  left to a service mesh or a sidecar, which inside a cluster often terminates it anyway. Plan was:
-  BearSSL vendored as a C library with a declared stack; `http.dial_tls`.
+- [-] **3.5 TLS for outbound calls.** — dropped (2026-10-20): not needed. No third-party
+  library is vendored into the repo, and TLS is left to a service mesh or a sidecar, which inside
+  a cluster often terminates it anyway.
 - [x] **3.6 Postgres client.** — done: `std/postgres` (the v3 protocol in squark: trust,
   cleartext and SCRAM-SHA-256 authentication, the extended protocol with text parameters,
   `Rows`, SQLSTATE codes, a per-thread `Pool` of up to 16) and `std/crypto/sha256` (SHA-256,
@@ -261,6 +259,62 @@ Each needs a design pass first: the open questions below are decided in this fil
   a graceful stop has begun; `transient(err)` (timeouts, refused/reset/unreachable connections,
   classified in C with the system's own errno numbers) and `transient_status(code)`.
   `examples/shop` retries a failed dial (never the POST). test: `testdata/run/retry.sq`.
+
+## 4. Tooling for writing squark every day (2026-10-20)
+
+What someone writing squark daily misses first: a test command, a formatter, and an editor that
+shows the compiler's errors as they type.
+
+- [x] **4.1 `squark test`.** — done as decided below. `assert` also takes a message
+  (`assert(cond, "why")`) and prints its condition as written (comments dropped, one line);
+  each test runs in the package's directory with its own `TMPDIR`. `examples/jsonq` has tests,
+  the tour's errors chapter a lesson. tests: `TestSquarkTest`, `TestSquarkTestProgram`,
+  `TestSquarkTestErrors`, `TestAssertMessages`, `TestTestDirs`, `TestExampleTests`,
+  `TestCLITest`, `testdata/run/assert.sq`. Decided:
+  - Tests are `fn test_NAME()` or `fn test_NAME() -> !` at package level in the package's
+    `*_test.sq` files (same header as the package, so a test sees its unexported names). A module
+    is tested as well as a program; a program's `main` isn't run.
+  - A test fails if it returns an error, panics, or hangs past `-timeout` (1m). Each test runs in
+    its own process: a panic ends only that test, package variables start fresh every time, and
+    tests can't leak tasks or sockets into each other. A squark binary starts in a millisecond, so
+    this costs little, and `-p N` runs N tests at once.
+  - `assert(cond)` is a builtin (usable anywhere, not only in tests): it panics with
+    `assertion failed: <the condition's source>`, and for a comparison it prints both operands'
+    values (strings quoted), so `assert(len(v) == 3)` says what `len(v)` was.
+  - `std/testing`: `expect_panic(text)` (the test passes only if it panics with a message
+    containing text: the "this must panic" tests doxasq keeps in a shell script) and
+    `skip(reason)`. They talk to the runner over file descriptor 3, not stdout.
+  - Test builds force one worker and one thread, skip the memory budget (test code isn't the
+    program's), and keep each test function out of line so `-v` can report each test's proven
+    stack.
+  - Flags: `-run regexp`, `-v` (every test, its output and stack), `-asan`, `-timeout d`, `-p N`.
+    `squark test dir/...` tests every package under dir with test files.
+  - Output: `ok  dir  N tests (time)`; a failure prints the test's output, indented.
+  - Tests: `TestSquarkTest` in `internal/driver` (pass, fail by error, by panic, by assert,
+    expect_panic, skip, timeout, -run, a module, a program with `threads` and a budget);
+    `testdata/run` for `assert`'s messages.
+- [ ] **4.2 `squark fmt`.** A formatter that prints the syntax tree back with comments kept: tabs,
+  one blank line between top-level declarations at most, the spacing `docs/spec.md` uses.
+  Idempotent; `-l` lists files that would change, `-w` rewrites them, default prints. Test: every
+  `.sq` file in the repo formats to itself after one pass (a fixed point), and parses to the same
+  tree it came from.
+- [ ] **4.3 A language server.** `squark lsp` speaks LSP over stdin: diagnostics from `check` as
+  you type (in-memory file contents), hover with a declaration's signature, its doc comment and
+  its provenance (what `squark doc` shows), go to definition. `editors/vscode` starts it.
+
+## 5. Performance follow-ups (2026-10-20)
+
+Postponed from the SIMD work (2026-10-17).
+
+- [ ] **5.1 AVX2 timing on real x86.** Rosetta and qemu run `-cpu x86-64-v3` binaries but their
+  timings don't reflect real hardware: needs an x86-64 machine.
+- [ ] **5.2 Loops with other strides** (`i += 2`, `for i := 0; i < n; i += k` with a constant
+  k): versioned like stride-one loops.
+- [ ] **5.3 Binary growth from loop copies** (about 12%): version only loops whose unchecked copy
+  clang vectorizes or that index enough to matter.
+- [ ] **5.4 Field and package slices in loops that call functions**: prove the call can't change
+  the slice (its callees store nothing into that field or variable).
+- [ ] **5.5 Refresh `bench/results/latest.md`** with a full `bench/run.sh`.
 
 ---
 
@@ -286,3 +340,5 @@ Each needs a design pass first: the open questions below are decided in this fil
 - 2026-10-17: 3.6 done. Left: 3.5 TLS, which needs a decision on vendoring a TLS library (BearSSL
   is in Debian but not Homebrew, so macOS builds would need its source in the repo).
 - 2026-10-20: 3.5 TLS deferred: no vendored libraries; a mesh or sidecar handles TLS for now.
+- 2026-10-20: 3.5 TLS dropped (not needed). Sections 4 (tooling) and 5 (performance follow-ups)
+  added; starting with 4.1.

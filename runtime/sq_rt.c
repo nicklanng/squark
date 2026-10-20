@@ -483,7 +483,13 @@ void sq_flush(void) {
 	out_unlock(sq_self);
 }
 
+static _Thread_local bool assert_out; // a failed assert prints its operands to stderr
+
 static void out(const void *p, size_t n) {
+	if (assert_out) {
+		write_all(2, p, n);
+		return;
+	}
 	out_lock(sq_self);
 	if (sq_self->outlen + n > sizeof sq_self->outbuf) flush_locked(sq_self);
 	if (n > sizeof sq_self->outbuf) {
@@ -740,6 +746,61 @@ void sq_panic_str(sq_string msg, const char *file, int line) {
 	exit_flush();
 	err_write("panic: ");
 	write_all(2, msg.p, (size_t)msg.len);
+	die(file, line);
+}
+
+// a failed assert(cond): sq_assert_begin prints the condition, sq_assert_operand labels each
+// operand the generated code then prints (with the print functions, to stderr meanwhile), and
+// sq_assert_fail ends the task as a panic does
+void sq_assert_begin(sq_string cond) {
+	exit_flush();
+	err_write("panic: assertion failed: ");
+	write_all(2, cond.p, (size_t)cond.len);
+	assert_out = true;
+}
+
+void sq_assert_message(sq_string msg) {
+	err_write(": ");
+	write_all(2, msg.p, (size_t)msg.len);
+}
+
+void sq_assert_operand(const char *label) {
+	err_write("\n\t");
+	err_write(label);
+}
+
+// sq_print_quoted prints s as a quoted string literal, so "" and trailing spaces show
+void sq_print_quoted(sq_string s) {
+	static const char hex[] = "0123456789abcdef";
+	out("\"", 1);
+	for (int64_t i = 0; i < s.len; i++) {
+		uint8_t c = s.p[i];
+		char e[4] = {'\\', 0, 0, 0};
+		size_t n = 2;
+		switch (c) {
+		case '"': e[1] = '"'; break;
+		case '\\': e[1] = '\\'; break;
+		case '\n': e[1] = 'n'; break;
+		case '\t': e[1] = 't'; break;
+		case '\r': e[1] = 'r'; break;
+		default:
+			if (c >= 0x20 && c != 0x7f) {
+				e[0] = (char)c;
+				n = 1;
+			} else {
+				e[1] = 'x';
+				e[2] = hex[c >> 4];
+				e[3] = hex[c & 15];
+				n = 4;
+			}
+		}
+		out(e, n);
+	}
+	out("\"", 1);
+}
+
+void sq_assert_fail(const char *file, int line) {
+	assert_out = false;
 	die(file, line);
 }
 

@@ -11,7 +11,7 @@ import (
 
 var universe = NewScope(nil)
 
-var builtinNames = []string{"len", "cap", "append", "copy", "make", "delete", "close", "panic", "print", "println", "min", "max", "new"}
+var builtinNames = []string{"len", "cap", "append", "copy", "make", "delete", "close", "panic", "assert", "print", "println", "min", "max", "new"}
 
 func init() {
 	for _, t := range []*Basic{tBool, tInt, tInt8, tInt16, tInt32, tInt64, tUint, tUint8, tUint16, tUint32, tUint64, tUintptr, tFloat32, tFloat64, tString, tRawptr} {
@@ -109,7 +109,11 @@ func Check(prog *Program) error {
 	if len(c.errs) > 0 {
 		return c.errs
 	}
-	main := prog.Main.Scope.LookupLocal("main")
+	entry := "main"
+	if prog.Testing {
+		entry = TestEntry
+	}
+	main := prog.Main.Scope.LookupLocal(entry)
 	if main == nil || main.Kind != ObjFunc {
 		return ErrorList{{Pos{File: prog.Main.Dir}, "function main is undeclared in the program"}}
 	}

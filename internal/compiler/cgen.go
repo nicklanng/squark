@@ -1111,8 +1111,34 @@ func MaxFrames(prog *Program, pools []*PoolInfo, frames map[string]int64, floor 
 }
 
 func StackPlan(prog *Program, pools []*PoolInfo, frames map[string]int64, runtimeBudget, externDefault int64) (map[*PoolInfo]int64, []string) {
-	memo := map[*Func]int64{}
 	var notes []string
+	stack := stackOf(prog, frames, runtimeBudget, externDefault)
+	out := map[*PoolInfo]int64{}
+	for _, p := range pools {
+		var need int64
+		if p.Entry == nil {
+			need = frames["sq_program_main"] + max(stack(prog.MainFunc), frames["sq_init_globals"]+stack(prog.InitFunc))
+		} else {
+			for _, t := range p.Trampolines {
+				if s := frames[t] + stack(p.Entry); s > need {
+					need = s
+				}
+			}
+		}
+		out[p] = need
+	}
+	sort.Strings(notes)
+	return out, notes
+}
+
+// FuncStack is the proven stack a call of f needs (its frame and its deepest callee's).
+func FuncStack(prog *Program, f *Func, frames map[string]int64, runtimeBudget, externDefault int64) int64 {
+	return stackOf(prog, frames, runtimeBudget, externDefault)(f)
+}
+
+// stackOf returns the function that proves a function's stack need from the C frame sizes.
+func stackOf(prog *Program, frames map[string]int64, runtimeBudget, externDefault int64) func(*Func) int64 {
+	memo := map[*Func]int64{}
 	var stack func(f *Func) int64
 	stack = func(f *Func) int64 {
 		if v, ok := memo[f]; ok {
@@ -1146,20 +1172,5 @@ func StackPlan(prog *Program, pools []*PoolInfo, frames map[string]int64, runtim
 		memo[f] = v
 		return v
 	}
-	out := map[*PoolInfo]int64{}
-	for _, p := range pools {
-		var need int64
-		if p.Entry == nil {
-			need = frames["sq_program_main"] + max(stack(prog.MainFunc), frames["sq_init_globals"]+stack(prog.InitFunc))
-		} else {
-			for _, t := range p.Trampolines {
-				if s := frames[t] + stack(p.Entry); s > need {
-					need = s
-				}
-			}
-		}
-		out[p] = need
-	}
-	sort.Strings(notes)
-	return out, notes
+	return stack
 }

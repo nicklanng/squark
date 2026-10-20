@@ -184,6 +184,9 @@ func TestCLIFlagsPerCommand(t *testing.T) {
 		{"check", "-cpu", "bogus", dir},
 		{"doc", "-v", dir},
 		{"build", "-manifest", "nomad", "-o", out, dir},
+		{"test", "-o", out, dir},
+		{"build", "-run", "x", dir},
+		{"test", "-run", "(", dir},
 	} {
 		cmd := exec.Command(bin, args...)
 		msg, err := cmd.CombinedOutput()
@@ -197,5 +200,38 @@ func TestCLIFlagsPerCommand(t *testing.T) {
 	}
 	if msg, err := exec.Command(bin, "run", "-v", dir).CombinedOutput(); err != nil || !strings.HasSuffix(string(msg), "ok\n") {
 		t.Errorf("squark run -v: %v\n%s", err, msg)
+	}
+}
+
+// TestCLITest: squark test's exit status is 0 when every test passes and 1 when one fails or a
+// package doesn't build; dir/... finds the packages.
+func TestCLITest(t *testing.T) {
+	bin := squarkBin(t)
+	root := t.TempDir()
+	writeProgram(t, filepath.Join(root, "a"), "program\n\nfn main() {}\n")
+	os.WriteFile(filepath.Join(root, "a", "a_test.sq"), []byte("program\n\nfn test_one() { assert(1 + 1 == 2) }\n"), 0o644)
+	writeProgram(t, filepath.Join(root, "b"), "module b\n")
+	os.WriteFile(filepath.Join(root, "b", "b_test.sq"), []byte("module b\n\nfn test_two() { assert(1 + 1 == 3) }\n"), 0o644)
+	for _, tc := range []struct {
+		args   []string
+		status int
+		want   string
+	}{
+		{[]string{"test", filepath.Join(root, "a")}, 0, "ok   " + filepath.Join(root, "a") + "  1 test ("},
+		{[]string{"test", root + "/..."}, 1, "--- FAIL test_two ("},
+		{[]string{"test", "-run", "one", root + "/..."}, 0, "?    " + filepath.Join(root, "b") + "  no tests match -run one ("},
+		{[]string{"test", filepath.Join(root, "missing")}, 1, "FAIL " + filepath.Join(root, "missing") + "  build failed"},
+	} {
+		msg, err := exec.Command(bin, tc.args...).CombinedOutput()
+		status := 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			status = ee.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if status != tc.status || !strings.Contains(string(msg), tc.want) {
+			t.Errorf("squark %s: status %d, want %d with %q:\n%s", strings.Join(tc.args, " "), status, tc.status, tc.want, msg)
+		}
 	}
 }

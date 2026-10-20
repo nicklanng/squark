@@ -64,6 +64,69 @@ func newLexer(file string, src []byte) *lexer {
 
 func (l *lexer) pos() Pos { return Pos{l.file, l.line, l.col} }
 
+// text is the source from from up to to without its comments, with each run of white space (a line
+// break and the indentation after it) as one space.
+func (l *lexer) text(from, to Pos) string {
+	off := func(p Pos) int {
+		line, col, i := 1, 1, 0
+		for i < len(l.src) && (line < p.Line || line == p.Line && col < p.Col) {
+			r, sz := utf8.DecodeRune(l.src[i:])
+			i += sz
+			if r == '\n' {
+				line, col = line+1, 1
+			} else {
+				col++
+			}
+		}
+		return i
+	}
+	i, j := off(from), off(to)
+	if j < i {
+		return ""
+	}
+	src := l.src[i:j]
+	var b strings.Builder
+	var quote byte // inside a literal that ends with quote
+	space := false // white space to write before the next character
+	for k := 0; k < len(src); k++ {
+		c := src[k]
+		switch {
+		case quote != 0:
+			if c == '\\' && quote != '`' && k+1 < len(src) {
+				b.WriteByte(c)
+				k++
+				c = src[k]
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'' || c == '`':
+			quote = c
+		case c == '/' && k+1 < len(src) && src[k+1] == '/':
+			for k < len(src) && src[k] != '\n' {
+				k++
+			}
+			c = ' '
+		case c == '/' && k+1 < len(src) && src[k+1] == '*':
+			end := bytes.Index(src[k+2:], []byte("*/"))
+			if end < 0 {
+				end = len(src) - k - 2
+			}
+			k += end + 3
+			c = ' '
+		}
+		if quote == 0 && (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+			space = true
+			continue
+		}
+		if space && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		space = false
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
 func (l *lexer) errorf(p Pos, msg string) {
 	l.errs = append(l.errs, &Error{p, msg})
 }
