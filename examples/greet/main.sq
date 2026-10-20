@@ -7,7 +7,7 @@
 //   - a memory budget, checked at build time against the proven worst case
 //   - a string built in the request's arena, which is freed when the response is done
 program {
-	budget 128M             // the build fails if the worst case can exceed this
+	budget 128M              // the build fails if the worst case can exceed this
 	pool http.serve_conn 512 // at most 512 connections served at once
 }
 

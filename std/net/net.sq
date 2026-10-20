@@ -343,4 +343,3 @@ pub fn next_idle() -> (Conn, int) {
 
 // idle_count reports how many connections are parked in the idle set.
 pub fn idle_count() -> int { return sys_idle_count() }
-

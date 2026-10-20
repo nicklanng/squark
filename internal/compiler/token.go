@@ -71,6 +71,7 @@ const (
 	RBRACE    // }
 	SEMICOLON // ;
 	COLON     // :
+	COMMENT   // a comment (only from a lexer that keeps them, for the formatter)
 
 	// keywords
 	BREAK
@@ -110,7 +111,7 @@ var tokStrings = [...]string{
 	LAND: "and", LOR: "or", ARROW: "<-", INC: "++", DEC: "--",
 	BANG: "!", AMPAMP: "&&", BARBAR: "||", ARROWR: "->",
 	EQL: "==", LSS: "<", GTR: ">", ASSIGN: "=", NOT: "not", NEQ: "!=", LEQ: "<=", GEQ: ">=", DEFINE: ":=", ELLIPSIS: "...", DOTDOT: "..",
-	LPAREN: "(", LBRACK: "[", LBRACE: "{", COMMA: ",", PERIOD: ".", RPAREN: ")", RBRACK: "]", RBRACE: "}", SEMICOLON: ";", COLON: ":",
+	LPAREN: "(", LBRACK: "[", LBRACE: "{", COMMA: ",", PERIOD: ".", RPAREN: ")", RBRACK: "]", RBRACE: "}", SEMICOLON: ";", COLON: ":", COMMENT: "comment",
 	BREAK: "break", CASE: "case", CHAN: "chan", CONST: "const", CONTINUE: "continue", DEFAULT: "default", DEFER: "defer",
 	ELSE: "else", ENUM: "enum", FAULT: "fault", FN: "fn", FOR: "for", IF: "if", IMPL: "impl", PUB: "pub",
 	RETURN: "return", STRUCT: "struct", SWITCH: "switch", TYPE: "type", VAR: "var", WHILE: "while",

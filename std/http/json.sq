@@ -173,4 +173,3 @@ impl JSON {
 	// document. It writes nothing.
 	pub fn finish(&self) -> ! { return self.enc.finish() }
 }
-

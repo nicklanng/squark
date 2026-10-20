@@ -50,7 +50,7 @@ pub fn debug(msg str) -> Entry { return entry(.debug, msg) }
 pub fn info(msg str) -> Entry  { return entry(.info, msg) }
 pub fn warn(msg str) -> Entry  { return entry(.warn, msg) }
 // err starts an entry at level error (`error` is a type, so it can't be the function's name).
-pub fn err(msg str) -> Entry   { return entry(.error, msg) }
+pub fn err(msg str) -> Entry { return entry(.error, msg) }
 
 // entry starts a line at level l with the time and the message.
 pub fn entry(l Level, msg str) -> Entry {

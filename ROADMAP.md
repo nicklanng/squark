@@ -293,11 +293,18 @@ shows the compiler's errors as they type.
   - Tests: `TestSquarkTest` in `internal/driver` (pass, fail by error, by panic, by assert,
     expect_panic, skip, timeout, -run, a module, a program with `threads` and a budget);
     `testdata/run` for `assert`'s messages.
-- [ ] **4.2 `squark fmt`.** A formatter that prints the syntax tree back with comments kept: tabs,
-  one blank line between top-level declarations at most, the spacing `docs/spec.md` uses.
-  Idempotent; `-l` lists files that would change, `-w` rewrites them, default prints. Test: every
-  `.sq` file in the repo formats to itself after one pass (a fixed point), and parses to the same
-  tree it came from.
+- [x] **4.2 `squark fmt`.** — done: `squark fmt [-l] [-w] [file|dir|dir/...]`. Decided: it works
+  on the tokens, not the tree (the AST has no end positions or comments): the line breaks and
+  comments stay as written, and it normalizes indentation (blocks, brackets, continued
+  statements, `case` level with `switch`, labels one out), blank lines (at most one, none at a
+  block's ends), spacing (forced where only one form is right, the source's kept where both are,
+  as in `a*b + c` and `T{1}` against `if x {`) and alignment (struct fields, grouped
+  declarations and enum members by their names, literal keys, one-line function bodies,
+  trailing comments; a comment or blank line starts a new section, as in gofmt). It refuses a
+  file that doesn't parse and checks that the output has the input's tokens. std, the examples
+  and the tour's programs are formatted. tests: `TestFormatCases` (each rule),
+  `TestFormatIdempotent` (std, examples, testdata and doxasq: a fixed point after one pass),
+  `TestFormatted`, `TestLessonsFormatted`, `TestCLIFmt`.
 - [ ] **4.3 A language server.** `squark lsp` speaks LSP over stdin: diagnostics from `check` as
   you type (in-memory file contents), hover with a declaration's signature, its doc comment and
   its provenance (what `squark doc` shows), go to definition. `editors/vscode` starts it.

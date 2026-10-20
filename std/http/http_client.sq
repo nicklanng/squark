@@ -61,7 +61,7 @@ impl Response {
 	}
 
 	// num_headers and header_at iterate the response headers (the first max_headers of them).
-	pub fn num_headers(&self) -> int       { return self.nheaders }
+	pub fn num_headers(&self) -> int { return self.nheaders }
 
 	pub fn header_at(&self, i int) -> Header { return self.headers[i] }
 }

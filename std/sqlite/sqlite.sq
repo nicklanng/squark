@@ -304,9 +304,9 @@ pub struct Value {
 }
 
 // Int, text and null make exec's arguments (SQLite copies text's string when it is bound).
-pub fn integer(v int) -> Value            { return Value{kind: 1, i: v} }
+pub fn integer(v int) -> Value   { return Value{kind: 1, i: v} }
 pub fn text(s str) -> Value in s { return Value{kind: 2, s: s} }
-pub fn null() -> Value                { return Value{} }
+pub fn null() -> Value           { return Value{} }
 
 // Result is what exec reports, as SQLite does after the statement: last_insert_row_id and changes,
 // which an INSERT, UPDATE or DELETE sets (after another statement they still hold the
@@ -315,4 +315,3 @@ pub struct Result {
 	pub last_insert_id int // the rowid of the last row inserted
 	pub rows_affected  int // how many rows were inserted, updated or deleted
 }
-

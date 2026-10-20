@@ -128,7 +128,7 @@ fn main() {
 	}
 	println("tries:", tries)
 
-	outer: for y in 1..4 {
+outer: for y in 1..4 {
 		for x in 1..4 {
 			if x*y == 6 {
 				println("found", x, "*", y)

@@ -16,12 +16,12 @@ pub fn new_buffer(storage u8[]) -> Buffer in storage {
 }
 
 impl Buffer {
-	pub fn len(&self) -> int         { return len(self.buf) }
-	pub fn cap(&self) -> int         { return cap(self.buf) }
-	pub fn available(&self) -> int   { return cap(self.buf) - len(self.buf) }
+	pub fn len(&self) -> int            { return len(self.buf) }
+	pub fn cap(&self) -> int            { return cap(self.buf) }
+	pub fn available(&self) -> int      { return cap(self.buf) - len(self.buf) }
 	pub fn bytes(&self) -> u8[] in self { return self.buf }
 	pub fn string(&self) -> str in self { return str(self.buf) }
-	pub fn overflowed(&self) -> bool { return self.overflow }
+	pub fn overflowed(&self) -> bool    { return self.overflow }
 
 	pub fn reset(&self) {
 		self.buf = self.buf[:0]

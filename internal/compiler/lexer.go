@@ -26,6 +26,10 @@ type lexer struct {
 	doc         []string
 	docEnd      int // line of doc's last comment
 	lastTokLine int
+
+	// comments makes Next return comments as COMMENT tokens (for the formatter)
+	comments    bool
+	pendingSemi bool // a block comment spanning lines ended a statement: a SEMICOLON comes next
 }
 
 type lexToken struct {
@@ -35,6 +39,8 @@ type lexToken struct {
 	end     Pos // just after the token
 	pragmas []string
 	doc     []string
+	off     int // byte offsets of the token in the source (0, 0 for an inserted semicolon)
+	endOff  int
 }
 
 func newLexer(file string, src []byte) *lexer {
@@ -169,6 +175,10 @@ func isDigit(r rune) bool { return r >= '0' && r <= '9' }
 
 // Next returns the next token, inserting semicolons Go-style.
 func (l *lexer) Next() lexToken {
+	if l.pendingSemi {
+		l.pendingSemi = false
+		return lexToken{tok: SEMICOLON, lit: "\n", pos: l.pos()}
+	}
 again:
 	// skip whitespace, but newline may become a semicolon
 	for {
@@ -205,6 +215,9 @@ again:
 			l.next()
 		}
 		text := string(l.src[start:l.off])
+		if l.comments {
+			return lexToken{tok: COMMENT, lit: text, pos: p, end: l.pos(), off: start, endOff: l.off}
+		}
 		if strings.HasPrefix(text, "//squark:") {
 			l.pragmas = append(l.pragmas, strings.TrimSpace(text[len("//squark:"):]))
 		} else if p.Line != l.lastTokLine { // a comment line of its own (not trailing code)
@@ -217,6 +230,7 @@ again:
 		goto again
 	}
 	if c == '/' && l.peekAt(1) == '*' {
+		start := l.off
 		l.next()
 		l.next()
 		hadNewline := false
@@ -234,6 +248,13 @@ again:
 				break
 			}
 		}
+		if l.comments {
+			if hadNewline && l.insertSemi {
+				l.insertSemi = false
+				l.pendingSemi = true
+			}
+			return lexToken{tok: COMMENT, lit: string(l.src[start:l.off]), pos: p, end: l.pos(), off: start, endOff: l.off}
+		}
 		if hadNewline && l.insertSemi {
 			l.insertSemi = false
 			return lexToken{tok: SEMICOLON, lit: "\n", pos: p}
@@ -241,8 +262,10 @@ again:
 		goto again
 	}
 
+	start := l.off
 	t := l.scan(p)
 	t.end = l.pos()
+	t.off, t.endOff = start, l.off
 	afterDot := l.prevTok == PERIOD
 	l.prevTok = t.tok
 	switch t.tok {

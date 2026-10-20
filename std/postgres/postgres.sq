@@ -544,13 +544,13 @@ fn has_mechanism(p u8[], name str) -> bool {
 // Rows is a query's result, read a row at a time with next. Its views (text) are valid until the
 // next call to next.
 pub struct Rows {
-	c        *Conn
-	starts   int[..max_columns]
-	lens     int[..max_columns] // -1: NULL
-	row      u8[]
-	failure  error
-	done     bool
-	changed  int
+	c       *Conn
+	starts  int[..max_columns]
+	lens    int[..max_columns] // -1: NULL
+	row     u8[]
+	failure error
+	done    bool
+	changed int
 }
 
 impl Conn {

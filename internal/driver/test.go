@@ -322,3 +322,42 @@ func TestDirs(args []string) ([]string, error) {
 	}
 	return dirs, nil
 }
+
+// SourceFiles expands paths to the .sq files they name: a file itself, a directory's .sq files,
+// and with dir/... every directory's under dir (skipping testdata and hidden directories).
+func SourceFiles(paths []string) ([]string, error) {
+	var files []string
+	for _, a := range paths {
+		root, rec := strings.CutSuffix(a, "/...")
+		if a == "..." {
+			root, rec = ".", true
+		}
+		st, err := os.Stat(root)
+		if err != nil {
+			return nil, err
+		}
+		if !st.IsDir() {
+			files = append(files, a)
+			continue
+		}
+		err = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if p != root && (!rec || d.Name() == "testdata" || d.Name() == "node_modules" || strings.HasPrefix(d.Name(), ".")) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(p, ".sq") {
+				files = append(files, p)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}

@@ -1028,6 +1028,7 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 squark build [-o out] [-v] [-work dir] [-cpu c] [-static] [-manifest k8s|systemd] [dir]   # -v prints the memory breakdown (always printed with a budget)
 squark run [-v] [-cpu c] dir [args...]
 squark test [-run re] [-v] [-asan] [-timeout d] [-p n] [dir|dir/... ...]   # run the tests
+squark fmt [-l] [-w] [file|dir|dir/... ...]     # format: print, list (-l) or rewrite (-w)
 squark check [dir]                              # type and lifetime check only
 squark doc [dir] [pkg]                          # API with provenance; `squark doc std` for the stdlib
 squark emit-c [dir]                             # the generated C
@@ -1070,6 +1071,15 @@ fn test_overflow() {
 `-v` reports every test with its output and its proven stack, `-p n` runs n tests at once, and
 `-asan` builds with AddressSanitizer. `dir/...` tests every directory under dir that has
 `_test.sq` files.
+
+**Formatting.** `squark fmt` lays a file out in the standard way and keeps its line breaks and
+comments: one tab per block or bracket level (and one more for a statement continued on the next
+line), `case` and `default` level with their `switch`, labels one level out, at most one blank
+line in a row and none at the start or end of a block, one space between tokens where one belongs
+(`x := a + b`, `f(x, y)`), and the names of struct fields and grouped declarations, a literal's
+keys, consecutive one-line functions' bodies and trailing comments aligned across consecutive
+lines. Where spacing carries meaning it is kept as written: `a*b + c`, `T{1}` against `if x {`.
+It formats only a file that parses, and never changes its tokens.
 
 `-static` (Linux) links everything into the binary, libc and C libraries such as SQLite included,
 so it runs in an empty image (`FROM scratch`): the runtime needs nothing from the system at run

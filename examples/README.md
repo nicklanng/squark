@@ -35,8 +35,8 @@ Every example follows the same layout, so they read alike:
 - **Order:** header comment, `program` with its directives (`budget`, `pool`, `threads`), `use`, constants,
   types and package variables, then the code grouped by topic under `// ---- topic ----`
   markers, with `main` last.
-- **Formatting:** tabs, aligned fields, constants and trailing comments within a block, one blank
-  line between declarations, lines within 100 columns.
+- **Formatting:** as `squark fmt` prints it (tabs, aligned fields, constants and trailing
+  comments within a block), one blank line between declarations, lines within 100 columns.
 - **Current library:** use the standard library rather than hand-rolled equivalents
   (`bufio.Reader` for line protocols, `http.handle_func` and `w.json()` for HTTP, `!` where an
   error only propagates).

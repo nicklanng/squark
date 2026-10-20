@@ -28,7 +28,6 @@ extern fn pool_stat(i int, which int) -> int stack 8K c"sq_pool_stat"
 
 extern fn runtime_stat(which int) -> int stack 8K c"sq_runtime_stat"
 
-
 const kind_counter = 1
 const kind_gauge = 2
 

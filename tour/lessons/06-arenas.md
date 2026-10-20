@@ -176,7 +176,7 @@ program
 use strings
 
 thread longest str // a package variable: it lives as long as the program
-arena names 4K // a package arena: static memory, never freed
+arena names 4K     // a package arena: static memory, never freed
 
 fn consider(word str) {
 	w := strings.trim_space(word)

@@ -44,6 +44,7 @@ bin/squark run examples/hello
 bin/squark build -v -o bin/notes examples/notes   # -v prints the memory breakdown
 bin/squark doc examples/notes strings             # functions with their reference provenance
 bin/squark test examples/jsonq                    # the tests in its _test.sq files
+bin/squark fmt -w examples/jsonq                  # format its files in place
 ```
 
 New to squark? `bin/squark tour` opens **A Tour of squark** in your browser: about fifty short

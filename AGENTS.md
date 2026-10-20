@@ -10,7 +10,8 @@ don't write Go syntax, and don't assume Go's behaviour). Before writing or chang
 
 Check your work with `bin/squark check <dir>` (types and lifetimes), `bin/squark run <dir>` and
 `bin/squark test <dir>` (the `fn test_*()` functions in its `_test.sq` files; `assert(cond)` is
-the check). Build
+the check), and format with `bin/squark fmt -w <dir>` (std and the examples are kept formatted; a
+test checks). Build
 the compiler with `go build -o bin/squark ./cmd/squark`. Compiler errors name the fix; the spec's
 error table maps each one to the usual rewrite.
 

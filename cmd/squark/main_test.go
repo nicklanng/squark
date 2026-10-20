@@ -187,6 +187,7 @@ func TestCLIFlagsPerCommand(t *testing.T) {
 		{"test", "-o", out, dir},
 		{"build", "-run", "x", dir},
 		{"test", "-run", "(", dir},
+		{"fmt", "-v", dir},
 	} {
 		cmd := exec.Command(bin, args...)
 		msg, err := cmd.CombinedOutput()
@@ -233,5 +234,39 @@ func TestCLITest(t *testing.T) {
 		if status != tc.status || !strings.Contains(string(msg), tc.want) {
 			t.Errorf("squark %s: status %d, want %d with %q:\n%s", strings.Join(tc.args, " "), status, tc.status, tc.want, msg)
 		}
+	}
+}
+
+// TestCLIFmt: squark fmt prints, lists (-l) or rewrites (-w), and a file that doesn't parse is
+// reported and left alone (exit 1).
+func TestCLIFmt(t *testing.T) {
+	bin := squarkBin(t)
+	dir := t.TempDir()
+	messy := filepath.Join(dir, "messy.sq")
+	tidy := filepath.Join(dir, "tidy.sq")
+	broken := filepath.Join(dir, "sub", "broken.sq")
+	os.WriteFile(messy, []byte("program\n\nfn main() {\nx:=1\nprintln(x)\n}\n"), 0o644)
+	os.WriteFile(tidy, []byte("module tidy\n"), 0o644)
+	os.MkdirAll(filepath.Dir(broken), 0o755)
+	os.WriteFile(broken, []byte("program\n\nfn main( {\n"), 0o644)
+	want := "program\n\nfn main() {\n\tx := 1\n\tprintln(x)\n}\n"
+	if out, err := exec.Command(bin, "fmt", messy).Output(); err != nil || string(out) != want {
+		t.Errorf("fmt file: %v %q", err, out)
+	}
+	if out, err := exec.Command(bin, "fmt", "-l", dir).Output(); err != nil || string(out) != messy+"\n" {
+		t.Errorf("fmt -l dir: %v %q", err, out)
+	}
+	out, err := exec.Command(bin, "fmt", "-l", dir+"/...").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), messy+"\n") || !strings.Contains(string(out), "broken.sq:3") {
+		t.Errorf("fmt -l dir/...: %v %q", err, out)
+	}
+	if out, err := exec.Command(bin, "fmt", "-w", messy, tidy).CombinedOutput(); err != nil || len(out) > 0 {
+		t.Errorf("fmt -w: %v %q", err, out)
+	}
+	if b, _ := os.ReadFile(messy); string(b) != want {
+		t.Errorf("after -w: %q", b)
+	}
+	if b, _ := os.ReadFile(broken); string(b) != "program\n\nfn main( {\n" {
+		t.Errorf("a file that doesn't parse was changed: %q", b)
 	}
 }

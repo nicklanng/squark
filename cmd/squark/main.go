@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"flag"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"squark"
+	"squark/internal/compiler"
 	"squark/internal/driver"
 	"squark/internal/tour"
 )
@@ -31,6 +33,7 @@ func usage() {
   squark build [-o output] [-v] [-work dir] [-cpu c] [-static] [-manifest k8s|systemd] [dir]   compile a program
   squark run [-v] [-cpu c] dir [args...]                     compile and run
   squark test [-run re] [-v] [-asan] [-timeout d] [-p n] [-cpu c] [dir|dir/... ...]   run the tests in _test.sq files
+  squark fmt [-l] [-w] [file|dir|dir/... ...]       format source files (print, list or rewrite)
   squark check [dir]                                type and lifetime check only
   squark doc [dir] [pkg]                            list functions with their reference provenance
   squark emit-c [dir]                               print the generated C
@@ -105,9 +108,11 @@ func main() {
 	asan := fs.Bool("asan", false, "test: build with AddressSanitizer")
 	timeout := fs.Duration("timeout", time.Minute, "test: fail a test that runs longer than this")
 	parallel := fs.Int("p", 1, "test: run this many tests at once")
+	list := fs.Bool("l", false, "fmt: list the files whose formatting differs")
+	write := fs.Bool("w", false, "fmt: rewrite the files in place")
 	fs.Parse(os.Args[2:])
 	// each subcommand takes its own flags: one it ignores would be a silent surprise
-	takes := map[string]string{"build": "o v work opt cpu manifest static", "run": "v work opt cpu", "tour": "http open export", "test": "run v asan timeout p cpu"}
+	takes := map[string]string{"build": "o v work opt cpu manifest static", "run": "v work opt cpu", "tour": "http open export", "test": "run v asan timeout p cpu", "fmt": "l w"}
 	fs.Visit(func(f *flag.Flag) {
 		if !slices.Contains(strings.Fields(takes[cmd]), f.Name) {
 			fmt.Fprintf(os.Stderr, "squark %s: -%s doesn't apply to %s\n", cmd, f.Name, cmd)
@@ -218,6 +223,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Print(src)
+	case "fmt":
+		os.Exit(format(fs.Args(), *list, *write))
 	case "test":
 		os.Exit(test(fs.Args(), *run, *verbose, *asan, *timeout, *parallel, *cpu))
 	case "tour":
@@ -228,6 +235,48 @@ func main() {
 	default:
 		usage()
 	}
+}
+
+// format formats the files that paths name; without -l or -w it prints them. It returns the exit
+// status: 1 if a file doesn't parse.
+func format(paths []string, list, write bool) int {
+	if len(paths) == 0 {
+		paths = []string{"."}
+	}
+	files, err := driver.SourceFiles(paths)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "squark fmt:", err)
+		return 1
+	}
+	status := 0
+	for _, f := range files {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "squark fmt:", err)
+			status = 1
+			continue
+		}
+		out, err := compiler.Format(f, src)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			status = 1
+			continue
+		}
+		changed := !bytes.Equal(src, out)
+		if list && changed {
+			fmt.Println(f)
+		}
+		if write && changed {
+			if err := os.WriteFile(f, out, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, "squark fmt:", err)
+				status = 1
+			}
+		}
+		if !list && !write {
+			os.Stdout.Write(out)
+		}
+	}
+	return status
 }
 
 // test runs the tests of each directory, and returns the exit status: 1 if any failed or didn't

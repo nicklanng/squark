@@ -113,8 +113,8 @@ written. Try `pool http.serve_conn 2048` and watch the server go over its budget
 program {
 	budget 160M
 	pool http.serve_conn 512 // at most 512 connections served at once
-	connections 1024 // at most 1024 sockets open
-	sockbuf 16K // each socket's kernel buffers
+	connections 1024         // at most 1024 sockets open
+	sockbuf 16K              // each socket's kernel buffers
 }
 
 use http
@@ -153,7 +153,7 @@ program {
 use runtime
 
 shared primes = first_primes() // computed once, before the threads start
-thread found int // each thread's own
+thread found int               // each thread's own
 
 fn first_primes() -> int[8] {
 	var ps int[8]

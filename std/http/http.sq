@@ -81,9 +81,9 @@ impl Request {
 	}
 
 	// num_headers and header_at iterate the request headers.
-	pub fn num_headers(&self) -> int        { return self.nheaders }
+	pub fn num_headers(&self) -> int { return self.nheaders }
 
-	pub fn header_at(&self, i int) -> Header  { return self.headers[i] }
+	pub fn header_at(&self, i int) -> Header { return self.headers[i] }
 
 	// query_value returns the raw (not unescaped) value of key in the query string; query_param
 	// unescapes it.

@@ -821,4 +821,3 @@ const max_text = 1 << 62
 // and how deeply an Encoder nests them (Depth). Neither allocates, so each keeps its bracket
 // stack in a fixed array of max_depth bits.
 pub const max_depth = 1024
-

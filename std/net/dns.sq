@@ -17,7 +17,7 @@ pub fault NameServer -22 "dns: no usable answer from the name servers"
 pub thread resolv_conf = "/etc/resolv.conf"
 pub thread hosts_file = "/etc/hosts"
 
-const max_name = 255 // an encoded name: length bytes, labels and the root's 0
+const max_name = 255  // an encoded name: length bytes, labels and the root's 0
 const udp_size = 1232 // the UDP reply size offered with EDNS(0), as DNS flag day 2020 recommends
 const type_a = 1
 const type_aaaa = 28

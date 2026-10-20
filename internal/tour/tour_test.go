@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"squark"
+	"squark/internal/compiler"
 )
 
 func site(t *testing.T) *Site {
@@ -146,5 +147,28 @@ func TestRunLimits(t *testing.T) {
 	r, err = Run(context.Background(), "program\n\nfn main() { println(\"small\") }\n", "")
 	if err != nil || r.Stage != "run" || r.Output != "small\n" {
 		t.Errorf("%v: stage %q, output %q", err, r.Stage, r.Output)
+	}
+}
+
+// TestLessonsFormatted: each lesson's code and solution is as squark fmt prints it (code that
+// doesn't parse, for a lesson about a syntax error, is left alone).
+func TestLessonsFormatted(t *testing.T) {
+	for _, ch := range site(t).Chapters {
+		for _, l := range ch.Lessons {
+			for _, src := range []string{l.Code, l.Solution} {
+				if src == "" {
+					continue
+				}
+				if _, err := compiler.ParseFile("main.sq", []byte(src)); err != nil {
+					continue
+				}
+				out, err := compiler.Format("main.sq", []byte(src))
+				if err != nil {
+					t.Errorf("%s/%s: %v", ch.Slug, l.Slug, err)
+				} else if string(out) != src {
+					t.Errorf("%s/%s is not formatted:\n%s", ch.Slug, l.Slug, out)
+				}
+			}
+		}
 	}
 }
