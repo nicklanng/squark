@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"debug/elf"
 	"debug/macho"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -102,7 +103,7 @@ type MemoryReport struct {
 	Workers int64 // processes (workers N); 0: one per core, unknown when compiling
 	Threads int64 // scheduler threads per process (threads N); 0: one per core
 	Code    int64 // __TEXT and read-only data
-	Static  int64 // data + bss: package variables, arenas, channel buffers, task tables
+	Static  int64 // data + bss, and the package variables (with their arenas) mapped at start-up
 	Pools   []PoolReport
 	CLibs   []string
 	// helper threads for blocking externs, per scheduler thread, and each one's stack
@@ -280,14 +281,23 @@ func Build(opt Options) (*Result, error) {
 	}
 	// one section per function and datum, so the linker drops what the program doesn't use
 	cflags := []string{opt.OptFlag, "-std=gnu11", "-pthread", "-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks", "-w", "-fstack-usage", "-ffunction-sections", "-fdata-sections", "-I", work}
-	if runtime.GOOS == "linux" {
-		// A C frame (or VLA) larger than a page must touch each page on the way down, or it can
-		// jump over a task stack's one guard page into the next stack. gcc on arm64 assumes a
-		// 64 KiB guard unless told the page size. (macOS probes large frames already.)
-		cflags = append(cflags, "-fstack-clash-protection")
+	// A C frame (or VLA) larger than a page must touch each page on the way down, or it can jump
+	// over a task stack's one guard page into the next stack. That matters for C packages, whose
+	// declared stack is a promise the guard page checks. (macOS probes large frames by default;
+	// gcc on arm64 assumes a 64 KiB guard unless told the page size.) prog.c is not probed: its
+	// frames are proven to fit their stacks, the only large runtime frames run on a thread's own
+	// stack, and probing would make a whole `with arena` resident on entry (and on arm64 macOS
+	// the probe takes the frame size in a 32-bit register, so it breaks frames of 4 GiB or more).
+	var shimCflags, progCflags []string
+	switch runtime.GOOS {
+	case "linux":
+		shimCflags = append(shimCflags, "-fstack-clash-protection")
 		if runtime.GOARCH == "arm64" {
-			cflags = append(cflags, "--param=stack-clash-protection-guard-size=12")
+			shimCflags = append(shimCflags, "--param=stack-clash-protection-guard-size=12")
 		}
+		progCflags = append(progCflags, "-fno-stack-clash-protection") // some gccs default to on
+	case "darwin":
+		progCflags = append(progCflags, "-fno-stack-check")
 	}
 	cflags = append(cflags, cpu...)
 	if opt.Sanitize != "" {
@@ -317,9 +327,9 @@ func Build(opt Options) (*Result, error) {
 		}
 		return nil
 	}
-	var progExtra []string
+	progExtra := progCflags
 	if opt.Remarks != nil {
-		progExtra = []string{"-gline-tables-only", "-Rpass=loop-vectorize", "-Rpass-missed=loop-vectorize", "-Rpass-analysis=loop-vectorize"}
+		progExtra = append(progExtra, "-gline-tables-only", "-Rpass=loop-vectorize", "-Rpass-missed=loop-vectorize", "-Rpass-analysis=loop-vectorize")
 	}
 	if err := cc("prog.c", "prog.o", squarkBug, progExtra...); err != nil {
 		return nil, err
@@ -350,7 +360,7 @@ func Build(opt Options) (*Result, error) {
 			}
 			src := filepath.Join(sub, cf.Name)
 			obj := strings.TrimSuffix(src, ".c") + ".o"
-			if err := cc(src, obj, blame, append([]string{"-I", sub}, extraCflags...)...); err != nil {
+			if err := cc(src, obj, blame, append(append([]string{"-I", sub}, shimCflags...), extraCflags...)...); err != nil {
 				return nil, err
 			}
 			objs = append(objs, obj)
@@ -552,6 +562,11 @@ func Build(opt Options) (*Result, error) {
 		mem.UsesNet = mem.UsesNet || p.Path == "net"
 	}
 	mem.Code, mem.Static, err = segmentSizes(absOut)
+	if err == nil {
+		var globals int64
+		globals, err = globalsSize(filepath.Join(work, "prog.o"))
+		mem.Static += globals
+	}
 	if err != nil {
 		if prog.Budget > 0 {
 			return res, fmt.Errorf("cannot check the memory budget: %v", err)
@@ -609,6 +624,42 @@ func segmentSizes(bin string) (code, static int64, err error) {
 		}
 	}
 	return code, static, nil
+}
+
+// globalsSize reads sq_globals_size, the size of one thread's package variables, from the
+// compiled prog.o (the linked binary has folded it away). They are mapped at start-up, so the
+// binary's segments don't include them.
+func globalsSize(obj string) (int64, error) {
+	var sec io.ReaderAt
+	var off uint64
+	if f, err := macho.Open(obj); err == nil {
+		defer f.Close()
+		if f.Symtab != nil {
+			for _, sym := range f.Symtab.Syms {
+				if sym.Name == "_sq_globals_size" && sym.Sect > 0 && int(sym.Sect) <= len(f.Sections) {
+					s := f.Sections[sym.Sect-1]
+					sec, off = s, sym.Value-s.Addr
+				}
+			}
+		}
+	} else if f, err := elf.Open(obj); err == nil {
+		defer f.Close()
+		syms, _ := f.Symbols()
+		for _, sym := range syms {
+			if sym.Name == "sq_globals_size" && int(sym.Section) > 0 && int(sym.Section) < len(f.Sections) {
+				s := f.Sections[sym.Section]
+				sec, off = s, sym.Value-s.Addr
+			}
+		}
+	}
+	b := make([]byte, 8)
+	if sec == nil {
+		return 0, fmt.Errorf("%s has no sq_globals_size", obj)
+	}
+	if _, err := sec.ReadAt(b, int64(off)); err != nil {
+		return 0, fmt.Errorf("reading sq_globals_size from %s: %v", obj, err)
+	}
+	return int64(binary.LittleEndian.Uint64(b)), nil
 }
 
 // FormatMemory renders the worst-case memory breakdown.
@@ -689,6 +740,9 @@ func absDir(d string) string {
 // With allowDynamic (sanitizer builds) a dynamic frame counts its static part. It returns every
 // function's frame, and separately the runtime's (defined in sq_rt.c or its
 // headers; the program's functions carry #line directives naming their .sq files).
+// maxFrame bounds one C stack frame (see readStackUsage).
+const maxFrame = 4 << 30
+
 func readStackUsage(path string, allowDynamic bool) (frames, rt map[string]int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -715,6 +769,12 @@ func readStackUsage(path string, allowDynamic bool) (frames, rt map[string]int64
 		}
 		if strings.Contains(parts[2], "dynamic") && !strings.Contains(parts[2], "bounded") && !allowDynamic {
 			return nil, nil, fmt.Errorf("function %s has a dynamically sized stack frame; cannot prove its stack size", name)
+		}
+		// clang on arm64 computes some frame offsets modulo 4 GiB (a frame of exactly 16 GiB
+		// reloads its return address from the wrong place), so no frame may be that large
+		if n >= maxFrame {
+			where := loc[:strings.LastIndex(loc, ":")]
+			return nil, nil, fmt.Errorf("%s: this function's stack frame is %s; a frame (its `with arena` blocks and local variables) must be under 4 GiB: declare the arena or array at package level", where, human(n))
 		}
 		if variants[name] == nil {
 			variants[name] = map[string]int64{}

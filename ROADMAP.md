@@ -235,9 +235,11 @@ Each needs a design pass first: the open questions below are decided in this fil
   static libc); glibc static works because `net` never calls getaddrinfo/NSS. musl wasn't needed.
   test: `TestStatic` (no PT_INTERP, no shared libraries, SQLite included; it runs). Plan: `squark build -static` links statically (musl on Linux; libsqlite3
   static too), so the image can be `FROM scratch`. `examples/` gets a Dockerfile.
-- [ ] **3.5 TLS for outbound calls.** BearSSL (no malloc, caller-provided buffers) vendored as a
-  C library with a declared stack; `http.dial_tls`. Inbound TLS later; inside a cluster a mesh
-  often terminates it.
+- [ ] **3.5 TLS for outbound calls.** — deferred (2026-10-20): no third-party library is vendored
+  into the repo, so the options are linking the system's OpenSSL (its allocations in a counted
+  `heap ssl N`, like `sqlite`) or a TLS 1.3 client written in squark. Until one is chosen, TLS is
+  left to a service mesh or a sidecar, which inside a cluster often terminates it anyway. Plan was:
+  BearSSL vendored as a C library with a declared stack; `http.dial_tls`.
 - [x] **3.6 Postgres client.** — done: `std/postgres` (the v3 protocol in squark: trust,
   cleartext and SCRAM-SHA-256 authentication, the extended protocol with text parameters,
   `Rows`, SQLSTATE codes, a per-thread `Pool` of up to 16) and `std/crypto/sha256` (SHA-256,
@@ -283,3 +285,4 @@ Each needs a design pass first: the open questions below are decided in this fil
 - 2026-10-17: 3.4 and 3.7 done.
 - 2026-10-17: 3.6 done. Left: 3.5 TLS, which needs a decision on vendoring a TLS library (BearSSL
   is in Debian but not Homebrew, so macOS builds would need its source in the repo).
+- 2026-10-20: 3.5 TLS deferred: no vendored libraries; a mesh or sidecar handles TLS for now.

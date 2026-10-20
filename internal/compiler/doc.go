@@ -120,9 +120,11 @@ func DocLine(fn *Func) string {
 			hasRefResult = true
 		}
 	}
+	// a template without a contract has no provenance of its own: each instance's is inferred
+	perInstance := fn.Generic && fn.Summary == nil && !fn.Sig.HasContract
 	if len(from) > 0 {
 		b.WriteString(" in " + strings.Join(from, ", "))
-	} else if hasRefResult {
+	} else if hasRefResult && !perInstance {
 		b.WriteString(" in static")
 	}
 	if fn.Pool > 0 {
@@ -142,6 +144,9 @@ func DocLine(fn *Func) string {
 	}
 	if fn.Extern != "" && fn.Extern != fn.Name {
 		fmt.Fprintf(&b, " c%q", fn.Extern)
+	}
+	if perInstance && hasRefResult {
+		b.WriteString(" // provenance inferred for each instance")
 	}
 	return b.String()
 }

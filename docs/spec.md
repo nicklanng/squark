@@ -775,6 +775,7 @@ must not outlive the memory it points to:
 | `the brackets go after the element type` | `T[]`, `T[N]`, `V[K]` |
 | `a struct type is declared struct T { ... }` | `struct T { ... }` |
 | `a named type is declared T: U` | `Celsius: f64`, not `type Celsius f64` |
+| `this function's stack frame is … must be under 4 GiB` | move the large `with arena` or local array to package level (`arena big 8G`) |
 
 ## 8. Idioms
 
@@ -949,6 +950,9 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
   connections wait up to 5 seconds for another worker's lock.
 - Each task pool has N stacks of a size proven at compile time, each with a guard page. A C function
   that exceeds its `stack` budget hits the guard: `fatal error: stack overflow in task [pool]`.
+  Stacks and package variables are reserved at start-up and become resident as they are touched,
+  so a large `with arena` costs only the pages it uses. One function's frame (its `with arena`
+  blocks and local variables) must be under 4 GiB; declare larger storage at package level.
 - **Loops and SIMD.** clang vectorizes loops, so a loop over slices often runs as SIMD code. A loop
   gets an unchecked copy, which clang can vectorize, when it counts by one (`for i in lo..hi`,
   `for i, x in s`, `for i := a; i < b; i++` with `<=` too, or `for i := a; i >= b; i--` with

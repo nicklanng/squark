@@ -1028,8 +1028,13 @@ self-contained.
   }
   fn main() { with arena a 1K { var s S; s.mem = a; fill(&s) } }
   ```
-- [ ] **Q5. Very large `with arena` frames: made resident on entry, and miscompiled from 4 GiB**
-  (bug, macOS/arm64; the residency also applies on Linux)
+- [x] **Q5. Very large `with arena` frames: made resident on entry, and miscompiled from 4 GiB**
+  (bug, macOS/arm64; the residency also applies on Linux) — fixed: options (a) and (b). prog.c is
+  compiled with `-fno-stack-check` (macOS) and `-fno-stack-clash-protection` (Linux) and C
+  packages keep the probes; a 3G arena's RSS went from 1.8 GB to 1.3 MB. Without the probe, clang
+  still lays out a frame of an exact multiple of 4 GiB wrongly (the epilogue reloads the return
+  address from an offset taken modulo 4 GiB), so the driver rejects any frame of 4 GiB or more.
+  test: `TestLargeFrames` (`internal/driver/frame_test.go`)
   A `with arena x N` is N bytes of the enclosing C frame. Large frames are probed page by page on
   entry, by clang's `___chkstk_darwin` on macOS and by `-fstack-clash-protection` on Linux
   (`driver.go:224`), so the whole arena becomes resident at once whether it is used or not:
@@ -1050,7 +1055,10 @@ self-contained.
   (their `stack N` budget is a promise the guard page checks); (b) reject frames over 4 GiB at
   compile time and document the residency; (c) give large `with arena` blocks storage outside the
   stack (an mmap'd region per entry, lazily backed). Needs a decision.
-- [ ] **Q6. A package arena over about 2 GiB can't start on macOS** (bug, macOS/arm64)
+- [x] **Q6. A package arena over about 2 GiB can't start on macOS** (bug, macOS/arm64) — fixed:
+  shard 0's package variables are mapped at start-up like the other shards' (`main` in
+  `sq_rt.c`), not a static `sq_globals0` in BSS; the driver reads `sq_globals_size` from prog.o
+  and adds it to the budget's static data. test: `TestLargePackageArena`
   `arena big 3G` (or two of 1500M) puts the static data across 0x180000000, where dyld maps the
   shared cache: the program dies before `main` with `dyld cache '(null)' not loaded: syscall to map
   cache into shared region failed` and then cannot load libSystem. 1900M works. Options: map
@@ -1071,8 +1079,9 @@ self-contained.
   test: `testdata/errors/range_int_two_vars.sq`
   `for k, v in 5 { }` reports "permits only one loop variable" and goes on, and `rangeStmt` then
   asked `storageIn` about the second variable's type, which is nil: a nil dereference.
-- [ ] **Q9. `squark doc` shows a function with `anytype` parameters as `in static`** (bug: wrong
-  doc output)
+- [x] **Q9. `squark doc` shows a function with `anytype` parameters as `in static`** (bug: wrong
+  doc output) — fixed: a template without a declared contract shows no provenance and ends with
+  `// provenance inferred for each instance`. test: `TestDocTemplates`
   doxa's `KB.believers(a arena, ..., v anytype) -> Entity[]` prints `-> doxa.Entity[] in static`
   and `Knowledge.hypothesis(v anytype)` `in static`, though the checker treats each instance
   correctly (calls with a stack arena are accepted, and keeping their results too long is
@@ -1119,3 +1128,7 @@ Append one line per work session: date, items closed, anything left half-done.
 - 2026-10-17: Q4 (field levels), Q7 and Q8 (two compiler crashes the fuzzer found) fixed; Q5, Q6
   (very large arenas on macOS) and Q9 (doc output) open. `go test ./internal/...` and
   `SQUARK_FUZZ=5000` pass. Nothing committed.
+- 2026-10-20: Q5, Q6 and Q9 fixed; section Q closed. Q5 is two bugs: the stack probe made
+  arenas resident, and clang on arm64 lays out frames that are a multiple of 4 GiB wrongly with or
+  without the probe (12G still failed under `-fno-stack-check`, unlike the repro note says; 5G,
+  6G and 13G work), hence the 4 GiB frame limit.

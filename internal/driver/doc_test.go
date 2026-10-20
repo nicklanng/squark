@@ -71,3 +71,37 @@ func TestDocStdPackageComments(t *testing.T) {
 		t.Errorf("json's package comment is missing:\n%s", out[:min(len(out), 400)])
 	}
 }
+
+// TestDocTemplates (Q9): a function with anytype parameters is documented by its template, which
+// is never analysed: without a declared contract its result shows no provenance (it was shown
+// as in static), only a declared one.
+func TestDocTemplates(t *testing.T) {
+	dir := t.TempDir()
+	src := `program
+
+struct Entity { name str }
+
+pub fn first(s anytype) -> str { return s[0] }
+pub fn matching(a arena, v anytype) -> Entity[] { return make(Entity[], 0, 4) in a }
+pub fn pick(a arena, v anytype) -> str in a { return "x" }
+
+fn main() {
+	println(first(str[]{"a"}))
+	with arena x 1K { _ = matching(x, 1); _ = pick(x, 1) }
+}
+`
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
+	out, err := Doc(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"fn first(s anytype) -> str // provenance inferred for each instance\n",
+		"fn matching(a arena, v anytype) -> Entity[] // provenance inferred for each instance\n",
+		"fn pick(a arena, v anytype) -> str in a\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doc lacks %q:\n%s", want, out)
+		}
+	}
+}

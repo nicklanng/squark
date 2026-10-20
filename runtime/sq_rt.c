@@ -64,6 +64,29 @@ void __tsan_switch_to_fiber(void *fiber, unsigned flags);
 #define TSAN_SWITCH(fiber) ((void)0)
 #endif
 
+// AddressSanitizer unpoisons the frames a longjmp skips, but only on a stack it knows the bounds
+// of: on a task stack it gives up ("ignoring requested __asan_handle_no_return") and the stale
+// redzones fail later frames. ASAN_LONGJMP clears them first: from the task stack's low end up to
+// the jmp_buf, which lives in the frame being returned to.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SQ_ASAN 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) && !defined(SQ_ASAN)
+#define SQ_ASAN 1
+#endif
+#ifdef SQ_ASAN
+void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
+#define ASAN_LONGJMP(g, jb)                                                                      \
+	do {                                                                                         \
+		if ((g) && (uint8_t *)(jb) > (g)->stack_lo && (uint8_t *)(jb) <= (g)->stack_hi)          \
+			__asan_unpoison_memory_region((g)->stack_lo, (size_t)((uint8_t *)(jb) - (g)->stack_lo)); \
+	} while (0)
+#else
+#define ASAN_LONGJMP(g, jb) ((void)0)
+#endif
+
 #if defined(__aarch64__)
 #if defined(__APPLE__)
 #define SQ_SYM(x) "_" #x
@@ -196,7 +219,7 @@ typedef struct sq_shard {
 	int accepting[64]; // listening fds a task of this shard waits in accept on
 	int naccepting;
 	bool stop_seen;    // this shard has acted on a graceful stop (sq_stop_gracefully)
-	void *globals;     // this shard's package variables (shard 0: the generated static copy)
+	void *globals;     // this shard's package variables, mapped at start-up
 	void *tsan_sched;  // ThreadSanitizer builds only: the scheduler's own fiber
 	uint8_t *sigstack; // this thread's signal stack (for stack-overflow reports)
 	size_t sigstack_size;
@@ -652,6 +675,7 @@ void sq_unwind_resume(void) {
 	sq_g *g = sq_self->cur_g;
 	sq_unwind *u = g->unwind; // never NULL in an isolate task: its entry has the base frame
 	g->unwind = u->prev;
+	ASAN_LONGJMP(g, u->jb);
 	_longjmp(u->jb, 1);
 }
 
@@ -726,7 +750,10 @@ void sq_panic_append(int64_t need, int64_t cap, const char *file, int line) {
 
 void sq_panic_arena(sq_arena *a, int64_t need, const char *file, int line) {
 	// line < 0: the allocation of a `v, ok := x in a`, which fails instead (sq_try_enter)
-	if (line < 0 && sq_self->cur_g && sq_self->cur_g->try_jb) _longjmp(*(jmp_buf *)sq_self->cur_g->try_jb, 1);
+	if (line < 0 && sq_self->cur_g && sq_self->cur_g->try_jb) {
+		ASAN_LONGJMP(sq_self->cur_g, sq_self->cur_g->try_jb);
+		_longjmp(*(jmp_buf *)sq_self->cur_g->try_jb, 1);
+	}
 	exit_flush();
 	err_write("panic: arena ");
 	err_write(a->name);
@@ -3244,7 +3271,7 @@ static sq_shard *shard_new(void) {
 	s->pools = pools;
 	s->timer_heap = (sq_g **)m;
 	m += align16((size_t)sq_max_goroutines * sizeof(sq_g *));
-	s->globals = m; // zeroed by mmap: Go's zero values
+	s->globals = m; // zeroed by mmap: the zero values
 	m += align16(sq_globals_size);
 	s->sigstack = m;
 	s->sigstack_size = SQ_SIGSTACK_SIZE;
@@ -3705,6 +3732,15 @@ int main(int argc, char **argv) {
 	// the whole process tree shares one cgroup: check it once, before any worker starts
 	check_limits(sq_threads > 0 ? sq_threads * (sq_workers > 0 ? sq_workers : 1) : 0);
 	run_workers(); // returns in each worker process (or at once, for a single worker)
+	// shard 0's package variables are mapped like the other shards' (shard_new), not static: a
+	// multi-GiB BSS would collide with the dyld shared region on macOS
+	void *gl = mmap(NULL, sq_globals_size ? sq_globals_size : 1, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (gl == MAP_FAILED) {
+		err_write("fatal error: cannot reserve memory for package variables\n");
+		_exit(2);
+	}
+	sq_shard0.globals = gl; // zeroed by mmap: the zero values
+	sq_globals_set(gl);
 	sock_init();   // connections N is per process
 	signal(SIGPIPE, SIG_IGN);
 	struct sigaction sa;
