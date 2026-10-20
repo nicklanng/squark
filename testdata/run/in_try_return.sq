@@ -1,0 +1,34 @@
+program
+
+// A ! return from inside `v, ok := x in a` restores the outer try region: it once left the
+// task pointing at the returned frame's jmp_buf, and a later full arena jumped into it.
+fault Bad "bad"
+
+fn f(fail bool) -> str ! {
+	if fail {
+		return "", Bad
+	}
+	return "abc", nil
+}
+
+fn h(a arena) -> str ! {
+	v, ok := f(true)! + "x" in a
+	if not ok {
+		return "", nil
+	}
+	return v, nil
+}
+
+fn w(a arena) -> str {
+	s, err := h(a)
+	println("h returned", err.message(), len(s))
+	return "w"
+}
+
+fn main() {
+	with arena a 64 {
+		v, ok := w(a) + "0123456789012345678901234567890123456789012345678901234567890123456789" in a
+		println("main:", ok, len(v))
+	}
+	println("done")
+}

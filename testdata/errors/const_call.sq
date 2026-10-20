@@ -1,0 +1,13 @@
+program
+
+// A call where a constant is evaluated: the callee's signature isn't resolved yet, and the
+// compiler once crashed on it.
+fn f() -> int { return 1 }
+
+const c = f() // ERROR "f() is not constant"
+enum E { a = f() } // ERROR "f() is not constant"
+struct S { a int[f()] } // ERROR "f() is not constant"
+X: int[f()] // ERROR "f() is not constant"
+arena ar f() // ERROR "f() is not constant"
+
+fn main() {}

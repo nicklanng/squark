@@ -2,6 +2,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -12,6 +14,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -96,6 +100,18 @@ func main() {
 	openBrowser := fs.Bool("open", true, "tour: open the tour in a browser")
 	export := fs.String("export", "", "tour: write a static copy of the tour, with every lesson's output baked in, into this directory")
 	fs.Parse(os.Args[2:])
+	// each subcommand takes its own flags: one it ignores would be a silent surprise
+	takes := map[string]string{"build": "o v work opt cpu manifest static", "run": "v work opt cpu", "tour": "http open export"}
+	fs.Visit(func(f *flag.Flag) {
+		if !slices.Contains(strings.Fields(takes[cmd]), f.Name) {
+			fmt.Fprintf(os.Stderr, "squark %s: -%s doesn't apply to %s\n", cmd, f.Name, cmd)
+			os.Exit(2)
+		}
+	})
+	if *manifest != "" && *manifest != "k8s" && *manifest != "systemd" {
+		fmt.Fprintf(os.Stderr, "squark build: -manifest %s: want k8s or systemd\n", *manifest)
+		os.Exit(2)
+	}
 	dir := "."
 	if fs.NArg() > 0 {
 		dir = fs.Arg(0)
@@ -214,16 +230,22 @@ func serveTour(addr string, openBrowser bool, export string) error {
 	if export != "" {
 		return site.Export(export, os.Stderr)
 	}
+	// the tour compiles and runs the code it is sent: it serves this machine only
+	if host, _, err := net.SplitHostPort(addr); err != nil || host != "localhost" {
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("-http %s: the tour runs the code it is sent, so it serves only on a loopback address (127.0.0.1:3999, localhost:3999)", addr)
+		}
+	}
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	if host, _, _ := net.SplitHostPort(addr); host != "localhost" {
-		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-			fmt.Fprintln(os.Stderr, "squark tour: warning: it runs the code it is sent; it answers only requests addressed to localhost")
-		}
+	var k [16]byte
+	if _, err := rand.Read(k[:]); err != nil {
+		return err
 	}
-	url := "http://" + l.Addr().String() + "/"
+	key := hex.EncodeToString(k[:]) // another user on this machine can reach the port, not the key
+	url := "http://" + l.Addr().String() + "/?k=" + key
 	fmt.Fprintln(os.Stderr, "squark tour: serving on", url)
 	if openBrowser {
 		opener := "xdg-open"
@@ -232,7 +254,7 @@ func serveTour(addr string, openBrowser bool, export string) error {
 		}
 		exec.Command(opener, url).Start()
 	}
-	return http.Serve(l, site.Handler())
+	return http.Serve(l, site.Handler(key))
 }
 
 func mustSub(fsys fs.FS, dir string) fs.FS {

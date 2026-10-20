@@ -387,3 +387,78 @@ func atoi(s string) int {
 	}
 	return n
 }
+
+// TestHTTPEdges (V48-V52): a HEAD pattern beats GET for a HEAD; a path with a .. segment is a
+// 400, never a {path...} value; a 1xx can't be the final status, and the usual codes have their
+// reason phrases; empty lines before a request are skipped, an absolute-form target is served by
+// its path, Transfer-Encoding is a 501; and rejected requests count in http_requests_total.
+func TestHTTPEdges(t *testing.T) {
+	src := `program
+
+use http, metrics, os, strconv
+
+fn get(w *http.ResponseWriter, r *http.Request) { w.text(200, "get") }
+fn head(w *http.ResponseWriter, r *http.Request) { w.text(200, "head-handler") }
+fn files(w *http.ResponseWriter, r *http.Request) { w.text(200, r.path_value("p")) }
+
+fn status(w *http.ResponseWriter, r *http.Request) {
+	c, _ := r.query_int("c")
+	http.send_error(w, c)
+}
+
+fn metric(w *http.ResponseWriter, r *http.Request) { metrics.write_text(w) }
+
+fn main() {
+	http.handle_func("GET /h", get)
+	http.handle_func("HEAD /h", head)
+	http.handle_func("GET /files/{p...}", files)
+	http.handle_func("GET /status", status)
+	http.handle_func("GET /metrics", metric)
+	if err := http.listen_and_serve(os.arg(1), nil); err != nil {
+		println("error:", err.message())
+	}
+}
+`
+	bin := buildSource(t, src)
+	_, addr, out, _ := startServer(t, bin)
+	ex := func(req string) string { return rawExchange(t, addr, req) }
+	// first, before any handler has answered: two requests rejected before one runs
+	ex("GET / HTTP/9.9\r\nHost: x\r\n\r\n")              // 505
+	ex("GET /h HTTP/1.1\r\nHo st: x\r\n\r\n")            // 400
+	resp, err := http.Get("http://" + addr + "/metrics") // counted after it is written
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{`http_requests_total{code="4xx"} 1`, `http_requests_total{code="5xx"} 1`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("rejected requests not counted: no %q in\n%s", want, b)
+		}
+	}
+	if r := ex("HEAD /h HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"); !strings.Contains(r, "Content-Length: 12\r\n") {
+		t.Errorf("HEAD /h: %q, want the HEAD pattern's 12 bytes", r)
+	}
+	for _, p := range []string{"/files/a/../../b", "/files/%2e%2e/etc", "/files/./x", "/files/%2E"} {
+		if r := ex("GET " + p + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"); statusOf(r) != "HTTP/1.1 400 Bad Request" {
+			t.Errorf("GET %s: %q, want a 400", p, statusOf(r))
+		}
+	}
+	if r := ex("GET /files/a..b/c HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"); !strings.HasSuffix(r, "\r\n\r\na..b/c") {
+		t.Errorf("a..b is a name, not a dot segment: %q", r)
+	}
+	for code, want := range map[string]string{"100": "500 Internal Server Error", "502": "502 Bad Gateway", "504": "504 Gateway Timeout", "408": "408 Request Timeout"} {
+		if r := ex("GET /status?c=" + code + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"); statusOf(r) != "HTTP/1.1 "+want {
+			t.Errorf("status %s: %q, want %q", code, statusOf(r), want)
+		}
+	}
+	if r := ex("\r\n\r\nGET /h HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"); statusOf(r) != "HTTP/1.1 200 OK" {
+		t.Errorf("leading CRLFs: %q", statusOf(r))
+	}
+	if r := ex("GET http://x.example/files/abc?q=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"); !strings.HasSuffix(r, "\r\n\r\nabc") {
+		t.Errorf("absolute-form: %q", r)
+	}
+	if r := ex("POST /h HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"); statusOf(r) != "HTTP/1.1 501 Not Implemented" {
+		t.Errorf("Transfer-Encoding: %q", statusOf(r))
+	}
+}

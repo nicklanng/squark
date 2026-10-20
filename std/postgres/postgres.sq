@@ -2,6 +2,9 @@
 // authentication by trust, password or SCRAM-SHA-256 (Postgres' default since 14), and queries
 // with parameters (the extended protocol: values are sent apart from the SQL, never spliced
 // into it). It doesn't do TLS: use it inside a cluster, or over a sidecar or mesh that does.
+// SCRAM uses the password's bytes as they are, without SASLprep: an ASCII password works with any
+// server; one that SASLprep would change (non-ASCII spaces, soft hyphens, compatibility forms)
+// fails with Auth.
 //
 //    c := postgres.connect("postgres://app:secret@db:5432/shop", buf[:])!
 //    var p postgres.Params
@@ -38,6 +41,17 @@ pub fault TooLarge -73 "postgres: a message larger than the connection's buffer"
 
 // BadURL is returned by connect for a URL it can't read.
 pub fault BadURL -74 "postgres: invalid URL (want postgres://user:password@host:port/database)"
+
+// NoTLS is returned by connect for a URL whose sslmode requires TLS (require, verify-ca,
+// verify-full), which this client doesn't have: it doesn't send the password in the clear instead.
+pub fault NoTLS -78 "postgres: the URL's sslmode requires TLS, which this client doesn't support"
+
+// TooManyColumns is returned for a row with more columns than Rows holds (max_columns); the rest
+// of the reply is read, so the connection can run the next query.
+pub fault TooManyColumns -79 "postgres: a row with more than 64 columns (select fewer)"
+
+// max_columns is the most columns a row may have.
+pub const max_columns = 64
 
 // Closed is returned by a call on a closed or broken connection.
 pub fault Closed -75 "postgres: connection closed"
@@ -318,31 +332,50 @@ struct URL {
 	port                           int
 }
 
-fn parse_url(url str) -> (URL, bool) in url {
+// parse_url reads url; its user, password and database are percent-decoded (into buf when they
+// need it: p%40ss is p@ss). Query options are ignored but sslmode, which must not ask for TLS.
+fn parse_url(url str, buf u8[]) -> URL ! in url, buf {
 	var u URL
 	u.port = 5432
 	rest, ok := strings.cut_prefix(url, "postgres://")
 	if not ok {
 		rest, ok = strings.cut_prefix(url, "postgresql://")
 		if not ok {
-			return u, false
+			return u, BadURL
 		}
 	}
 	if i := strings.index_byte(rest, '?'); i >= 0 {
-		rest = rest[:i] // options (sslmode=disable...) are ignored: there is no TLS
+		var opts str[16]
+		for o in strings.split(rest[i+1:], "&", opts[:]) {
+			if v, ok := strings.cut_prefix(o, "sslmode="); ok and v != "disable" and v != "allow" and v != "prefer" {
+				return u, NoTLS // require, verify-ca, verify-full: there is no TLS
+			}
+		}
+		rest = rest[:i]
 	}
+	b := buf[:0]
 	if i := strings.last_index_byte(rest, '@'); i >= 0 {
-		u.user, u.password, _ = strings.cut(rest[:i], ":")
+		user, password, _ := strings.cut(rest[:i], ":")
+		ok1, ok2 := false, false
+		u.user, b, ok1 = unescape(user, b)
+		u.password, b, ok2 = unescape(password, b)
+		if not ok1 or not ok2 {
+			return u, BadURL
+		}
 		rest = rest[i+1:]
 	}
 	hostport, db, _ := strings.cut(rest, "/")
-	u.database = db
+	ok3 := false
+	u.database, b, ok3 = unescape(db, b)
+	if not ok3 {
+		return u, BadURL
+	}
 	u.host = hostport
 	port := ""
 	if strings.has_prefix(hostport, "[") {
 		j := strings.index_byte(hostport, ']')
 		if j < 0 {
-			return u, false
+			return u, BadURL
 		}
 		u.host = hostport[1:j]
 		port, _ = strings.cut_prefix(hostport[j+1:], ":")
@@ -353,7 +386,7 @@ fn parse_url(url str) -> (URL, bool) in url {
 	if port != "" {
 		n, err := strconv.atoi(port)
 		if err != nil {
-			return u, false
+			return u, BadURL
 		}
 		u.port = n
 	}
@@ -363,7 +396,51 @@ fn parse_url(url str) -> (URL, bool) in url {
 	if u.database == "" {
 		u.database = u.user
 	}
-	return u, u.user != "" and u.port > 0 and u.port < 65536
+	if u.user == "" or u.port <= 0 or u.port >= 65536 {
+		return u, BadURL
+	}
+	return u, nil
+}
+
+// unescape percent-decodes s, appending to b only when s has an escape; ok is false for a bad
+// escape or when b is too small.
+fn unescape(s str, b u8[]) -> (str, u8[], bool) in s, b {
+	if strings.index_byte(s, '%') < 0 {
+		return s, b, true
+	}
+	start := len(b)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '%' {
+			if i+2 >= len(s) {
+				return s, b, false
+			}
+			hi, lo := unhex(s[i+1]), unhex(s[i+2])
+			if hi < 0 or lo < 0 {
+				return s, b, false
+			}
+			c = u8(hi<<4 | lo)
+			i += 2
+		}
+		if len(b) == cap(b) {
+			return s, b, false
+		}
+		b = append(b, c)
+	}
+	return str(b[start:]), b, true
+}
+
+fn unhex(c u8) -> int {
+	if c >= '0' and c <= '9' {
+		return int(c - '0')
+	}
+	if c >= 'a' and c <= 'f' {
+		return int(c-'a') + 10
+	}
+	if c >= 'A' and c <= 'F' {
+		return int(c-'A') + 10
+	}
+	return -1
 }
 
 // connect dials the server in url (postgres://user:password@host:port/database; a name is looked
@@ -371,9 +448,10 @@ fn parse_url(url str) -> (URL, bool) in url {
 // for replies (a row must fit in it), half for what it sends (a query with its parameters).
 pub fn connect(url str, buf u8[]) -> Conn ! in buf {
 	var c Conn
-	u, ok := parse_url(url)
-	if not ok {
-		return c, BadURL
+	var ub u8[512] // the URL's decoded user, password and database
+	u, perr := parse_url(url, ub[:])
+	if perr != nil {
+		return c, perr
 	}
 	buf = buf[:cap(buf)]
 	if len(buf) < 8192 {
@@ -467,8 +545,8 @@ fn has_mechanism(p u8[], name str) -> bool {
 // next call to next.
 pub struct Rows {
 	c        *Conn
-	starts   int[..64]
-	lens     int[..64] // -1: NULL
+	starts   int[..max_columns]
+	lens     int[..max_columns] // -1: NULL
 	row      u8[]
 	failure  error
 	done     bool
@@ -586,6 +664,11 @@ impl Rows {
 			return self.fail(Protocol)
 		}
 		n := get_i16(p, 0)
+		if n > cap(self.starts) {
+			self.failure = TooManyColumns
+			self.drain()
+			return false
+		}
 		i := 2
 		for _ in 0..n {
 			if i+4 > len(p) or len(self.starts) == cap(self.starts) {
@@ -603,6 +686,21 @@ impl Rows {
 			}
 		}
 		return true
+	}
+
+	// drain reads the rest of the reply, up to ReadyForQuery, leaving the connection usable.
+	fn drain(&self) {
+		while not self.done {
+			t, _, err := self.c.read_msg()
+			if err != nil {
+				self.done = true
+				return
+			}
+			if t == 'Z' {
+				self.c.busy = false
+				self.done = true
+			}
+		}
 	}
 
 	fn fail(&self, err error) -> bool {
@@ -719,6 +817,9 @@ impl Conn {
 		client_key := hmac_str(salted[:], "Client Key")
 		stored_key := sha256.sum(client_key[:])
 		var final_bare u8[160]
+		if len(full_nonce) > cap(final_bare) - len("c=biws,r=") {
+			return Protocol // the server's nonce is longer than any server sends (and than fits)
+		}
 		fwp := append(append(final_bare[:0], "c=biws,r="...), full_nonce...)
 		var auth_buf u8[512]
 		am := append(append(auth_buf[:0], fb...), ',')
@@ -862,7 +963,8 @@ impl Pool {
 		self.n = n
 		size := len(mem) / n
 		for i in 0..n {
-			self.bufs[i] = mem[i*size : (i+1)*size]
+			// capped: connect uses a buffer up to its capacity, which would reach the next one's
+			self.bufs[i] = mem[i*size : (i+1)*size : (i+1)*size]
 			self.free <- i
 		}
 	}

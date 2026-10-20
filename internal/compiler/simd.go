@@ -295,7 +295,7 @@ func (c *Checker) simdConst(x Expr, s *SIMD, t Type, context string) bool {
 		if v.Kind() == constant.Float && isInteger(s.Elem) {
 			c.errorf(x.Pos(), "constant %s truncated to integer", xi.Const)
 		} else {
-			c.errorf(x.Pos(), "constant %s overflows %s", xi.Const, s.Elem)
+			c.errorf(x.Pos(), "constant %s overflows %s", constText(xi.Const), s.Elem)
 		}
 		return false
 	}
@@ -463,10 +463,20 @@ func (g *gen) simdBuiltin(e *CallExpr) string {
 			op = ">"
 		}
 		// as the scalar min and max: the later lane wins unless it is smaller (larger)
-		return fmt.Sprintf("({ %s(%s)(%s); })", recv, et, g.simdReduce(s, v, func(a, b string) string {
+		combine := func(a, b string) string {
 			x, y := g.tmp(), g.tmp()
 			return fmt.Sprintf("({ %s %s = %s, %s = %s; %s %s %s ? %s : %s; })", et, x, a, y, b, y, op, x, y, x)
-		}))
+		}
+		if isFloat(s.Elem) {
+			// lane by lane from the first, as min(a, b, c, d) folds: with a NaN lane the order
+			// decides the result, and a tree's differs
+			acc := v + "[0]"
+			for i := int64(1); i < s.Lanes; i++ {
+				acc = combine(acc, fmt.Sprintf("%s[%d]", v, i))
+			}
+			return fmt.Sprintf("({ %s(%s)(%s); })", recv, et, acc)
+		}
+		return fmt.Sprintf("({ %s(%s)(%s); })", recv, et, g.simdReduce(s, v, combine))
 	case "simd.any", "simd.all":
 		op := "||"
 		if e.Builtin == "simd.all" {

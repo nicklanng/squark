@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"go/constant"
 	gotoken "go/token"
 	"strconv"
@@ -93,6 +94,20 @@ func (c *Checker) expr1(x Expr, hint Type) {
 					c.invalid(e)
 					return
 				}
+			}
+			if len(lit) > 1 && lit[0] == '0' && lit[1] >= '0' && lit[1] <= '9' || len(lit) > 2 && lit[0] == '0' && lit[1] == '_' {
+				// integers are decimal, 0x, 0o or 0b: a leading zero isn't octal
+				digits := strings.TrimLeft(lit, "0_")
+				if digits == "" {
+					digits = "0"
+				}
+				if strings.ContainsAny(digits, "89") {
+					c.errorf(e.P, "integer literal %s has a leading zero: write %s", e.Lit, digits)
+				} else {
+					c.errorf(e.P, "integer literal %s has a leading zero: write %s, or 0o%s for octal", e.Lit, digits, digits)
+				}
+				c.invalid(e)
+				return
 			}
 			v := constant.MakeFromLiteral(lit, gotoken.INT, 0)
 			if mult > 1 {
@@ -191,10 +206,24 @@ func (c *Checker) declaredVarType(o *Object) {
 	if vs == nil || vs.Type == nil || !ok {
 		return
 	}
+	if c.resolvingVars[o.Var] {
+		c.errorf(vs.Type.Pos(), "%s's type refers to %s", o.Name, o.Name)
+		for _, n := range vs.Names {
+			if v := n.Obj.Var; v != nil && v.Type == nil {
+				v.Type, n.Obj.Type = tInvalid, tInvalid
+			}
+		}
+		return
+	}
+	if c.resolvingVars == nil {
+		c.resolvingVars = map[*Var]bool{}
+	}
+	c.resolvingVars[o.Var] = true
 	prev := c.fileImports
 	c.setFile(file)
 	t := c.typExpr(vs.Type)
 	c.fileImports = prev
+	delete(c.resolvingVars, o.Var)
 	for _, n := range vs.Names {
 		if v := n.Obj.Var; v != nil && v.Type == nil {
 			v.Type, n.Obj.Type = t, t
@@ -538,7 +567,7 @@ func (c *Checker) convertUntyped(x Expr, t Type, context string) bool {
 			if v.Kind() == constant.Float && isInteger(t) {
 				c.errorf(x.Pos(), "constant %s truncated to integer", xi.Const)
 			} else {
-				c.errorf(x.Pos(), "constant %s overflows %s", xi.Const, t)
+				c.errorf(x.Pos(), "constant %s overflows %s", constText(xi.Const), t)
 			}
 			return false
 		}
@@ -1356,7 +1385,7 @@ func (c *Checker) unary(e *UnaryExpr, hint Type) {
 		v := constant.UnaryOp(op, xi.Const, prec)
 		if !isUntyped(xi.T) {
 			if _, ok := representable(v, xi.T); !ok {
-				c.errorf(e.P, "constant %s overflows %s", v, xi.T)
+				c.errorf(e.P, "constant %s overflows %s", constText(v), xi.T)
 			}
 		}
 		e.Const, e.Mode = v, ModeConst
@@ -1509,7 +1538,7 @@ func (c *Checker) binary(e *BinaryExpr) {
 			}
 			nv, ok := representable(v, t)
 			if !ok {
-				c.errorf(e.P, "constant %s overflows %s", v, t)
+				c.errorf(e.P, "constant %s overflows %s", constText(v), t)
 			}
 			v = nv
 		}
@@ -1634,12 +1663,19 @@ func (c *Checker) shift(e *BinaryExpr) {
 	}
 	e.T, e.Mode = x.T, ModeValue
 	if x.Const != nil && y.Const != nil {
-		s, _ := constant.Uint64Val(y.Const)
+		s, exact := constant.Uint64Val(y.Const)
+		// a constant shifted further left than any float's range is a mistake, and computing
+		// it could exhaust memory
+		if e.Op == SHL && (!exact || s > 1100) && constant.Sign(x.Const) != 0 {
+			c.errorf(e.Y.Pos(), "invalid shift count %s: shifting a constant left by more than 1100 bits", exprString(e.Y))
+			c.invalid(e)
+			return
+		}
 		v := constant.Shift(x.Const, goOps[e.Op], uint(s))
 		if !isUntyped(e.T) {
 			nv, ok := representable(v, e.T)
 			if !ok {
-				c.errorf(e.P, "constant %s overflows %s", v, e.T)
+				c.errorf(e.P, "constant %s overflows %s", constText(v), e.T)
 			}
 			v = nv
 		}
@@ -1716,4 +1752,17 @@ func readOnlyVar(x Expr) *Var {
 		}
 	}
 	return nil
+}
+
+// constText is a constant as an error message shows it: a long one (1 << 100000) by its first
+// digits and its length, not thirty thousand digits.
+func constText(v constant.Value) string {
+	t := v.String()
+	if v.Kind() == constant.Int {
+		t = v.ExactString()
+	}
+	if len(t) > 40 {
+		return fmt.Sprintf("%s... (%d digits)", t[:20], len(strings.TrimPrefix(t, "-")))
+	}
+	return t
 }

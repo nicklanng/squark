@@ -1,0 +1,13 @@
+program
+
+// A float vector's min and max pick lanes as the builtin min and max do, left to right: with a
+// NaN lane a tree reduction once gave another lane.
+fn main() {
+	zero := f32(0)
+	nan := zero / zero
+	a := f32x4{1, nan, 2, 0}
+	println(a.min() == min(f32(1), nan, f32(2), f32(0)), a.max() == max(f32(1), nan, f32(2), f32(0)))
+	b := f32x4{nan, 3, 1, 2}
+	m, n := b.min(), min(nan, f32(3), f32(1), f32(2))
+	println(m == n or (m != m and n != n))
+}

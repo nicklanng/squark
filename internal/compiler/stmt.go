@@ -212,6 +212,13 @@ func (c *Checker) rhsTypes(pos Pos, lhsN int, rhs []Expr, hints []Type) []Type {
 		case *InExpr:
 			c.expr(u)
 			if _, tuple := u.T.(*Tuple); u.Mode != ModeInvalid && !tuple && lhsN == 2 {
+				if !c.value(u) { // x has no value (a call of a function without results)
+					return nil
+				}
+				c.defaultUntyped(u) // v of 5 in a is an int (and 1 << 70 doesn't fit one)
+				if u.Mode == ModeInvalid {
+					return nil
+				}
 				u.CommaOk = true // v, ok := x in a
 				return []Type{u.T, tBool}
 			}
@@ -767,15 +774,24 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 		kt = u.Elem
 		if s.Value != nil {
 			c.errorf(s.Value.Pos(), "for ... in %s permits only one loop variable", exprString(s.X))
+			vt = tInvalid // reported: uses of it aren't errors too
 		}
 	}
 	if kt == nil {
 		c.errorf(s.X.Pos(), "cannot loop over %s (type %s)", exprString(s.X), xt)
+		if s.Define { // declared anyway, so the body's uses of them aren't "undefined"
+			for _, v := range []Expr{s.Key, s.Value} {
+				if id, ok := v.(*Ident); ok && !isBlank(id) {
+					c.declareVar(id, tInvalid)
+				}
+			}
+		}
 		c.stmt(s.Body)
 		return
 	}
 	if isInteger(xt) && s.Value != nil {
 		c.errorf(s.Value.Pos(), "for ... in %s permits only one loop variable", exprString(s.X))
+		vt = tInvalid
 	}
 	vars := []Expr{s.Key, s.Value}
 	types := []Type{kt, vt}
@@ -784,7 +800,16 @@ func (c *Checker) rangeStmt(s *RangeStmt) {
 			continue
 		}
 		if st := storageIn(types[i]); st != nil && !isBlank(v) {
-			c.errorf(v.Pos(), "cannot copy elements of %s into %s: %s contains %s storage; loop over the indexes and use &%s[i]", exprString(s.X), exprString(v), types[i], st, exprString(s.X))
+			// the way round depends on what is ranged over: elements of a map or values off a
+			// channel have no address to take
+			hint := "loop over the indexes and use &" + exprString(s.X) + "[i]"
+			switch xt.Underlying().(type) {
+			case *Chan:
+				hint = "send a pointer to the storage (or an index into a table of them) instead"
+			case *Map:
+				hint = "keep the storage in an array or vector and map keys to indexes into it"
+			}
+			c.errorf(v.Pos(), "cannot copy elements of %s into %s: %s contains %s storage; %s", exprString(s.X), exprString(v), types[i], st, hint)
 		}
 		if s.Define {
 			id, ok := v.(*Ident)
@@ -984,6 +1009,8 @@ func hasBreak(s Stmt, target Stmt, top bool) bool {
 		return hasBreak(s.Body, target, top)
 	case *DeadlineStmt:
 		return hasBreak(s.Body, target, top)
+	case *GoStmt:
+		return s.Else != nil && hasBreak(s.Else, target, top)
 	case *IfStmt:
 		if hasBreak(s.Body, target, top) {
 			return true

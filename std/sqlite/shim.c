@@ -12,6 +12,7 @@
 // gives it back at Reset, so Bind, Step, Column, Changes and LastInsertRowID see one task's
 // work; the lock calls run on the scheduler thread, before the blocking call they protect.
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <string.h>
@@ -24,6 +25,9 @@ typedef struct conn {
 	int64_t active; // the holder's active statements plus calls in progress
 	int64_t start;  // when the current Step or Exec started (sq_nanotime)
 	int64_t waited; // microseconds the busy handler has slept for the current lock
+	int64_t gen;    // which use of this wrapper a DB handle is (see Handles)
+	int open;
+	struct conn *next_free;
 } conn;
 
 #define SLOW_NS 100000 // 100µs: longer than two thread handoffs
@@ -57,7 +61,76 @@ typedef struct stmt {
 	sqlite3_stmt *st;
 	conn *c;
 	int active; // between the first Bind or Step and Reset (holds c's lock)
+	int64_t gen;
+	int live;
+	struct stmt *next_free;
 } stmt;
+
+// Handles. DB and Stmt are copyable values, so one may be used after a copy of it was closed or
+// finalized. Wrappers are therefore never freed but kept for reuse, each with a generation that
+// changes when it is closed: a handle whose generation doesn't match its wrapper's gets
+// SQLITE_MISUSE (sq_sqlite_db_live, sq_sqlite_stmt_live) instead of touching freed memory. The
+// free lists are shared by all threads; the lock is held for a few instructions.
+static atomic_flag pool_lock = ATOMIC_FLAG_INIT;
+static conn *free_conns;
+static stmt *free_stmts;
+
+static void pool_acquire(void) {
+	while (atomic_flag_test_and_set_explicit(&pool_lock, memory_order_acquire)) {
+	}
+}
+static void pool_release(void) { atomic_flag_clear_explicit(&pool_lock, memory_order_release); }
+
+static conn *new_conn(void) {
+	pool_acquire();
+	conn *c = free_conns;
+	if (c) free_conns = c->next_free;
+	pool_release();
+	int64_t gen = c ? __atomic_load_n(&c->gen, __ATOMIC_RELAXED) : 0;
+	if (!c && !(c = sqlite3_malloc(sizeof *c))) return NULL;
+	memset(c, 0, sizeof *c);
+	__atomic_store_n(&c->gen, gen + 1, __ATOMIC_RELAXED);
+	return c;
+}
+
+static void free_conn(conn *c) {
+	__atomic_store_n(&c->open, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&c->gen, c->gen + 1, __ATOMIC_RELAXED);
+	pool_acquire();
+	c->next_free = free_conns;
+	free_conns = c;
+	pool_release();
+}
+
+static stmt *new_stmt(void) {
+	pool_acquire();
+	stmt *s = free_stmts;
+	if (s) free_stmts = s->next_free;
+	pool_release();
+	int64_t gen = s ? __atomic_load_n(&s->gen, __ATOMIC_RELAXED) : 0;
+	if (!s && !(s = sqlite3_malloc(sizeof *s))) return NULL;
+	memset(s, 0, sizeof *s);
+	__atomic_store_n(&s->gen, gen + 1, __ATOMIC_RELAXED);
+	return s;
+}
+
+static void free_stmt(stmt *s) {
+	__atomic_store_n(&s->live, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&s->gen, s->gen + 1, __ATOMIC_RELAXED);
+	pool_acquire();
+	s->next_free = free_stmts;
+	free_stmts = s;
+	pool_release();
+}
+
+int64_t sq_sqlite_db_gen(conn *c) { return c ? c->gen : 0; }
+int64_t sq_sqlite_stmt_gen(stmt *s) { return s ? s->gen : 0; }
+bool sq_sqlite_db_live(conn *c, int64_t gen) {
+	return c && __atomic_load_n(&c->gen, __ATOMIC_RELAXED) == gen && __atomic_load_n(&c->open, __ATOMIC_RELAXED);
+}
+bool sq_sqlite_stmt_live(stmt *s, int64_t gen) {
+	return s && __atomic_load_n(&s->gen, __ATOMIC_RELAXED) == gen && __atomic_load_n(&s->live, __ATOMIC_RELAXED);
+}
 
 static void acquire(conn *c) {
 	if (!sq_gmutex_held(&c->mu)) sq_gmutex_lock(&c->mu); // the last holder left active at 0
@@ -106,9 +179,9 @@ int64_t sq_sqlite_open(sq_string path, conn **out) {
 	if (path.len > 0 && memchr(path.p, 0, (size_t)path.len)) return SQLITE_CANTOPEN; // Open reports EINVAL first
 	memcpy(buf, path.p, (size_t)path.len);
 	buf[path.len] = 0;
-	conn *c = sqlite3_malloc(sizeof *c);
+	conn *c = new_conn();
 	if (!c) return SQLITE_NOMEM;
-	memset(c, 0, sizeof *c);
+	c->open = 1; // even if opening fails: the connection still needs closing
 	sq_gmutex_init(&c->mu);
 	// SQLITE_OPEN_NOMUTEX: the connection lock above keeps one thread in it at a time
 	int rc = sqlite3_open_v2(buf, &c->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL);
@@ -127,7 +200,7 @@ int64_t sq_sqlite_close(conn *c) {
 	if (!c) return SQLITE_MISUSE;
 	int rc = sqlite3_close_v2(c->db);
 	sq_gmutex_unlock(&c->mu);
-	sqlite3_free(c);
+	free_conn(c);
 	return rc;
 }
 
@@ -170,15 +243,15 @@ static int64_t exec(sqlite3 *db, sq_string sql) {
 // sq_sqlite_prepare compiles a statement (blocking; its caller holds the lock).
 int64_t sq_sqlite_prepare(conn *c, sq_string sql, stmt **out) {
 	*out = NULL;
-	stmt *s = sqlite3_malloc(sizeof *s);
+	stmt *s = new_stmt();
 	if (!s) return SQLITE_NOMEM;
-	memset(s, 0, sizeof *s);
 	s->c = c;
 	int rc = sqlite3_prepare_v3(c->db, (const char *)sql.p, (int)sql.len, SQLITE_PREPARE_PERSISTENT, &s->st, NULL);
 	if (rc != SQLITE_OK) {
-		sqlite3_free(s);
+		free_stmt(s);
 		return rc;
 	}
+	s->live = 1;
 	*out = s;
 	return rc;
 }
@@ -226,7 +299,7 @@ int64_t sq_sqlite_finalize(stmt *s) {
 	if (!s) return SQLITE_OK;
 	int rc = sqlite3_finalize(s->st);
 	if (s->active) s->c->active--;
-	sqlite3_free(s);
+	free_stmt(s);
 	return rc;
 }
 

@@ -194,3 +194,42 @@ func TestMuxBadPatterns(t *testing.T) {
 		})
 	}
 }
+
+// TestMuxLargeEscapes (V33): path_value and query_param on long escaped values, each read twice:
+// every call once took len(raw) bytes of the 16 KiB request arena, so a 9 KB request panicked.
+func TestMuxLargeEscapes(t *testing.T) {
+	src := `program
+
+use http, os
+
+fn files(w *http.ResponseWriter, r *http.Request) {
+	if r.path_value("p") == "" or r.query_param("q") == "" {
+		http.send_error(w, 404)
+		return
+	}
+	w.text(200, r.path_value("p"))
+	w.write_string(" ")
+	w.write_string(r.query_param("q"))
+}
+
+fn main() {
+	http.handle_func("GET /files/{p...}", files)
+	if err := http.listen_and_serve(os.arg(1), nil); err != nil {
+		println("error:", err.message())
+	}
+}
+`
+	bin := buildSource(t, src)
+	_, addr, out, _ := startServer(t, bin)
+	path := "/files/" + strings.Repeat("%41", 1600) + "?q=" + strings.Repeat("%42", 1300)
+	resp, err := http.Get("http://" + addr + path)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	want := strings.Repeat("A", 1600) + " " + strings.Repeat("B", 1300)
+	if resp.StatusCode != 200 || string(b) != want {
+		t.Errorf("status %d, body %.40q... (%d bytes)\n%s", resp.StatusCode, b, len(b), out.String())
+	}
+}

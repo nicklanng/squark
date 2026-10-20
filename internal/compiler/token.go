@@ -165,6 +165,9 @@ func (p Pos) String() string {
 	if p.File == "" {
 		return "?"
 	}
+	if p.Line == 0 { // a whole file or directory (no main in the program)
+		return p.File
+	}
 	return fmt.Sprintf("%s:%d:%d", p.File, p.Line, p.Col)
 }
 

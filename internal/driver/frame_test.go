@@ -2,6 +2,7 @@ package driver
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,5 +112,123 @@ func TestStackProofGuards(t *testing.T) {
 		if guard < 1600000 {
 			t.Errorf("main.worker's guard is %d bytes, smaller than its 1.6 MB frame", guard)
 		}
+	}
+}
+
+// TestListenSharesConnections (V18): with threads 16 and connections 256, every shard listening
+// on one address takes a share of that address's backlog, not a backlog each: 16 × 16 once used
+// up all 256, so the dial below failed with "too many connections".
+func TestListenSharesConnections(t *testing.T) {
+	src := `program {
+	threads 16
+	connections 256
+}
+
+use net, os, runtime, time
+
+shared ready int chan[16]
+
+fn run() -> ! {
+	l := net.listen(os.arg(1))!
+	ready <- 1
+	if runtime.shard() != 0 {
+		time.sleep(500 * time.millisecond)
+		return nil
+	}
+	for i in 0..16 {
+		<-ready
+	}
+	// no accept: on Linux each shard has its own socket, and the kernel may queue the connection
+	// on any of them; dialing is what failed (the backlogs took every connection)
+	c := net.dial(os.arg(1))!
+	println("dial ok")
+	_ = c.close()
+	_ = l.close()
+	return nil
+}
+
+fn main() {
+	if err := run(); err != nil {
+		println("shard", runtime.shard(), "error:", err.message())
+	}
+}
+`
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
+	bin := filepath.Join(dir, "p")
+	if _, err := Build(Options{Dir: dir, Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	out, err := exec.Command(bin, addr).CombinedOutput()
+	if err != nil || string(out) != "dial ok\n" {
+		t.Errorf("%v\n%s", err, out)
+	}
+}
+
+// TestHeapCheck (V39): C code that calls a libc function that allocates is rejected at build time;
+// the check once knew only malloc and its close relatives, so fopen, opendir, realpath(p, NULL),
+// getline and setenv got through.
+func TestHeapCheck(t *testing.T) {
+	calls := map[string]string{
+		"malloc":   `p = malloc(16);`,
+		"fopen":    `p = fopen("/dev/null", "r");`,
+		"opendir":  `p = opendir("/");`,
+		"realpath": `p = realpath("/", 0);`,
+		"getline":  `size_t n = 0; char *l = 0; p = (void *)getline(&l, &n, stdin);`,
+		"setenv":   `p = (void *)(long)setenv("A", "b", 1);`,
+	}
+	for name, call := range calls {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "main.sq"), []byte("program\n\nextern fn f() -> int stack 1K\n\nfn main() { println(f()) }\n"), 0o644)
+		src := "#define _GNU_SOURCE\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <dirent.h>\nvoid *volatile p;\nint64_t f(void) { " + call + " return p != 0; }\n"
+		os.WriteFile(filepath.Join(dir, "f.c"), []byte(src), 0o644)
+		_, err := Build(Options{Dir: dir, Output: filepath.Join(dir, "p")})
+		if err == nil || !strings.Contains(err.Error(), "heap check failed") {
+			t.Errorf("%s: got %v, want a heap check failure", name, err)
+		}
+	}
+}
+
+// TestHeldLocksFull (V46): a task that takes more task locks than it can record is a fatal error;
+// the extra ones were once dropped silently, so unwinding an isolate task left them held.
+func TestHeldLocksFull(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte("program\n\nextern fn take(n int) -> int stack 4K\n\nfn main() {\n\tprintln(take(8))\n\tprintln(take(9))\n}\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "take.c"), []byte(`#include <stdint.h>
+#include "sq_rt.h"
+static sq_gmutex mu[16];
+int64_t take(int64_t n) {
+	for (int64_t i = 0; i < n; i++) {
+		sq_gmutex_init(&mu[i]);
+		sq_gmutex_lock(&mu[i]);
+	}
+	for (int64_t i = 0; i < n; i++) sq_gmutex_unlock(&mu[i]);
+	return n;
+}
+`), 0o644)
+	bin := filepath.Join(dir, "p")
+	if _, err := Build(Options{Dir: dir, Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(bin).CombinedOutput()
+	if exitCode(err) != 2 || !strings.HasPrefix(string(out), "8\n") || !strings.Contains(string(out), "more than 8 task locks") {
+		t.Errorf("exit %d, output %q", exitCode(err), out)
+	}
+}
+
+// TestExternConflict (V67): an extern whose types clash with a libc prototype is reported at the
+// extern, as the program's mistake; it was once blamed on the compiler.
+func TestExternConflict(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte("program\n\nextern fn getpid() -> int stack 1K\n\nfn main() { println(getpid() > 0) }\n"), 0o644)
+	_, err := Build(Options{Dir: dir, Output: filepath.Join(dir, "p")})
+	if err == nil || !strings.Contains(err.Error(), "main.sq:3:1: extern getpid conflicts with the C library's declaration") || strings.Contains(err.Error(), "squark compiler bug") {
+		t.Errorf("got %v", err)
 	}
 }

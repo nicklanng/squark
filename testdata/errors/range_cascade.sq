@@ -1,0 +1,12 @@
+program
+
+// One error per bad range loop: the extra variable and the variable of a loop over a float once
+// also gave "used before its type is known" and "undefined" where the body used them.
+fn main() {
+	for i, j in 0..3 { // ERROR "permits only one loop variable"
+		println(i, j)
+	}
+	for x in 0..1.5 { // ERROR "cannot loop over 1.5"
+		println(x)
+	}
+}

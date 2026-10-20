@@ -251,10 +251,10 @@ pub fn parse_duration(s str) -> Duration ! {
 				return 0, InvalidDuration
 			}
 		}
-		d += v
-		if d > 1<<63 {
+		if v > 1<<63 - d { // the sum would pass 2^63 (and wrap past 2^64)
 			return 0, InvalidDuration
 		}
+		d += v
 	}
 	if neg {
 		return Duration(0 - d), nil

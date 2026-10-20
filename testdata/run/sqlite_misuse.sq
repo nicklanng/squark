@@ -1,0 +1,36 @@
+program
+
+// Handles used after closing or finalizing (through the same value or a copy), or after a
+// failed prepare, report misuse: they once used freed memory or a NULL statement in C.
+use sqlite
+
+fn code(err error) -> int { return err.code() }
+
+fn main() {
+	db, err := sqlite.open(":memory:")
+	if err != nil {
+		println("open", err.message())
+		return
+	}
+	bad, err2 := db.prepare("SELEC nonsense")
+	_, err3 := bad.step()
+	println("failed prepare:", err2 != nil, code(err3) == sqlite.misuse)
+
+	st, _ := db.prepare("SELECT 1")
+	copy := st
+	println("finalize:", st.finalize() == nil, code(st.finalize()) == sqlite.misuse)
+	_, err4 := copy.step()
+	println("copy after finalize:", code(err4) == sqlite.misuse, copy.column_count())
+
+	again, _ := db.prepare("SELECT 2") // may reuse the finalized statement's wrapper
+	_, err5 := copy.step()
+	ok, _ := again.step()
+	println("stale copy:", code(err5) == sqlite.misuse, ok, again.column_int(0))
+	again.reset()
+	again.finalize()
+
+	db2 := db
+	println("close:", db.close() == nil, code(db2.close()) == sqlite.misuse, code(db2.exec("SELECT 1")) == sqlite.misuse)
+	_, err6 := db2.prepare("SELECT 1")
+	println("prepare after close:", code(err6) == sqlite.misuse)
+}

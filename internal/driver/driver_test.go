@@ -1266,7 +1266,8 @@ func TestSharedChanRace(t *testing.T) {
 }
 
 // TestThreadsEnv: SQUARK_THREADS sets the thread count of a program written for threads, like
-// GOMAXPROCS; it is ignored without a threads directive and capped by a budget's proven count.
+// GOMAXPROCS; it is ignored without a threads directive and can't raise threads N, which the
+// memory worst case was computed for (V26: without a budget it once could).
 func TestThreadsEnv(t *testing.T) {
 	dir := t.TempDir()
 	build := func(name, directives string) string {
@@ -1305,10 +1306,14 @@ func TestThreadsEnv(t *testing.T) {
 	if got, _ := run(build("none", ""), "3"); got != "1" {
 		t.Errorf("no threads directive, SQUARK_THREADS=3: %s threads, want 1 (not written for threads)", got)
 	}
-	if got, _ := run(build("fixed", "threads 2"), "5"); got != "5" {
-		t.Errorf("threads 2, SQUARK_THREADS=5: %s threads", got)
+	fixed := build("fixed", "threads 4")
+	if got, _ := run(fixed, "2"); got != "2" {
+		t.Errorf("threads 4, SQUARK_THREADS=2: %s threads", got)
 	}
-	if got, warn := run(build("budget", "budget 512M\nthreads 2"), "5"); got != "2" || !strings.Contains(warn, "memory budget was proven for") {
+	if got, warn := run(fixed, "5"); got != "4" || !strings.Contains(warn, "worst case was computed for") {
+		t.Errorf("threads 4, SQUARK_THREADS=5: %s threads, stderr %q", got, warn)
+	}
+	if got, warn := run(build("budget", "budget 512M\nthreads 2"), "5"); got != "2" || !strings.Contains(warn, "worst case was computed for") {
 		t.Errorf("threads 2 with a budget, SQUARK_THREADS=5: %s threads, stderr %q", got, warn)
 	}
 }

@@ -1,0 +1,31 @@
+program
+
+// Truncated input is a syntax error (it once reported "unexpected value type"); a value of
+// another type is still a type error.
+
+use json
+
+fn main() {
+	var src u8[16]
+	var key u8[16]
+	n := copy(src[:], `{`)
+	d := json.new_decoder(src[:n])
+	d.begin_object()
+	_, ok := d.field(key[:])
+	println("truncated object:", ok, d.err.message())
+	n = copy(src[:], `[1,`)
+	d = json.new_decoder(src[:n])
+	d.begin_array()
+	while d.more() {
+		_, ok2 := d.int()
+		println("elem ok", ok2)
+		if not ok2 {
+			break
+		}
+	}
+	println("truncated array:", d.err.message())
+	n = copy(src[:], `"x"`)
+	d = json.new_decoder(src[:n])
+	_, ok3 := d.int()
+	println("a string for an int:", ok3, d.err.message())
+}

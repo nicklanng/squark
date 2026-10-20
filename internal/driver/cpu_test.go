@@ -15,12 +15,12 @@ func TestCPUFlags(t *testing.T) {
 	}{
 		{"", "amd64", ""},
 		{"baseline", "arm64", ""},
-		{"native", "arm64", "-mcpu=native"},
+		{"native", "arm64", `-mcpu=native -DSQ_CPU="native"`},
 		{"native", "amd64", `-march=native -DSQ_CPU="native"`},
 		{"x86-64-v3", "amd64", `-march=x86-64-v3 -DSQ_CPU="x86-64-v3"`},
 		{"x86-64-v3", "arm64", "error"},
-		{"armv8.2-a", "arm64", "-march=armv8.2-a"},
-		{"armv9-a", "arm64", "-march=armv9-a"},
+		{"armv8.2-a", "arm64", `-march=armv8.2-a -DSQ_CPU="armv8.2-a"`},
+		{"armv9-a", "arm64", `-march=armv9-a -DSQ_CPU="armv9-a"`},
 		{"armv8.2-a", "amd64", "error"},
 		{"avx2", "amd64", "error"},
 	} {
@@ -73,5 +73,30 @@ func TestCPU(t *testing.T) {
 			}
 			t.Logf("stopped as expected: %s", out)
 		})
+	}
+}
+
+// TestCPUTooNew (V66): a program built for a CPU newer than the one running it says so, rather
+// than dying of SIGILL without a word (the instruction can come before main's own code runs).
+func TestCPUTooNew(t *testing.T) {
+	cpu := "x86-64-v4"
+	if runtime.GOARCH == "arm64" {
+		cpu = "armv9.5-a"
+	}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte("program\n\nfn main() { println(\"ran\") }\n"), 0o644)
+	bin := filepath.Join(dir, "p")
+	if _, err := Build(Options{Dir: dir, Output: bin, CPU: cpu}); err != nil {
+		if strings.Contains(err.Error(), "C compiler failed") {
+			t.Skipf("this C compiler doesn't build for %s: %.200s", cpu, err) // gcc 14 has no armv9.5-a
+		}
+		t.Fatal(err)
+	}
+	out, err := exec.Command(bin).CombinedOutput()
+	if err == nil {
+		t.Skipf("this CPU runs %s code", cpu)
+	}
+	if !strings.Contains(string(out), "built for "+cpu+" CPUs") {
+		t.Errorf("%v: %q, want a message naming %s", err, out, cpu)
 	}
 }

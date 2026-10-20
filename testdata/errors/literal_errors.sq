@@ -3,7 +3,7 @@ program
 // one error per bad literal (no "constant unknown overflows" after it); size suffixes follow a
 // plain decimal integer
 fn main() {
-	a := 08   // ERROR "invalid integer literal 08"
+	a := 08   // ERROR "integer literal 08 has a leading zero: write 8"
 	b := 0x   // ERROR "invalid integer literal 0x"
 	k := 010K // ERROR "invalid size literal 010K"
 	u := 1_0K // ERROR "invalid size literal 1_0K"

@@ -70,7 +70,7 @@ program {
 thread jobs int chan[64]
 thread squares int chan[64]
 
-task worker(id int) pool 256 {
+task worker(id int) pool 16 {
 	for j in jobs {
 		squares <- j * j
 	}

@@ -22,6 +22,11 @@ pub extern fn gosched() stack 1K c"sq_gosched"
 // container is stopped. Calling it again does nothing.
 pub extern fn stop_gracefully() stack 1K c"sq_stop_gracefully"
 
+// through_stop exempts the calling task from a graceful stop's cap on blocking I/O (which times
+// out at 0.9 × the grace period): for a task that must keep answering until the program exits,
+// such as an admin port's (http.serve_admin). Its own with deadline still applies.
+pub extern fn through_stop() stack 1K c"sq_through_stop"
+
 extern fn sys_stopping() -> int stack 1K c"sq_stopping"
 
 // stopping reports whether a graceful stop has begun (see stop_gracefully).

@@ -48,17 +48,21 @@ fn register(name, labels, help str, kind int) -> int {
 		panic("metrics: the table of 64 metrics is full")
 	}
 	if id == -2 {
-		panic("metrics: a name and labels registered already as the other kind (counter, gauge)")
+		panic("metrics: a name registered already as the other kind (counter, gauge)")
+	}
+	if id == -3 {
+		panic("metrics: a name over 47 bytes or labels over 79 bytes")
 	}
 	return id + 1
 }
 
 // counter registers a counter and returns it: `thread served = metrics.counter(...)` at package
 // level, or in main. labels is "" or Prometheus labels without the braces:
-// `code="2xx",method="GET"`; each set of labels is its own counter. Names are up to 47 bytes,
-// labels and help up to 79 (longer ones are cut). Registering the same name and labels again
-// (each thread's package variables do, under threads N) returns the same counter. It panics if
-// the table of 64 metrics is full, or the name and labels are a gauge.
+// `code="2xx",method="GET"`; each set of labels is its own counter. Names are up to 47 bytes and
+// labels up to 79 (longer ones panic: cut, they would break the whole page); help is cut at 79.
+// Registering the same name and labels again (each thread's package variables do, under threads
+// N) returns the same counter. It panics if the table of 64 metrics is full, or the name is a
+// gauge's.
 pub fn counter(name, labels, help str) -> Counter { return Counter{id: register(name, labels, help, kind_counter)} }
 
 // gauge registers a gauge; see counter.
@@ -144,7 +148,9 @@ pub fn write_text(w anytype) {
 		w.write(header(line[:0], families[f], helps[f], typ))
 		for i in 0..pools {
 			var lb u8[96]
-			labels := append(append(append(lb[:0], "task=\""...), pool_name(i)...), '"')
+			name := pool_name(i)
+			name = name[:min(len(name), cap(lb)-8)] // task="...": a long name is cut to fit
+			labels := append(append(append(lb[:0], "task=\""...), name...), '"')
 			w.write(sample(line[:0], families[f], str(labels), pool_stat(i, stats[f])))
 		}
 	}
@@ -173,7 +179,17 @@ fn gauge_line(w anytype, line u8[], name, help str, v int) {
 
 fn header(dst u8[], name, help, typ str) -> u8[] in dst {
 	dst = append(append(append(dst, "# HELP "...), name...), ' ')
-	dst = append(append(dst, help...), '\n')
+	for i in 0..len(help) { // a HELP line escapes \ and newlines
+		switch help[i] {
+		case '\\':
+			dst = append(dst, "\\\\"...)
+		case '\n':
+			dst = append(dst, "\\n"...)
+		default:
+			dst = append(dst, help[i])
+		}
+	}
+	dst = append(dst, '\n')
 	dst = append(append(append(dst, "# TYPE "...), name...), ' ')
 	return append(append(dst, typ...), '\n')
 }

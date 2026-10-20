@@ -2,6 +2,7 @@ package tour
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,11 +42,12 @@ type index struct {
 
 const maxCode = 256 << 10
 
-// Handler serves the tour with a compiler behind it. It only answers requests addressed to
-// localhost, and only runs code for requests that carry the X-Squark-Tour header, which a page
-// on another origin can't send without a preflight that this handler refuses: no web page the
-// browser has open elsewhere can run programs through it.
-func (s *Site) Handler() http.Handler {
+// Handler serves the tour with a compiler behind it. It only answers requests from this machine
+// (a loopback peer) addressed to localhost, and only runs code for requests whose X-Squark-Tour
+// header is key: a page on another origin can't send the header without a preflight that this
+// handler refuses, and another user on the machine doesn't know the key, which squark tour puts
+// in the URL it opens (?k=key).
+func (s *Site) Handler(key string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /", http.FileServerFS(s.Static))
 	mux.HandleFunc("GET /lessons.json", func(w http.ResponseWriter, r *http.Request) {
@@ -53,8 +55,8 @@ func (s *Site) Handler() http.Handler {
 		json.NewEncoder(w).Encode(index{Live: true, Chapters: s.Chapters})
 	})
 	run := func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Squark-Tour") != "1" {
-			http.Error(w, "missing X-Squark-Tour header", http.StatusForbidden)
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Squark-Tour")), []byte(key)) != 1 || key == "" {
+			http.Error(w, "missing or wrong X-Squark-Tour key: open the tour at the URL squark tour printed", http.StatusForbidden)
 			return
 		}
 		var req struct {
@@ -82,8 +84,8 @@ func (s *Site) Handler() http.Handler {
 	mux.HandleFunc("POST /api/run", run)
 	mux.HandleFunc("POST /api/check", run)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !localHost(r.Host) {
-			http.Error(w, "the tour answers only requests to localhost", http.StatusForbidden)
+		if !localHost(r.Host) || !loopbackPeer(r.RemoteAddr) {
+			http.Error(w, "the tour answers only requests from this machine to localhost", http.StatusForbidden)
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -100,6 +102,17 @@ func localHost(host string) bool {
 	h = strings.Trim(h, "[]")
 	if h == "localhost" {
 		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// loopbackPeer reports whether a request came from this machine (the Host header is the client's
+// to choose; the peer address isn't).
+func loopbackPeer(addr string) bool {
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
 	}
 	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()

@@ -1,0 +1,17 @@
+program
+
+// parse_duration rejects a sum past the largest duration: two 2^63ns once wrapped to 0.
+use time
+
+fn try(s str) {
+	d, err := time.parse_duration(s)
+	println(s, int(d), err != nil)
+}
+
+fn main() {
+	try("9223372036854775808ns9223372036854775808ns")
+	try("-9223372036854775808ns9223372036854775808ns")
+	try("-9223372036854775808ns")
+	try("9223372036854775807ns")
+	try("1h30m")
+}

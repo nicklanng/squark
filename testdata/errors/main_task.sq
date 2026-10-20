@@ -1,0 +1,5 @@
+program
+
+// main is a function, not a task (one once ran as a pool of one).
+task main() pool 1 { // ERROR "main must be a function with a body"
+}

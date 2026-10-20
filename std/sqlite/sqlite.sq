@@ -11,9 +11,10 @@ module sqlite {
 use os
 
 const (
-	pub ok   = 0
-	pub row  = 100
-	pub done = 101
+	pub ok     = 0
+	pub misuse = 21 // a closed DB or a finalized Stmt (or one from a failed prepare)
+	pub row    = 100
+	pub done   = 101
 )
 
 const (
@@ -24,13 +25,17 @@ const (
 	pub type_null    = 5
 )
 
+// DB and Stmt are handles: copies name the same connection or statement. Once it is closed or
+// finalized, every copy gets misuse.
 pub struct DB {
-	h rawptr
+	h   rawptr
+	gen int
 }
 
 pub struct Stmt {
-	h  rawptr
-	db rawptr
+	h   rawptr
+	db  rawptr
+	gen int
 }
 
 // SQLite calls get a generous stack budget: the query planner and VDBE are not tiny. Statements
@@ -78,6 +83,14 @@ extern fn last_insert_row_id(db rawptr) -> int stack 16K c"sq_sqlite_last_insert
 
 extern fn errstr(rc int) -> str stack 16K c"sq_sqlite_errstr"
 
+extern fn db_gen(db rawptr) -> int stack 1K c"sq_sqlite_db_gen"
+
+extern fn stmt_gen(st rawptr) -> int stack 1K c"sq_sqlite_stmt_gen"
+
+extern fn db_live(db rawptr, gen int) -> bool stack 1K c"sq_sqlite_db_live"
+
+extern fn stmt_live(st rawptr, gen int) -> bool stack 1K c"sq_sqlite_stmt_live"
+
 pub fault Truncated -1 "sqlite: column text larger than buffer"
 
 fn check(rc int) -> ! {
@@ -105,12 +118,15 @@ pub fn open(path str) -> DB ! {
 	}
 	var h rawptr
 	rc := sys_open(path, &h)
-	return DB{h: h}, check(rc)
+	return DB{h: h, gen: db_gen(h)}, check(rc)
 }
 
 impl DB {
 	// close closes the connection; nothing may use it afterwards (or be waiting for it).
 	pub fn close(self) -> ! {
+		if not db_live(self.h, self.gen) {
+			return check(misuse)
+		}
 		db_use(self.h)
 		return check(close_db(self.h))
 	}
@@ -118,6 +134,9 @@ impl DB {
 	// exec runs one or more SQL statements that return no rows. Outside a transaction, a statement
 	// that finds the database locked (another worker setting it up) is retried for up to 5 seconds.
 	pub fn exec(self, sql str) -> ! {
+		if not db_live(self.h, self.gen) {
+			return check(misuse)
+		}
 		db_use(self.h)
 		rc := exec(self.h, sql)
 		db_done(self.h)
@@ -127,25 +146,60 @@ impl DB {
 	// prepare compiles a statement for repeated use.
 	pub fn prepare(self, sql str) -> Stmt ! {
 		var h rawptr
+		if not db_live(self.h, self.gen) {
+			return Stmt{}, check(misuse)
+		}
 		db_use(self.h)
 		rc := prepare(self.h, sql, &h)
 		db_done(self.h)
-		return Stmt{h: h, db: self.h}, check(rc)
+		return Stmt{h: h, db: self.h, gen: stmt_gen(h)}, check(rc)
 	}
 
-	pub fn changes(self) -> int            { return changes(self.h) }
-	pub fn last_insert_row_id(self) -> int { return last_insert_row_id(self.h) }
+	pub fn changes(self) -> int {
+		if not db_live(self.h, self.gen) {
+			return 0
+		}
+		return changes(self.h)
+	}
+
+	pub fn last_insert_row_id(self) -> int {
+		if not db_live(self.h, self.gen) {
+			return 0
+		}
+		return last_insert_row_id(self.h)
+	}
 }
 
 impl Stmt {
 	// Bind* use 1-based parameter indexes, like SQLite. Text is copied by SQLite.
-	pub fn bind_int(self, i int, v int) -> !     { return check(bind_int(self.h, i, v)) }
+	pub fn bind_int(self, i int, v int) -> ! {
+		if not self.live() {
+			return check(misuse)
+		}
+		return check(bind_int(self.h, i, v))
+	}
 
-	pub fn bind_text(self, i int, v str) -> ! { return check(bind_text(self.h, i, v)) }
-	pub fn bind_null(self, i int) -> !        { return check(bind_null(self.h, i)) }
+	pub fn bind_text(self, i int, v str) -> ! {
+		if not self.live() {
+			return check(misuse)
+		}
+		return check(bind_text(self.h, i, v))
+	}
+
+	pub fn bind_null(self, i int) -> ! {
+		if not self.live() {
+			return check(misuse)
+		}
+		return check(bind_null(self.h, i))
+	}
+
+	fn live(self) -> bool { return stmt_live(self.h, self.gen) }
 
 	// step advances to the next row; it returns true while a row is available.
 	pub fn step(self) -> bool ! {
+		if not self.live() {
+			return false, check(misuse)
+		}
 		stmt_use(self.h)
 		rc := step(self.h)
 		if rc == row {
@@ -156,13 +210,21 @@ impl Stmt {
 
 	// reset makes the statement ready to run again, clears its bindings and gives back the
 	// connection.
-	pub fn reset(self) -> ! { return check(reset(self.h)) }
+	pub fn reset(self) -> ! {
+		if not self.live() {
+			return check(misuse)
+		}
+		return check(reset(self.h))
+	}
 
 	// exec runs the statement once with args bound to its parameters in order (?1, ?2, ...): it
 	// resets it, binds args, steps it to the end (skipping any rows it returns), reads the Result and
 	// resets it again. The statement holds the connection only during the call, so there is no reset
 	// to defer.
 	pub fn exec(self, args ...Value) -> Result ! {
+		if not self.live() {
+			return Result{}, check(misuse)
+		}
 		self.reset()
 		err := self.run(args)
 		var res Result
@@ -191,18 +253,41 @@ impl Stmt {
 	}
 
 	pub fn finalize(self) -> ! {
+		if not self.live() {
+			return check(misuse)
+		}
 		db_use(self.db)
 		rc := finalize(self.h)
 		db_done(self.db)
 		return check(rc)
 	}
 
-	pub fn column_count(self) -> int       { return column_count(self.h) }
-	pub fn column_type(self, i int) -> int { return column_type(self.h, i) }
-	pub fn column_int(self, i int) -> int  { return column_int(self.h, i) }
+	pub fn column_count(self) -> int {
+		if not self.live() {
+			return 0
+		}
+		return column_count(self.h)
+	}
+
+	pub fn column_type(self, i int) -> int {
+		if not self.live() {
+			return type_null
+		}
+		return column_type(self.h, i)
+	}
+
+	pub fn column_int(self, i int) -> int {
+		if not self.live() {
+			return 0
+		}
+		return column_int(self.h, i)
+	}
 
 	// column_text copies column i (0-based) into buf and returns it as a view of buf.
 	pub fn column_text(self, i int, buf u8[]) -> str ! {
+		if not self.live() {
+			return str(buf[:0]), check(misuse)
+		}
 		n := column_text(self.h, i, buf)
 		if n > cap(buf) {
 			return str(buf[:cap(buf)]), Truncated

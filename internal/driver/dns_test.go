@@ -57,6 +57,9 @@ type fakeAnswer struct {
 	rcode    int      // reply with this code and no records
 	drop     bool     // never reply
 	truncate bool     // over UDP, reply with no records and the TC bit
+	stray    string   // also an A record with this address owned by another name (not an answer)
+	dropAAAA bool     // never answer AAAA queries
+	noEDNS   bool     // answer a query with an EDNS record FORMERR, with no question (old servers)
 }
 
 func startFakeDNS(t *testing.T, answers map[string]fakeAnswer, other int) *fakeDNS {
@@ -156,8 +159,11 @@ func (f *fakeDNS) reply(msg []byte, udp bool) []byte {
 			ans.rcode = f.other
 		}
 	}
-	if ans.drop {
+	if ans.drop || ans.dropAAAA && qtype == 28 {
 		return nil
+	}
+	if ans.noEDNS && binary.BigEndian.Uint16(msg[10:]) > 0 {
+		return []byte{msg[0], msg[1], 0x81, 0x81, 0, 0, 0, 0, 0, 0, 0, 0}
 	}
 	out := []byte{msg[0], msg[1], 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0}
 	out = append(out, question...)
@@ -204,6 +210,13 @@ func (f *fakeDNS) reply(msg []byte, udp bool) []byte {
 		out = append(out, rd...)
 		count++
 	}
+	if ans.stray != "" && qtype == 1 {
+		out = append(out, 8)
+		out = append(out, "unrelate"...)
+		out = append(out, 0, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
+		out = append(out, net.ParseIP(ans.stray).To4()...)
+		count++
+	}
 	binary.BigEndian.PutUint16(out[6:], uint16(count))
 	return out
 }
@@ -227,6 +240,12 @@ func TestLookupIP(t *testing.T) {
 		"empty.example.com.":          {},
 		"slow.example.com.":           {drop: true},
 		"flaky.example.com.":          {a: []string{"10.0.0.4"}},
+		// V35: records owned by other names aren't answers (they were taken as ones)
+		"stray.example.com.":   {stray: "6.6.6.6"},
+		"strayed.example.com.": {cname: "real.example.com.", stray: "6.6.6.6"},
+		// V53: a lost AAAA reply doesn't hold up the A answer; FORMERR to EDNS is asked again
+		"noaaaa.example.com.": {a: []string{"10.0.0.5"}, dropAAAA: true},
+		"old.example.com.":    {a: []string{"10.0.0.6"}, noEDNS: true},
 	}, 0)
 	failing := startFakeDNS(t, nil, 2) // SERVFAIL for every name, so each lookup goes on to good
 	dir := t.TempDir()
@@ -238,7 +257,11 @@ search ns.svc.cluster.local svc.cluster.local cluster.local
 options ndots:5 timeout:1 attempts:1
 `, failing.port, good.port)), 0o644)
 	hosts := filepath.Join(dir, "hosts")
-	os.WriteFile(hosts, []byte("# comment\n10.9.9.9 myhost myhost.local # trailing\n::2 myhost\n"), 0o644)
+	var names20 []string // more names on a line than a fixed list once held
+	for i := 1; i <= 20; i++ {
+		names20 = append(names20, fmt.Sprintf("name%d", i))
+	}
+	os.WriteFile(hosts, []byte("# comment\n10.9.9.9 myhost myhost.local # trailing\n::2 myhost\n10.9.9.8\t"+strings.Join(names20, " ")+"\n"), 0o644)
 	bin := buildSource(t, lookupProg)
 
 	cases := []struct{ name, want string }{
@@ -252,6 +275,11 @@ options ndots:5 timeout:1 attempts:1
 		{"empty.example.com", "empty.example.com: error no such host"},
 		{"missing.example.com", "missing.example.com: error no such host"},
 		{"flaky.example.com", "flaky.example.com: 10.0.0.4"},
+		{"stray.example.com", "stray.example.com: error no such host"},
+		{"strayed.example.com", "strayed.example.com: 10.0.0.3"},
+		{"noaaaa.example.com", "noaaaa.example.com: 10.0.0.5"},
+		{"old.example.com", "old.example.com: 10.0.0.6"},
+		{"name20", "name20: 10.9.9.8"},
 		{"MyHost", "MyHost: 10.9.9.9 ::2"},
 		{"myhost.local.", "myhost.local.: 10.9.9.9"},
 		{"localhost", "localhost: 127.0.0.1 ::1"},
@@ -279,6 +307,15 @@ options ndots:5 timeout:1 attempts:1
 		if lines[i] != c.want {
 			t.Errorf("got  %q\nwant %q", lines[i], c.want)
 		}
+	}
+
+	// a lost AAAA reply: the A answer comes back about 100ms later, not after the 1s timeout
+	began := time.Now()
+	if out, _, _ := runFor(t, 10*time.Second, bin, conf, hosts, "noaaaa.example.com."); !strings.Contains(out, "10.0.0.5") {
+		t.Errorf("noaaaa: %q", out)
+	}
+	if took := time.Since(began); took > 800*time.Millisecond {
+		t.Errorf("a lookup whose AAAA reply was lost took %v, want well under the 1s timeout", took)
 	}
 
 	// the order names were tried in: ndots 5, so search domains before the name alone; a rooted

@@ -34,7 +34,12 @@ type cdef struct {
 
 type gen struct {
 	unwinds bool // the function registers an unwind frame: it has deferred calls and the program an isolate task
-	prog *Program
+	prog    *Program
+	// the function has deferred calls and a with deadline block (deadlineReset)
+	deadlineDefers bool
+	// the saved try_jb of each enclosing `v, ok := x in a` being generated (cgen_stmt.go), for a
+	// ! return out of x to restore
+	trySaved []string
 
 	usesLookup bool // a SIMD Lookup: sq_rt.h then includes arm_neon.h, which takes a while to parse
 
@@ -769,6 +774,10 @@ func cString(s string) string {
 			b.WriteString("\\t")
 		case c == '?':
 			b.WriteString("\\?") // avoid trigraphs
+		case c == '_' && i > 0 && s[i-1] == '_':
+			// "__" never appears in a literal's C text, so `x in a` can mark x's allocation sites
+			// by rewriting "__FILE__, __LINE__" (cgen_stmt.go) without touching a literal
+			b.WriteString("\\137")
 		case c >= 0x20 && c < 0x7f:
 			b.WriteByte(c)
 		default:
@@ -862,6 +871,12 @@ func (g *gen) function(f *Func) string {
 	g.fnPreempt, g.usesPreempt = g.preemptFns[f], false
 	g.unwinds = g.prog.HasIsolate && len(f.Defers) > 0
 	g.topDecls = nil
+	// a return from inside a with deadline block runs the deferred calls before the block's
+	// cleanup: they get the deadline the function was called with back first
+	g.deadlineDefers = len(f.Defers) > 0 && hasDeadlineStmt(f.Decl.Body)
+	if g.deadlineDefers {
+		g.topDecls = append(g.topDecls, "int64_t _dl_entry = sq_deadline_get();")
+	}
 	var body strings.Builder
 	g.out = &body
 	g.ind = 1
@@ -938,10 +953,33 @@ func (g *gen) runDefers() {
 	if p := g.unwindPop(); p != "" {
 		g.line("%s", strings.TrimSpace(p))
 	}
+	if p := g.deadlineReset(); p != "" {
+		g.line("%s", strings.TrimSpace(p))
+	}
 	for i := len(g.fn.Defers) - 1; i >= 0; i-- {
 		d := g.fn.Defers[i]
 		g.line("if (_d%d_on) { %s; }", d.ID, g.deferCall(d))
 	}
+}
+
+// deadlineReset puts back the deadline the function was called with, before deferred calls run
+// on a return (see deadlineDefers).
+func (g *gen) deadlineReset() string {
+	if g.deadlineDefers {
+		return "sq_deadline_restore(&_dl_entry); "
+	}
+	return ""
+}
+
+func hasDeadlineStmt(body *BlockStmt) bool {
+	found := false
+	walkStmt(body, func(n Node) bool {
+		if _, ok := n.(*DeadlineStmt); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // initFunction generates package-level variable initialization, in package order.

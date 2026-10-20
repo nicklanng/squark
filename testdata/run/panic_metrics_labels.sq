@@ -1,0 +1,13 @@
+program
+
+// Labels too long for the registry are refused: they were once cut mid-label, which made the
+// whole /metrics page invalid.
+use metrics
+
+fn main() {
+	g := metrics.gauge("app_ok", `a="b"`, "Fits.")
+	g.set(1)
+	println("registered")
+	metrics.counter("app_requests_total", `route="/api/v1/orders/{id}/items",method="GET",status="20",region="eu-west-1",zone="b"`, "Too long.")
+	println("not reached")
+}

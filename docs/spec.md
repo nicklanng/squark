@@ -70,8 +70,8 @@ What the rest of this document builds on:
 ## 1. Lexical elements
 
 - **Keywords:** `and`, `arena`, `break`, `case`, `chan`, `const`, `continue`, `default`, `defer`,
-  `else`, `enum`, `extern`, `fault`, `fn`, `for`, `if`, `in`, `not`, `or`, `pub`, `return`,
-  `struct`, `switch`, `task`, `var`, `while`.
+  `else`, `enum`, `extern`, `fault`, `fn`, `for`, `if`, `impl`, `in`, `not`, `or`, `pub`,
+  `return`, `struct`, `switch`, `task`, `var`, `while`.
 - **Contextual words** (identifiers elsewhere):
   - `program`, `module` and `use` at the start of a file; `as` in a `use`.
   - `thread` and `shared` before a package-level variable.
@@ -912,9 +912,9 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 - `threads N` (1 to 1024, or `auto` for one per CPU, below) runs N scheduler threads (shards) in
   one process. The directive says the program is written for threads; without it a program runs one
   thread. `threads auto` is the usual choice: one thread per CPU, and `SQUARK_THREADS=N` in the
-  environment overrides the count at run time. `SQUARK_THREADS` also
-  overrides `threads N`, except that with a `budget` it can't go above N, the count the budget
-  was proven for. It has no effect on programs without the directive. Each shard runs `main`
+  environment overrides the count at run time. `SQUARK_THREADS` can also
+  lower `threads N`, but not raise it: the memory worst case (the budget, the start-up check,
+  `-manifest`, the metrics) was computed for N. It has no effect on programs without the directive. Each shard runs `main`
   with its own `thread` variables (§4), task pools, timers and poller; tasks never move
   between shards, so rule 10 holds within each and nothing needs locks. Faults are shared (they're
   read-only). Listening on an address from every shard works: on Linux each shard gets its own

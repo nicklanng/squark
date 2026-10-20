@@ -87,6 +87,9 @@ impl Backoff {
 		if self.p.fixed or ceiling <= 0 {
 			return ceiling
 		}
+		if int(ceiling) == 1<<63 - 1 { // [0, ceiling] has one value more than int holds
+			return time.Duration(rand.intn(int(ceiling)))
+		}
 		return time.Duration(rand.intn(int(ceiling) + 1))
 	}
 

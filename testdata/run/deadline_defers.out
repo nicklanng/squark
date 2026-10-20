@@ -1,0 +1,5 @@
+return deferred call sees a deadline: false
+! return deferred call sees a deadline: false
+return deferred call sees a deadline: true
+after the block deferred call sees a deadline: false
+isolate unwind deferred call sees a deadline: false

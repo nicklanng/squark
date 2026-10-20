@@ -2,6 +2,7 @@ package driver
 
 import (
 	"encoding/json"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -87,3 +88,52 @@ fn main() {
 		t.Errorf("log.err: %v", recs[3])
 	}
 }
+
+// TestLogEscapedKey (V54): a key that needs escaping (control bytes, invalid UTF-8) with a value
+// that fills the line gives a valid, truncated line; the budget once counted the key's raw length
+// and the escaped key overflowed the line ("vector is full").
+func TestLogEscapedKey(t *testing.T) {
+	bin := buildSource(t, logEscapedKey)
+	out, err := exec.Command(bin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(lines) != 3 || lines[2] != "ok" {
+		t.Fatalf("output %q", out)
+	}
+	for _, l := range lines[:2] {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil || m["truncated"] != true {
+			t.Errorf("%v: %.80s...", err, l)
+		}
+	}
+}
+
+const logEscapedKey = `program
+
+use log
+
+thread big u8[2000]
+
+fn main() {
+	for i in 0..len(big) {
+		big[i] = 'v'
+	}
+	var ctl u8[20]
+	for i in 0..len(ctl) {
+		ctl[i] = 1
+	}
+	e := log.info("m")
+	e.str(str(ctl[:]), str(big[:]))
+	e.send()
+	var bad u8[20]
+	for i in 0..len(bad) {
+		bad[i] = 0xff
+	}
+	e2 := log.info("m")
+	e2.str(str(bad[:]), str(big[:]))
+	e2.send()
+	println("ok")
+}
+`

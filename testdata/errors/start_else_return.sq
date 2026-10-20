@@ -1,0 +1,20 @@
+program
+
+// A break in a start's else block leaves the loop, so the function can end without a return
+// (the check once missed it, and the C function fell off its end).
+task t() pool 1 {
+	loop {
+	}
+}
+
+fn g() -> int {
+	loop {
+		start t() else {
+			break
+		}
+	}
+} // ERROR "missing return"
+
+fn main() {
+	println(g())
+}

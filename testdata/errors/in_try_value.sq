@@ -1,0 +1,15 @@
+program
+
+// v, ok := x in a: x must have a value, and an untyped constant takes its default type (a void
+// call once reached the C compiler, and v of 5 in a stayed untyped).
+fn f(a arena) {}
+
+fn main() {
+	with arena a 64 {
+		v, ok := f(a) in a // ERROR "f(a) in a (no value) used as value"
+		w, ok2 := 1 << 70 in a // ERROR "overflows int"
+		n, ok3 := 5 in a
+		var m int = n
+		println(v, ok, w, ok2, m, ok3)
+	}
+}

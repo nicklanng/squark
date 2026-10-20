@@ -1,0 +1,4 @@
+program
+
+// main is a function with a body: an extern main once reached the C compiler.
+extern fn main() stack 1K // ERROR "main must be a function with a body"

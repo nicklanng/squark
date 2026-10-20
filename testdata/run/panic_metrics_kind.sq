@@ -1,0 +1,12 @@
+program
+
+// One name is one family with one type: a gauge under a counter's name (with other labels) is
+// refused; it once printed the gauge under # TYPE ... counter.
+use metrics
+
+fn main() {
+	metrics.counter("app_jobs", `state="done"`, "Jobs.")
+	println("registered")
+	metrics.gauge("app_jobs", `state="queued"`, "Jobs.")
+	println("not reached")
+}

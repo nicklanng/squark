@@ -97,35 +97,54 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
-// TestHandlerGuards checks that only localhost requests with the tour's header run code.
+// TestHandlerGuards checks that only requests from this machine, to localhost, with the tour's
+// key run code. The Host header is the client's to choose: a remote client sending
+// "Host: localhost" once ran code.
 func TestHandlerGuards(t *testing.T) {
-	h := site(t).Handler()
+	h := site(t).Handler("k3y")
 	for _, tc := range []struct {
-		host   string
-		header bool
-		want   int
+		host, peer, key string
+		want            int
 	}{
-		{"evil.example:3999", true, http.StatusForbidden},
-		{"127.0.0.1:3999", false, http.StatusForbidden},
-		{"localhost:3999", true, http.StatusOK},
-		{"[::1]:3999", true, http.StatusOK},
+		{"evil.example:3999", "127.0.0.1:5555", "k3y", http.StatusForbidden},
+		{"localhost:3999", "203.0.113.7:51234", "k3y", http.StatusForbidden},
+		{"127.0.0.1:3999", "127.0.0.1:5555", "", http.StatusForbidden},
+		{"127.0.0.1:3999", "127.0.0.1:5555", "1", http.StatusForbidden},
+		{"localhost:3999", "127.0.0.1:5555", "k3y", http.StatusOK},
+		{"[::1]:3999", "[::1]:5555", "k3y", http.StatusOK},
 	} {
 		req := httptest.NewRequest("POST", "/api/check", strings.NewReader(`{"code":"program\nfn main() {}\n"}`))
-		req.Host = tc.host
-		if tc.header {
-			req.Header.Set("X-Squark-Tour", "1")
+		req.Host, req.RemoteAddr = tc.host, tc.peer
+		if tc.key != "" {
+			req.Header.Set("X-Squark-Tour", tc.key)
 		}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		if w.Code != tc.want {
-			t.Errorf("host %s, header %v: status %d, want %d: %s", tc.host, tc.header, w.Code, tc.want, w.Body)
+			t.Errorf("host %s, peer %s, key %q: status %d, want %d: %s", tc.host, tc.peer, tc.key, w.Code, tc.want, w.Body)
 		}
 	}
 	req := httptest.NewRequest("GET", "/lessons.json", nil)
-	req.Host = "localhost:3999"
+	req.Host, req.RemoteAddr = "localhost:3999", "127.0.0.1:5555"
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"live":true`) {
 		t.Errorf("lessons.json: %d %.200s", w.Code, w.Body)
+	}
+}
+
+// TestRunLimits (V68): the tour doesn't run a program whose worst case is over 1 GiB (it builds
+// it and says so); it once ran anything, workers 1024 or a terabyte arena included.
+func TestRunLimits(t *testing.T) {
+	r, err := Run(context.Background(), "program {\n\tworkers 1024\n}\n\narena big 64M\n\nfn main() { println(big.cap()) }\n", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Stage != "built" || !strings.Contains(r.Output, "at most 1 GiB") {
+		t.Errorf("stage %q, output %q", r.Stage, r.Output)
+	}
+	r, err = Run(context.Background(), "program\n\nfn main() { println(\"small\") }\n", "")
+	if err != nil || r.Stage != "run" || r.Output != "small\n" {
+		t.Errorf("%v: stage %q, output %q", err, r.Stage, r.Output)
 	}
 }

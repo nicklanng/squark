@@ -1,0 +1,41 @@
+program
+
+// metrics.write_text escapes a HELP text's newlines and backslashes (a raw newline once broke the
+// page), and cuts a long task name to fit its label (it once panicked on every scrape).
+use metrics, strings
+
+thread done int chan[1]
+
+struct Page {
+	b u8[..16384]
+}
+
+impl Page {
+	fn write(&self, p u8[]) -> int ! {
+		for c in p {
+			self.b.push(c)
+		}
+		return len(p), nil
+	}
+}
+
+task a_task_with_a_name_long_enough_that_its_label_once_overflowed_the_ninety_six_byte_buffer() pool 1 {
+	done <- 1
+}
+
+fn main() {
+	c := metrics.counter("app_requests_total", `route="/a"`, "Requests.\nSecond line, with a \\ backslash.")
+	c.add(1)
+	start a_task_with_a_name_long_enough_that_its_label_once_overflowed_the_ninety_six_byte_buffer()
+	<-done
+	var page Page
+	metrics.write_text(&page)
+	text := str(page.b[:])
+	while len(text) > 0 {
+		line, rest, _ := strings.cut(text, "\n")
+		text = rest
+		if strings.has_prefix(line, "# HELP app_") or strings.has_prefix(line, "app_") or strings.contains(line, "squark_pool_started_total{task=\"main.a_task") {
+			println(line)
+		}
+	}
+}

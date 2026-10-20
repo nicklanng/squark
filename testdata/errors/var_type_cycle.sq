@@ -1,0 +1,11 @@
+program
+
+// A package variable whose type mentions the variable: resolving it once recursed until the Go
+// stack overflowed.
+thread m int[int; m] // ERROR "m's type refers to m"
+thread a int[len(a)] // ERROR "a's type refers to a"
+thread v int[..v] // ERROR "v's type refers to v"
+thread b int[len(d)]
+thread d int[len(b)] // ERROR "d's type refers to d"
+
+fn main() {}

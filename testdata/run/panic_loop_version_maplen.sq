@@ -1,0 +1,31 @@
+program
+
+// len of a map field isn't a fixed loop bound: the body adds a key each iteration, so xs[4] must
+// panic (the unchecked copy once read past xs).
+struct S { m int[int] }
+
+thread storage int[int; 64]
+thread data int[4] = int[4]{1, 2, 3, 4}
+thread after int[4] = int[4]{100, 200, 300, 400}
+
+fn f(p *S, xs int[]) -> int {
+	s := 0
+	for i := 0; i < len(p.m); i++ {
+		p.m[1000 + i] = 1
+		s += xs[i]
+		if i == 5 {
+			break
+		}
+	}
+	return s
+}
+
+fn main() {
+	for k in 0..4 {
+		storage[k] = k
+	}
+	var st S
+	st.m = storage
+	println("start")
+	println(f(&st, data[:]))
+}

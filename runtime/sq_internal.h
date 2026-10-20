@@ -36,6 +36,7 @@ struct sq_g {
 	void *try_jb;       // the jmp_buf of the `v, ok := x in a` being evaluated, or NULL
 	struct sq_unwind *unwind; // the innermost unwind frame (isolate tasks; see sq_rt.h)
 	bool unwinding;           // a panic is unwinding this task
+	bool through_stop;        // a graceful stop's I/O cap doesn't apply (runtime.through_stop)
 	struct sq_gmutex *held[8]; // task locks it holds, released if it ends unwinding
 	int nheld;
 	// netpoll

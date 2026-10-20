@@ -1,0 +1,43 @@
+program
+
+// len(f()) of an array-returning call is constant, but a loop bound or index offset written with it
+// evaluates the call each time: loop versioning once called f again before the loop.
+thread calls int
+
+fn f() -> int[4] {
+	calls++
+	return int[4]{}
+}
+
+fn g(ys int[]) -> int {
+	s := 0
+	for i := 0; i < len(f()); i++ {
+		s += ys[i]
+	}
+	return s
+}
+
+fn h(ys int[]) -> int {
+	s := 0
+	for i := 0; i < 2; i++ {
+		s += ys[i + len(f())]
+	}
+	return s
+}
+
+fn none(ys int[], n int) -> int {
+	s := 0
+	for i := 0; i < n; i++ {
+		s += ys[i + len(f())]
+	}
+	return s
+}
+
+fn main() {
+	ys := int[]{1, 2, 3, 4, 5, 6, 7, 8}
+	println(g(ys), calls)
+	calls = 0
+	println(h(ys), calls)
+	calls = 0
+	println(none(ys, 0), calls)
+}

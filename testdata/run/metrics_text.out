@@ -1,0 +1,3 @@
+# HELP app_requests_total Requests.\nSecond line, with a \\ backslash.
+app_requests_total{route="/a"} 1
+squark_pool_started_total{task="main.a_task_with_a_name_long_enough_that_its_label_once_overflowed_the_ninety_six_byte_b"} 1

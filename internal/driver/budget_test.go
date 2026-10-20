@@ -59,3 +59,22 @@ func TestCountedMemory(t *testing.T) {
 		t.Errorf("connections %d, sockbuf %d", res.Memory.Conns, res.Memory.SockBuf)
 	}
 }
+
+// TestWorstCountsThreads (V40): each scheduler thread's own stack and signal stack count once per
+// thread and the watchdog's once per process; workers auto with threads auto says what the figure
+// is per (it said "per core", though there are cores × cores threads).
+func TestWorstCountsThreads(t *testing.T) {
+	m := &MemoryReport{Code: 100, Workers: 2, Threads: 3, Static: 10, ThreadStack: 1000, Watchdog: 50000}
+	if w, want := m.Worst(), int64(100+2*3*(10+1000)+2*50000); w != want {
+		t.Errorf("Worst() = %d, want %d", w, want)
+	}
+	for _, s := range []string{"scheduler", "watchdog"} {
+		if !strings.Contains(FormatMemory(m), s) {
+			t.Errorf("report lacks %q:\n%s", s, FormatMemory(m))
+		}
+	}
+	auto := &MemoryReport{Code: 100, Static: 10}
+	if r := FormatMemory(auto); !strings.Contains(r, "per thread") || !strings.Contains(r, "cores × cores") {
+		t.Errorf("workers auto, threads auto:\n%s", r)
+	}
+}

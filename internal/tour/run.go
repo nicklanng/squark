@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,8 +67,13 @@ const (
 	maxOutput  = 256 << 10
 )
 
-// builds limits how many compiles run at once: clang is the expensive part.
-var builds = make(chan struct{}, 2)
+// builds limits how many compiles run at once: clang is the expensive part; runs, how many
+// programs run at once.
+var builds, runs = make(chan struct{}, 2), make(chan struct{}, 4)
+
+// maxWorst is the largest proven worst case the tour runs: a program's memory is bounded by it
+// (workers 1024, or a 1T arena, would not be).
+const maxWorst = 1 << 30
 
 // Check type-checks and lifetime-checks code without compiling it to C, which takes
 // milliseconds: the tour checks as you type.
@@ -112,8 +118,26 @@ func Run(ctx context.Context, code, mode string) (*Result, error) {
 	if mode == "build" {
 		return r, nil
 	}
+	// the worst case on this machine: workers auto and threads auto are one per core
+	w := float64(res.Memory.Worst())
+	if res.Memory.Workers == 0 {
+		w *= float64(runtime.NumCPU())
+	}
+	if res.Memory.Threads == 0 {
+		w *= float64(runtime.NumCPU())
+	}
+	if w > maxWorst {
+		r.Output += "the tour runs programs whose worst case is at most 1 GiB here; build this one with squark build\n"
+		return r, nil
+	}
+	select {
+	case runs <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	r.Stage = "run"
 	runProgram(ctx, bin, dir, r)
+	<-runs
 	r.Output = strings.ReplaceAll(r.Output, dir+string(filepath.Separator), "") // panics name the file
 	return r, nil
 }

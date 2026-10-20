@@ -39,7 +39,7 @@ extern fn sys_close(fd int) -> int stack 8K c"sq_close"
 
 extern fn wait_idle(fd int, grace_ns int) -> int stack 8K c"sq_wait_idle"
 
-extern fn park_idle(fd int, tag int) stack 8K c"sq_park_idle"
+extern fn park_idle(fd int, tag int, timeout_ns int) stack 8K c"sq_park_idle"
 
 extern fn sys_next_idle() -> int stack 8K c"sq_next_idle"
 
@@ -299,9 +299,10 @@ impl Conn {
 	// park_idle hands c to the runtime's idle set with a tag (0..255) that next_idle returns with it,
 	// e.g. to say which server it belongs to. No task waits for it: when it becomes readable it is
 	// returned by next_idle. The calling task's stack is returned to the OS when it exits, so an
-	// idle connection costs no memory beyond the kernel's socket.
-	pub fn park_idle(self, tag int) {
-		park_idle(self.sysfd, tag)
+	// idle connection costs no memory beyond the kernel's socket. If it stays idle for timeout
+	// (> 0; checked about once a second), the runtime closes it.
+	pub fn park_idle(self, tag int, timeout time.Duration) {
+		park_idle(self.sysfd, tag, int(timeout))
 	}
 
 	// close_write shuts down the sending side: the peer reads EOF once it has read everything sent,

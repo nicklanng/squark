@@ -42,9 +42,10 @@ thread routes Route[..max_routes]
 // Request.path_value or path_int.
 //
 // When several patterns match, the most specific wins: literal segments before wildcards, an
-// exact path before a subtree, a longer subtree before a shorter, and a method before none. A path
-// that matches only patterns for other methods gets 405 method Not Allowed with an Allow header;
-// one that matches none gets 404 Not Found. Registering a malformed or duplicate pattern, or more
+// exact path before a subtree, a longer subtree before a shorter, the request's own method before
+// GET for a HEAD, and a method before none. A path that matches only patterns for other methods
+// gets 405 method Not Allowed with an Allow header; one that matches none gets 404 Not Found. A
+// path with a . or .. segment (raw or %2e) gets 400 Bad Request, so {name...} never holds one. Registering a malformed or duplicate pattern, or more
 // than max_routes, panics.
 pub fn handle_func(pattern str, h HandlerFunc) {
 	var rt Route
@@ -175,7 +176,7 @@ impl Route {
 		if len(path) == 0 or path[0] != '/' {
 			return false
 		}
-		r.nparams = 0
+		r.nparams, r.decoded = 0, 0
 		p := path[1:]
 		slash := self.nsegs == 0 // whether the last segment matched was followed by "/" ("/" counts)
 		for i in 0..self.nsegs {
@@ -231,8 +232,8 @@ fn seg_equal(raw, lit str) -> bool {
 	return j == len(lit)
 }
 
-// more_specific reports whether a should win over b when both match a request.
-fn more_specific(a, b *Route) -> bool {
+// more_specific reports whether a should win over b when both match a request with method.
+fn more_specific(a, b *Route, method str) -> bool {
 	n := min(a.nsegs, b.nsegs)
 	for i in 0..n {
 		al, bl := a.segs[i].param == "", b.segs[i].param == ""
@@ -251,7 +252,23 @@ fn more_specific(a, b *Route) -> bool {
 	if (a.rest != "") != (b.rest != "") {
 		return a.rest != "" // {rest...} names its tail; equal otherwise
 	}
+	if (a.method == method) != (b.method == method) {
+		return a.method == method // HEAD /x before GET /x for a HEAD
+	}
 	return a.method != "" and b.method == ""
+}
+
+// has_dot_segment reports whether path has a "." or ".." segment, raw or escaped (%2e): the mux
+// answers 400 rather than pass one to a {name...} wildcard, where it could climb out of a directory.
+fn has_dot_segment(path str) -> bool {
+	while len(path) > 0 {
+		seg, rest, _ := strings.cut(path, "/")
+		if seg_equal(seg, ".") or seg_equal(seg, "..") {
+			return true
+		}
+		path = rest
+	}
+	return false
 }
 
 impl Request {
@@ -267,7 +284,12 @@ impl Request {
 	pub fn path_value(&self, name str) -> str in self {
 		for i in 0..self.nparams {
 			if self.params[i].name == name {
-				return unescape(self.params[i].value, false, self.arena)
+				// decoded once: calling it again takes no more of the request's arena
+				if self.decoded & (1 << i) == 0 {
+					self.params[i].value = unescape(self.params[i].value, false, self.arena)
+					self.decoded |= 1 << i
+				}
+				return self.params[i].value
 			}
 		}
 		return ""
@@ -299,6 +321,10 @@ fn method_matches(pattern, method str) -> bool {
 
 // serve_mux dispatches to the patterns handle_func registered (listen_and_serve(addr, nil)).
 fn serve_mux(w *ResponseWriter, r *Request) {
+	if has_dot_segment(r.path) {
+		send_error(w, 400)
+		return
+	}
 	best := -1
 	var allow str[..max_routes]
 	for i in 0..len(routes) {
@@ -310,7 +336,7 @@ fn serve_mux(w *ResponseWriter, r *Request) {
 			allow.try_push(rt.method)
 			continue
 		}
-		if best < 0 or more_specific(rt, &routes[best]) {
+		if best < 0 or more_specific(rt, &routes[best], r.method) {
 			best = i
 		}
 	}
@@ -353,17 +379,20 @@ fn atoi_strict(s str) -> (int, bool) {
 // returned when there is nothing to decode. A % not followed by two hex digits is kept as it is.
 fn unescape(s str, plus bool, a arena) -> str in s, a {
 	need := false
+	n := len(s) // the decoded length: each %XX is one byte
 	for i in 0..len(s) {
-		if s[i] == '%' or plus and s[i] == '+' {
+		if s[i] == '%' and i+2 < len(s) and is_hex(s[i+1]) and is_hex(s[i+2]) {
 			need = true
-			break
+			n -= 2
+		} else if plus and s[i] == '+' {
+			need = true
 		}
 	}
 	if not need {
 		return s
 	}
-	b := make(u8[], len(s)) in a
-	n := 0
+	b := make(u8[], n) in a
+	k := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
@@ -373,10 +402,10 @@ fn unescape(s str, plus bool, a arena) -> str in s, a {
 		case c == '+' and plus:
 			c = ' '
 		}
-		b[n] = c
-		n++
+		b[k] = c
+		k++
 	}
-	return str(b[:n])
+	return str(b[:k])
 }
 
 fn is_hex(c u8) -> bool { return c >= '0' and c <= '9' or c >= 'a' and c <= 'f' or c >= 'A' and c <= 'F' }

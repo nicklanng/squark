@@ -246,10 +246,13 @@ function setStatus(text, cls) {
   s.className = "check-status " + cls;
 }
 
+// squark tour opens the page with ?k=KEY; the server runs code only for requests that carry it
+const tourKey = new URLSearchParams(location.search).get("k") || "";
+
 async function api(path, body, signal) {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Squark-Tour": "1" },
+    headers: { "Content-Type": "application/json", "X-Squark-Tour": tourKey },
     body: JSON.stringify(body),
     signal,
   });

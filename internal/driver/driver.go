@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,13 +63,13 @@ func cpuFlags(cpu, goarch string) ([]string, error) {
 	case cpu == "" || cpu == "baseline":
 		return nil, nil
 	case cpu == "native" && goarch == "arm64":
-		return []string{"-mcpu=native"}, nil
+		return []string{"-mcpu=native", "-DSQ_CPU=\"native\""}, nil
 	case cpu == "native" && goarch == "amd64":
 		return []string{"-march=native", "-DSQ_CPU=\"native\""}, nil
 	case goarch == "amd64" && (cpu == "x86-64-v2" || cpu == "x86-64-v3" || cpu == "x86-64-v4"):
 		return []string{"-march=" + cpu, "-DSQ_CPU=\"" + cpu + "\""}, nil
 	case goarch == "arm64" && armLevel.MatchString(cpu):
-		return []string{"-march=" + cpu}, nil
+		return []string{"-march=" + cpu, "-DSQ_CPU=\"" + cpu + "\""}, nil
 	}
 	levels := "x86-64-v2, x86-64-v3, x86-64-v4"
 	if goarch == "arm64" {
@@ -109,6 +110,9 @@ type MemoryReport struct {
 	// helper threads for blocking externs, per scheduler thread, and each one's stack
 	Helpers     int64
 	HelperStack int64
+	// ThreadStack is what each scheduler thread's own stack (the scheduler, the poller) and its
+	// signal stack may use; Watchdog is the watchdog thread's stack, once per process
+	ThreadStack, Watchdog int64
 	// sockets: connections N sockets, each with SO_RCVBUF and SO_SNDBUF of sockbuf N (0, 0: not
 	// declared, so not counted); UsesNet says whether the program has sockets at all
 	SockBuf, Conns int64
@@ -161,13 +165,13 @@ func helperStackReserved(need int64) int64 {
 func (m *MemoryReport) Known() bool { return m.Workers > 0 && m.Threads > 0 && m.Code > 0 }
 
 func (m *MemoryReport) Worst() int64 {
-	per := satAdd(m.Static, satMul(m.Helpers, m.HelperStack))
+	per := satAdd(satAdd(m.Static, satMul(m.Helpers, m.HelperStack)), m.ThreadStack)
 	for _, p := range m.Pools {
 		per = satAdd(per, satMul(int64(p.Count), p.Touchable))
 	}
 	total := satAdd(m.Code, satMul(satMul(max(m.Workers, 1), max(m.Threads, 1)), per))
 	// sockets and C heaps are per process: the limits apply to each worker
-	proc := m.Sockets()
+	proc := satAdd(m.Sockets(), m.Watchdog)
 	for _, h := range m.Heaps {
 		proc = satAdd(proc, h)
 	}
@@ -190,7 +194,17 @@ func satMul(a, b int64) int64 {
 	return a * b
 }
 
-var heapSymbols = []string{"malloc", "calloc", "realloc", "free", "posix_memalign", "aligned_alloc", "valloc", "strdup", "strndup", "asprintf", "vasprintf"}
+// heapSymbols are the libc functions that allocate on the heap (or return memory that must be
+// freed): no C package may reference one. The fortified and internal glibc names are here too.
+var heapSymbols = []string{
+	"malloc", "calloc", "realloc", "reallocf", "reallocarray", "free", "posix_memalign", "aligned_alloc", "valloc", "pvalloc", "memalign",
+	"malloc_zone_malloc", "malloc_zone_calloc", "malloc_zone_realloc", "malloc_zone_valloc", "malloc_zone_memalign",
+	"__libc_malloc", "__libc_calloc", "__libc_realloc", "__libc_memalign",
+	"strdup", "strndup", "__strdup", "__strndup", "wcsdup", "asprintf", "vasprintf", "__asprintf_chk", "__vasprintf_chk",
+	"fopen", "fdopen", "freopen", "popen", "fmemopen", "open_memstream", "open_wmemstream", "tmpfile", "tempnam",
+	"opendir", "fdopendir", "scandir", "glob", "realpath", "getline", "getdelim", "__getdelim",
+	"setenv", "putenv", "getaddrinfo", "regcomp",
+}
 
 func Build(opt Options) (*Result, error) {
 	if opt.Static && runtime.GOOS != "linux" {
@@ -320,6 +334,17 @@ func Build(opt Options) (*Result, error) {
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
+			if src == "prog.c" {
+				// an extern the program declares with other types than the C library's own
+				// prototype: the program's mistake, at its declaration
+				if m := conflictingTypes.FindStringSubmatch(stderr.String()); m != nil {
+					for _, f := range prog.Funcs {
+						if f.Extern == m[1] && f.Decl != nil {
+							return fmt.Errorf("%s: extern %s conflicts with the C library's declaration of %s: declare it with the parameter and result types of that prototype (below)\n%s", f.Decl.P, f.Name, m[1], stderr.String())
+						}
+					}
+				}
+			}
 			return fmt.Errorf("C compiler failed on %s (%s): %v\n%s", src, blame, err, stderr.String())
 		}
 		if opt.Remarks != nil && src == "prog.c" {
@@ -336,6 +361,36 @@ func Build(opt Options) (*Result, error) {
 	}
 	objs := []string{"prog.o"}
 	checked := []string{"prog.o"}
+	if len(cpu) > 0 {
+		// built for a newer CPU than the baseline: a constructor compiled for the baseline catches
+		// the illegal instruction (which can come before main's own code runs) and says why
+		label := strings.TrimSuffix(strings.TrimPrefix(cpu[len(cpu)-1], `-DSQ_CPU="`), `"`)
+		src := fmt.Sprintf(`#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+static void sq_on_sigill(int sig) {
+	(void)sig;
+	static const char m[] = "fatal error: illegal instruction: this program was built for %s CPUs (squark build -cpu %s), and this CPU lacks an instruction it uses\n";
+	if (write(2, m, sizeof m - 1)) {}
+	_exit(2);
+}
+__attribute__((constructor)) static void sq_cpu_check(void) {
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = sq_on_sigill;
+	sigaction(SIGILL, &sa, 0);
+}
+`, label, label)
+		if err := os.WriteFile(filepath.Join(work, "cpucheck.c"), []byte(src), 0o644); err != nil {
+			return nil, err
+		}
+		cmd := ccCommand(opt.OptFlag, "-w", "-c", "cpucheck.c", "-o", "cpucheck.o")
+		cmd.Dir = work
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("C compiler failed on cpucheck.c (%s): %v\n%s", squarkBug, err, out)
+		}
+		objs = append(objs, "cpucheck.o")
+	}
 	// each package's C files (and headers) go in their own directory, under their own names
 	for i, p := range prog.Packages {
 		if len(p.CFiles) == 0 {
@@ -480,11 +535,9 @@ func Build(opt Options) (*Result, error) {
 	fmt.Fprintf(&pools, "const int64_t sq_workers = %d;\n", prog.Workers)
 	fmt.Fprintf(&pools, "const int64_t sq_threads = %d;\n", prog.Threads)
 	// SQUARK_THREADS overrides the count, but only in programs written for threads (a threads
-	// directive), and never above a count the memory budget was proven for
-	threadsMax := int64(0)
-	if prog.Budget > 0 {
-		threadsMax = prog.Threads
-	}
+	// directive), and never above threads N: the worst case (the budget, the start-up check, the
+	// manifest, the metrics) was computed for N. threads auto (0) is counted per core.
+	threadsMax := prog.Threads
 	fmt.Fprintf(&pools, "const bool sq_threads_env = %t;\nconst int64_t sq_threads_max = %d;\n", prog.ThreadsSet, threadsMax)
 	fmt.Fprintf(&pools, "sq_g *sq_timer_heap[%d];\n", total)
 	fmt.Fprintf(&pools, "const int64_t sq_helpers_per_thread = %d;\nconst int64_t sq_helper_stack = %d;\n", helpers, helperStack)
@@ -516,6 +569,7 @@ func Build(opt Options) (*Result, error) {
 			return nil, err
 		}
 		for _, s := range syms {
+			s, _, _ := strings.Cut(s, "$") // macOS variants: _realpath$DARWIN_EXTSN
 			for _, h := range heapSymbols {
 				if s == h || s == "_"+h {
 					return nil, fmt.Errorf("heap check failed: %s references %s", o, h)
@@ -600,7 +654,21 @@ func Build(opt Options) (*Result, error) {
 	}
 	for _, p := range prog.Packages {
 		mem.CLibs = append(mem.CLibs, p.Links...)
+		for _, f := range p.LDFlags { // ldflags "-lfoo": a library too, its memory not counted
+			if lib, ok := strings.CutPrefix(f, "-l"); ok && lib != "" && !slices.Contains(mem.CLibs, lib) {
+				mem.CLibs = append(mem.CLibs, lib)
+			}
+		}
 	}
+	// the scheduler's own frames (and libc's under them), and the signal stack (SQ_SIGSTACK_SIZE)
+	var sched int64
+	for name, sz := range rtFrames {
+		if schedulerOnly[name] {
+			sched += sz
+		}
+	}
+	mem.ThreadStack = (sched+3*rtMax+16<<10+page-1)/page*page + 32<<10
+	mem.Watchdog = 64 << 10 // start_watchdog's pthread stack
 	res.Memory = mem
 	if w := mem.Worst(); w > 0 && mem.Known() && !asan {
 		if err := writeLimits(w); err != nil {
@@ -704,6 +772,8 @@ func FormatMemory(m *MemoryReport) string {
 	var b strings.Builder
 	if m.Budget > 0 {
 		fmt.Fprintf(&b, "memory: worst case %s of %s budget\n", human(m.Worst()), human(m.Budget))
+	} else if m.Workers == 0 && m.Threads == 0 {
+		fmt.Fprintf(&b, "memory: worst case %s per thread (no budget declared; workers auto and threads auto: cores × cores of them)\n", human(m.Worst()))
 	} else if m.Workers == 0 || m.Threads == 0 {
 		fmt.Fprintf(&b, "memory: worst case %s per core (no budget declared)\n", human(m.Worst()))
 	} else {
@@ -722,6 +792,12 @@ func FormatMemory(m *MemoryReport) string {
 	}
 	if m.Helpers > 0 {
 		fmt.Fprintf(&b, "  %-26s %12s   = %d × %s stack: threads that run blocking and detached C calls\n", "blocking-call helpers", human(m.Helpers*m.HelperStack), m.Helpers, human(m.HelperStack))
+	}
+	if m.ThreadStack > 0 {
+		fmt.Fprintf(&b, "  %-26s %12s   the scheduler thread's own stack and signal stack\n", "scheduler", human(m.ThreadStack))
+	}
+	if m.Watchdog > 0 {
+		fmt.Fprintf(&b, "  %-26s %12s   its thread's stack%s\n", "watchdog", human(m.Watchdog), perWorker(m))
 	}
 	switch {
 	case m.Workers == 0:
@@ -777,6 +853,8 @@ func absDir(d string) string {
 // With allowDynamic (sanitizer builds) a dynamic frame counts its static part. It returns every
 // function's frame, and separately the runtime's (defined in sq_rt.c or its
 // headers; the program's functions carry #line directives naming their .sq files).
+var conflictingTypes = regexp.MustCompile(`conflicting types for '([A-Za-z_][A-Za-z0-9_]*)'`)
+
 // maxFrame bounds one C stack frame (see readStackUsage).
 const maxFrame = 4 << 30
 

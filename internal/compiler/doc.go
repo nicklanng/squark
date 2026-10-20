@@ -319,6 +319,8 @@ func DocPackage(p *Package, all bool) string {
 					fmt.Fprintf(&b, "\n\t%s = %s", m.Name, m.Const)
 				}
 				b.WriteString("\n}")
+			} else if o.TypeDecl != nil && o.TypeDecl.Type != nil {
+				fmt.Fprintf(&b, "%s: %s", name, exprString(o.TypeDecl.Type)) // as declared: Temp: Celsius
 			} else {
 				fmt.Fprintf(&b, "%s: %s", name, n.Underlying())
 
@@ -364,13 +366,16 @@ func DocPackage(p *Package, all bool) string {
 	} else {
 		fmt.Fprintf(&b, "module %s\n", p.Name)
 	}
-	for _, group := range [][]entry{consts, vars, types, funcs} {
+	for gi, group := range [][]entry{consts, vars, types, funcs} {
 		if len(group) == 0 {
 			continue
 		}
 		byPos(group)
 		b.WriteString("\n")
-		for _, e := range group {
+		for i, e := range group {
+			if gi == 2 && i > 0 && (strings.Contains(e.text, "\n") || strings.Contains(group[i-1].text, "\n")) {
+				b.WriteString("\n") // a blank line around a type that takes more than a line
+			}
 			b.WriteString(e.text + "\n")
 		}
 	}

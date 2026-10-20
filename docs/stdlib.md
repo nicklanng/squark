@@ -351,6 +351,7 @@ impl Duration {
 	// it as a view of buf. 32 bytes hold any duration; a shorter buf gets the beginning.
 	fn string(self, buf u8[]) -> str in buf
 }
+
 // Time is a monotonic instant plus the wall clock reading when it was taken.
 struct Time {
 	// fields that aren't pub
@@ -396,6 +397,10 @@ extern fn gosched() stack 1024 c"sq_gosched"
 // 1; a second signal ends it at once. http.serve calls it, so a server drains its requests when a
 // container is stopped. Calling it again does nothing.
 extern fn stop_gracefully() stack 1024 c"sq_stop_gracefully"
+// through_stop exempts the calling task from a graceful stop's cap on blocking I/O (which times
+// out at 0.9 × the grace period): for a task that must keep answering until the program exits,
+// such as an admin port's (http.serve_admin). Its own with deadline still applies.
+extern fn through_stop() stack 1024 c"sq_through_stop"
 // stopping reports whether a graceful stop has begun (see stop_gracefully).
 fn stopping() -> bool
 // deadline_left returns how long the calling task's blocking I/O has before it times out
@@ -582,6 +587,7 @@ impl Encoder {
 	// object or array). False, writing nothing, if a value can't come next (Err is set).
 	fn raw_start(&self) -> bool
 }
+
 // Decoder pulls values out of a JSON document. The first error is kept in err, and every call
 // after it fails.
 struct Decoder {
@@ -697,6 +703,7 @@ impl Counter {
 	fn inc(self)
 	fn value(self) -> int
 }
+
 // Gauge is a value that goes up and down (connections open, queue length).
 struct Gauge {
 	// fields that aren't pub
@@ -710,10 +717,11 @@ impl Gauge {
 
 // counter registers a counter and returns it: `thread served = metrics.counter(...)` at package
 // level, or in main. labels is "" or Prometheus labels without the braces:
-// `code="2xx",method="GET"`; each set of labels is its own counter. Names are up to 47 bytes,
-// labels and help up to 79 (longer ones are cut). Registering the same name and labels again
-// (each thread's package variables do, under threads N) returns the same counter. It panics if
-// the table of 64 metrics is full, or the name and labels are a gauge.
+// `code="2xx",method="GET"`; each set of labels is its own counter. Names are up to 47 bytes and
+// labels up to 79 (longer ones panic: cut, they would break the whole page); help is cut at 79.
+// Registering the same name and labels again (each thread's package variables do, under threads
+// N) returns the same counter. It panics if the table of 64 metrics is full, or the name is a
+// gauge's.
 fn counter(name str, labels str, help str) -> metrics.Counter
 // gauge registers a gauge; see counter.
 fn gauge(name str, labels str, help str) -> metrics.Gauge
@@ -756,6 +764,7 @@ impl IP {
 	// buf; the zero IP gives "". 46 bytes hold any address; a shorter buf gets the beginning.
 	fn string(self, buf u8[]) -> str in buf
 }
+
 struct Listener {
 	// fields that aren't pub
 }
@@ -772,6 +781,7 @@ impl Listener {
 	fn port(self) -> int
 	fn close(self) -> !
 }
+
 struct Conn {
 	// fields that aren't pub
 }
@@ -805,8 +815,9 @@ impl Conn {
 	// park_idle hands c to the runtime's idle set with a tag (0..255) that next_idle returns with it,
 	// e.g. to say which server it belongs to. No task waits for it: when it becomes readable it is
 	// returned by next_idle. The calling task's stack is returned to the OS when it exits, so an
-	// idle connection costs no memory beyond the kernel's socket.
-	fn park_idle(self, tag int)
+	// idle connection costs no memory beyond the kernel's socket. If it stays idle for timeout
+	// (> 0; checked about once a second), the runtime closes it.
+	fn park_idle(self, tag int, timeout time.Duration)
 
 	// close_write shuts down the sending side: the peer reads EOF once it has read everything sent,
 	// while c can still read. Close a connection this way after a final reply, so the reply isn't
@@ -814,6 +825,7 @@ impl Conn {
 	fn close_write(self) -> !
 	fn close(self) -> !
 }
+
 // TimedConn is a Conn whose reads time out: see Conn.with_timeout.
 struct TimedConn {
 	// fields that aren't pub
@@ -875,6 +887,8 @@ const client_timeout time.Duration = 30000000000
 const max_routes = 64
 const max_path_params = 8
 
+thread idle_timeout time.Duration
+thread write_timeout time.Duration
 thread read_header_timeout time.Duration
 thread read_timeout time.Duration
 fault TooManyServers 503 "http: too many servers in one process"
@@ -890,6 +904,7 @@ struct Header {
 	name str
 	value str
 }
+
 // Request fields are views into the connection's read buffer, valid until the handler returns.
 struct Request {
 	method str
@@ -934,6 +949,7 @@ impl Request {
 	// isn't one.
 	fn query_int(&self, key str) -> (int, bool)
 }
+
 // ResponseWriter stages the response in the connection task's write buffer.
 struct ResponseWriter {
 	// fields that aren't pub
@@ -946,8 +962,9 @@ impl ResponseWriter {
 	// echoed from the request) can't start a header of its own.
 	fn set_header(&self, name str, value str)
 
-	// write_header sets the status code (it is sent with the first flush). A code outside 100..999 is
-	// sent as 500. Once part of the body has been flushed, the status can't change.
+	// write_header sets the status code (it is sent with the first flush). A code outside 200..999 is
+	// sent as 500 (a 1xx is an interim response, not an answer). Once part of the body has been
+	// flushed, the status can't change.
 	fn write_header(&self, code int)
 	fn write(&self, p u8[]) -> int !
 	fn write_string(&self, s str) -> int !
@@ -969,8 +986,10 @@ impl ResponseWriter {
 	// content_type sets the response's Content-Type header.
 	fn content_type(&self, t str)
 }
+
 // HandlerFunc handles one request.
-HandlerFunc: fn(*http.ResponseWriter, *http.Request)
+HandlerFunc: fn(...)
+
 // Response is a response read by a Client. Its strings and body are views of the client's buffer,
 // valid until the client's next request.
 struct Response {
@@ -997,6 +1016,7 @@ impl Response {
 	fn num_headers(&self) -> int
 	fn header_at(&self, i int) -> http.Header in self
 }
+
 // Client is an HTTP/1.1 client on one keep-alive connection. Responses are read into the buffer
 // given to dial or new_client: the status line, headers and body together must fit in it (bodies
 // are de-chunked in place), or the request fails with HeaderTooLarge or BodyTooLarge. The
@@ -1042,6 +1062,7 @@ impl Client {
 	// response. A load generator can build its requests once and send them many times.
 	fn round_trip(&self, req u8[]) -> http.Response ! in self
 }
+
 // JSON writes a JSON document into a response as it is built, with commas, nesting and escaping
 // handled (a json.Encoder underneath, writing into the response's own buffer). A document of any
 // size takes no memory beyond the response's buffer, and long strings are written without being
@@ -1118,8 +1139,10 @@ fn set_ready(r bool)
 fn serve_admin(addr str) -> !
 // serve accepts connections on l and serves each in its own task. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
-// Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
-// get a 400 and a closed connection. `Expect: 100-continue` is answered before the body is read;
+// Content-Length that isn't plain digits or differs from an earlier one get a 400 and a closed
+// connection, and Transfer-Encoding a 501 (request bodies must have a Content-Length). Empty lines
+// before a request line are skipped, and an absolute-form target (GET http://host/path) is served
+// as its path. `Expect: 100-continue` is answered before the body is read;
 // other expectations get a 417. HTTP/1.0 clients get `Connection: keep-alive` when they ask for it,
 // and a body too long to buffer is sent unframed, ending with the connection, since HTTP/1.0 has
 // no chunked encoding.
@@ -1152,9 +1175,10 @@ fn append_request(dst u8[], method str, host str, path str, headers http.Header[
 // Request.path_value or path_int.
 //
 // When several patterns match, the most specific wins: literal segments before wildcards, an
-// exact path before a subtree, a longer subtree before a shorter, and a method before none. A path
-// that matches only patterns for other methods gets 405 method Not Allowed with an Allow header;
-// one that matches none gets 404 Not Found. Registering a malformed or duplicate pattern, or more
+// exact path before a subtree, a longer subtree before a shorter, the request's own method before
+// GET for a HEAD, and a method before none. A path that matches only patterns for other methods
+// gets 405 method Not Allowed with an Allow header; one that matches none gets 404 Not Found. A
+// path with a . or .. segment (raw or %2e) gets 400 Bad Request, so {name...} never holds one. Registering a malformed or duplicate pattern, or more
 // than max_routes, panics.
 fn handle_func(pattern str in static, h http.HandlerFunc)
 // Error replies with status code and its standard text as a plain-text body ("404 Not Found").
@@ -1188,6 +1212,7 @@ enum Level {
 	warn = 2
 	error = 3
 }
+
 // Entry is a line being built: add fields, then send it.
 struct Entry {
 	// fields that aren't pub
@@ -1284,6 +1309,9 @@ fn shuffle(s anytype)
 // authentication by trust, password or SCRAM-SHA-256 (Postgres' default since 14), and queries
 // with parameters (the extended protocol: values are sent apart from the SQL, never spliced
 // into it). It doesn't do TLS: use it inside a cluster, or over a sidecar or mesh that does.
+// SCRAM uses the password's bytes as they are, without SASLprep: an ASCII password works with any
+// server; one that SASLprep would change (non-ASCII spaces, soft hyphens, compatibility forms)
+// fails with Auth.
 //
 //    c := postgres.connect("postgres://app:secret@db:5432/shop", buf[:])!
 //    var p postgres.Params
@@ -1299,11 +1327,15 @@ fn shuffle(s anytype)
 // cuts it off.
 module postgres
 
+const max_columns = 64
+
 fault ServerError -70 "postgres: the server reported an error (see Conn.error_message)"
 fault Protocol -71 "postgres: unexpected reply from the server"
 fault Auth -72 "postgres: authentication failed or not supported (trust, password, SCRAM-SHA-256)"
 fault TooLarge -73 "postgres: a message larger than the connection's buffer"
 fault BadURL -74 "postgres: invalid URL (want postgres://user:password@host:port/database)"
+fault NoTLS -78 "postgres: the URL's sslmode requires TLS, which this client doesn't support"
+fault TooManyColumns -79 "postgres: a row with more than 64 columns (select fewer)"
 fault Closed -75 "postgres: connection closed"
 fault Busy -76 "postgres: the previous query's rows haven't been read (or closed)"
 fault TooManyParams -77 "postgres: more parameters than Params holds (32, 2 KiB of text)"
@@ -1327,6 +1359,7 @@ impl Conn {
 	// exec runs sql (with p's parameters; p may be nil) and returns how many rows it changed.
 	fn exec(&self, sql str, p *postgres.Params) -> int !
 }
+
 // Params holds a query's parameters, $1, $2, ... in order, as text: the server converts each to
 // its column's type, as it does a quoted literal. Up to 32, with 2 KiB of text in all.
 struct Params {
@@ -1341,6 +1374,7 @@ impl Params {
 	fn null(&self)
 	fn clear(&self)
 }
+
 // Rows is a query's result, read a row at a time with next. Its views (text) are valid until the
 // next call to next.
 struct Rows {
@@ -1372,6 +1406,7 @@ impl Rows {
 	// close reads the rest of the rows, so the connection can take the next query.
 	fn close(&self)
 }
+
 // Pool shares up to 16 connections to one server between a thread's tasks: get takes one
 // (connecting it if needed, waiting while all are in use), put gives it back. Declare it per
 // thread (`thread db postgres.Pool`) and init it in main.
@@ -1421,6 +1456,7 @@ struct Policy {
 	max time.Duration
 	fixed bool
 }
+
 // Backoff is one call's retries in progress.
 struct Backoff {
 	// fields that aren't pub
@@ -1473,6 +1509,7 @@ fn strings(s str[])
 module sqlite
 
 const ok = 0
+const misuse = 21
 const row = 100
 const done = 101
 const type_integer = 1
@@ -1483,6 +1520,8 @@ const type_null = 5
 
 fault Truncated -1 "sqlite: column text larger than buffer"
 
+// DB and Stmt are handles: copies name the same connection or statement. Once it is closed or
+// finalized, every copy gets misuse.
 struct DB {
 	// fields that aren't pub
 }
@@ -1500,6 +1539,7 @@ impl DB {
 	fn changes(self) -> int
 	fn last_insert_row_id(self) -> int
 }
+
 struct Stmt {
 	// fields that aren't pub
 }
@@ -1530,10 +1570,12 @@ impl Stmt {
 	// column_text copies column i (0-based) into buf and returns it as a view of buf.
 	fn column_text(self, i int, buf u8[]) -> str ! in buf
 }
+
 // Value is an argument to exec: Int(v), text(s) or null() (the zero Value).
 struct Value {
 	// fields that aren't pub
 }
+
 // Result is what exec reports, as SQLite does after the statement: last_insert_row_id and changes,
 // which an INSERT, UPDATE or DELETE sets (after another statement they still hold the
 // connection's last such values).

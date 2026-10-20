@@ -28,12 +28,13 @@ type loopPlan struct {
 	headers []*loopHeader // slices in fields and package variables, read before the loop
 }
 
-// loopIndex is x[scale*iv + off] (off nil: x[scale*iv]), with x read from hdr if it is a field or
-// package variable.
+// loopIndex is x[scale*iv + off] (off nil: x[scale*iv]; neg: x[scale*iv - off]), with x read
+// from hdr if it is a field or package variable.
 type loopIndex struct {
 	e     *IndexExpr
 	scale int64
 	off   Expr
+	neg   bool
 	hdr   *loopHeader
 }
 
@@ -276,13 +277,17 @@ func isIntType(t Type) bool {
 // planLoop decides whether the loop with counter iv (an int variable that only the loop
 // changes, by one per iteration) and this body gets an unchecked copy, and of which indexes.
 // The loop's bounds must not change in it either.
-func (g *gen) planLoop(iv *Var, body *BlockStmt, bounds ...Expr) *loopPlan {
+func (g *gen) planLoop(iv *Var, body *BlockStmt, changed []*Var, bounds ...Expr) *loopPlan {
 	if iv == nil || !isIntType(iv.Type) || g.addressedVars()[iv] {
 		return nil
 	}
-	// variables the body assigns or declares change in the loop; memSafe: no calls, and no store
-	// that could change a slice header outside a local variable
+	// variables the body assigns or declares change in the loop, and so do changed (a range's
+	// value variable); memSafe: no calls, and no store that could change a slice header outside a
+	// local variable
 	changes := map[*Var]bool{}
+	for _, v := range changed {
+		changes[v] = true
+	}
 	ok, stmts, memSafe := true, 0, !g.fnPreempt
 	store := func(x Expr) {
 		if v := localVar(x); v != nil {
@@ -370,7 +375,7 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, bounds ...Expr) *loopPlan {
 			}
 			switch e.Args[0].info().T.Underlying().(type) {
 			case *Array:
-				return true
+				return !hasCall(e.Args[0]) // its length is constant, but the bound evaluates it
 			case *Slice, *Basic:
 				return e.Args[0].info().View == nil && fixed(localVar(e.Args[0]))
 			}
@@ -378,8 +383,9 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, bounds ...Expr) *loopPlan {
 		return false
 	}
 	for _, b := range bounds {
-		// a bound is evaluated before the first iteration anyway, so it may read a header
-		if c, ok := unparen(b).(*CallExpr); ok && c.Builtin == "len" && len(c.Args) == 1 && header(c.Args[0]) {
+		// a bound is evaluated before the first iteration anyway, so it may read a header; only a
+		// slice's or string's length is fixed (a store into a map field grows its len)
+		if c, ok := unparen(b).(*CallExpr); ok && c.Builtin == "len" && len(c.Args) == 1 && isSliceOrString(c.Args[0].info().T) && header(c.Args[0]) {
 			continue
 		}
 		if !invariant(b) {
@@ -445,6 +451,7 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, bounds ...Expr) *loopPlan {
 			return true // maps
 		}
 		var off Expr
+		neg := false
 		k := scaled(e.Index)
 		if ix, ok := unparen(e.Index).(*BinaryExpr); ok && k == 0 {
 			switch {
@@ -453,13 +460,13 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, bounds ...Expr) *loopPlan {
 			case ix.Op == ADD && scaled(ix.Y) > 0 && invariant(ix.X):
 				k, off = scaled(ix.Y), ix.X
 			case ix.Op == SUB && scaled(ix.X) > 0 && invariant(ix.Y):
-				k, off = scaled(ix.X), ix // k*iv - y: the offset is -y, emitted by offsetC
+				k, off, neg = scaled(ix.X), ix.Y, true // k*iv - y
 			}
 		}
 		if k == 0 {
 			return true
 		}
-		p.indexes = append(p.indexes, loopIndex{e, k, off, hdr})
+		p.indexes = append(p.indexes, loopIndex{e, k, off, neg, hdr})
 		return true
 	})
 	if len(p.indexes) == 0 {
@@ -526,7 +533,7 @@ func (g *gen) versioned(s Stmt, p *loopPlan, b func() loopBound, loop func()) {
 				n = "(" + g.expr(ix.e.X) + ").len"
 			}
 		}
-		add(fmt.Sprintf("%s(%s, %s, %d, %s, %s)", bound.fn, bound.a, bound.b, ix.scale, g.offsetC(ix.off), n))
+		add(fmt.Sprintf("%s(%s, %s, %d, %s, %s)", bound.fn, bound.a, bound.b, ix.scale, g.offsetC(ix.off, ix.neg), n))
 	}
 	g.line("if (%s) {", strings.Join(list, " && "))
 	g.ind++
@@ -562,12 +569,14 @@ func (g *gen) versioned(s Stmt, p *loopPlan, b func() loopBound, loop func()) {
 }
 
 // offsetC is the C value of an index's offset from the counter.
-func (g *gen) offsetC(off Expr) string {
+// The negation was recorded when the index was matched: an offset that is itself a subtraction
+// (x[a - b + i]) is a value like any other.
+func (g *gen) offsetC(off Expr, neg bool) string {
 	if off == nil {
 		return "0"
 	}
-	if b, ok := off.(*BinaryExpr); ok && b.Op == SUB {
-		return "-(" + g.coerce(b.Y, tInt) + ")" // wraps for INT64_MIN like the index does
+	if neg {
+		return "-(" + g.coerce(off, tInt) + ")" // wraps for INT64_MIN like the index does
 	}
 	return g.coerce(off, tInt)
 }
@@ -622,4 +631,9 @@ func forLoopCounter(s *ForStmt) (iv *Var, bound Expr, fn string) {
 		return iv, b, "sq_inrange_above"
 	}
 	return nil, nil, ""
+}
+
+func isSliceOrString(t Type) bool {
+	_, slice := t.Underlying().(*Slice)
+	return slice || isString(t)
 }

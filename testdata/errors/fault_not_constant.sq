@@ -1,0 +1,16 @@
+program
+
+// A fault or error constant is static data: its code and message must be constants (a variable
+// or a call once reached the C compiler).
+thread n = 7
+
+fn msg() -> str { return "m" }
+
+fault G n "y" // ERROR "error(n, \"y\") is not constant"
+fault H 2 msg() // ERROR "is not constant"
+const t = error[2]{error(n, "a"), error(1, "b")} // ERROR "is not constant"
+fault K 3 "fine"
+
+fn main() {
+	println(G.code(), H.message(), t[0].code(), K.code())
+}

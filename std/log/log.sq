@@ -96,7 +96,8 @@ impl Entry {
 		if not self.on or self.truncated {
 			return
 		}
-		left := cap(self.buf) - len(self.buf) - 20 - 24 - len(k)
+		// the key is written escaped (its first 20 bytes, up to 6 bytes each), then quotes, : and ,
+		left := cap(self.buf) - len(self.buf) - 20 - 24 - (6*min(len(k), 20) + 4)
 		if left < 8 {
 			self.truncated = true
 			return

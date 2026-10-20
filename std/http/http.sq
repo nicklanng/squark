@@ -20,6 +20,17 @@ const (
 // connection moves to the runtime's idle set (where it costs no stack until its next request).
 pub const idle_release = 100 * time.millisecond
 
+// idle_timeout (60 seconds) is how long a connection may stay open without sending a request:
+// a keep-alive connection between requests, or one that never sent anything. The runtime then
+// closes it (checking about once a second), so idle clients can't hold sockets, or the program's
+// connections N, for ever. 0 keeps idle connections open.
+pub thread idle_timeout = 60 * time.second
+
+// write_timeout (10 seconds) is how long one write of a response may take: a client that stops
+// reading (or reads too slowly) is then disconnected, so it can't hold a serve_conn task for ever.
+// It bounds each write of up to a buffer's worth, not the whole response. 0 means no limit.
+pub thread write_timeout = 10 * time.second
+
 // read_header_timeout (5 seconds) is how long a client has to send a request's line and headers,
 // counted from when the request starts arriving. A connection that takes longer gets a 408 and is
 // closed, so slow clients can't hold connection tasks. Set it in main before serving (with
@@ -52,6 +63,7 @@ pub struct Request {
 	nheaders   int
 	params     Header[max_path_params + 1] // the matched pattern's wildcard values (see handle_func)
 	nparams    int
+	decoded    int // bit i: params[i].value has been unescaped (path_value)
 	keep_alive bool
 	http10     bool
 	expect100  bool
@@ -148,14 +160,15 @@ impl ResponseWriter {
 		self.hdr = append(self.hdr, '\r', '\n')
 	}
 
-	// write_header sets the status code (it is sent with the first flush). A code outside 100..999 is
-	// sent as 500. Once part of the body has been flushed, the status can't change.
+	// write_header sets the status code (it is sent with the first flush). A code outside 200..999 is
+	// sent as 500 (a 1xx is an interim response, not an answer). Once part of the body has been
+	// flushed, the status can't change.
 	pub fn write_header(&self, code int) {
 		if self.wrote_header or self.dropped > 0 {
 			return
 		}
-		if code < 100 or code > 999 {
-			code = 500
+		if code < 200 or code > 999 {
+			code = 500 // 1xx are interim responses: the client would wait for the final one for ever
 		}
 		self.status_code = code
 	}
@@ -249,6 +262,10 @@ impl ResponseWriter {
 	// flush_chunk sends the buffered body as a chunk, switching to chunked encoding if needed. An
 	// HTTP/1.0 client doesn't know chunks: its body is sent as is, and ends when the connection closes.
 	fn flush_chunk(&self) {
+		if self.failed { // the connection is going: drop the rest of the response
+			self.buf = self.buf[:0]
+			return
+		}
 		var head u8[header_buffer_size + 256]
 		h := head[:0]
 		if not self.wrote_header {
@@ -275,7 +292,7 @@ impl ResponseWriter {
 			h = append(h, "\r\n"...)
 			self.crlf = true
 		}
-		if _, err := self.conn.write2(h, self.buf); err != nil {
+		if not send(self.conn, h, self.buf) {
 			self.failed = true
 		}
 		self.buf = self.buf[:0]
@@ -283,9 +300,12 @@ impl ResponseWriter {
 
 	// finish sends whatever remains of the response.
 	fn finish(&self) {
+		if self.failed {
+			return
+		}
 		if self.wrote_header and not self.chunked { // HTTP/1.0, unframed: the rest of the body, then close
 			if len(self.buf) > 0 {
-				if _, err := self.conn.write(self.buf); err != nil {
+				if not send(self.conn, self.buf[:0], self.buf) {
 					self.failed = true
 				}
 			}
@@ -308,7 +328,7 @@ impl ResponseWriter {
 			} else {
 				t = append(t, "0\r\n\r\n"...)
 			}
-			if _, err := self.conn.write2(t, self.buf); err != nil {
+			if not send(self.conn, t, self.buf) {
 				self.failed = true
 			}
 			return
@@ -328,10 +348,24 @@ impl ResponseWriter {
 		if self.head {
 			body = self.buf[:0]
 		}
-		if _, err := self.conn.write2(h, body); err != nil {
+		if not send(self.conn, h, body) {
 			self.failed = true
 		}
 	}
+}
+
+// send writes a and then b to c within write_timeout: a client that stops reading can't hold a
+// serve_conn task (and, with the pool full, the server) for ever.
+fn send(c net.Conn, a u8[], b u8[]) -> bool {
+	var err error
+	if write_timeout > 0 {
+		with deadline write_timeout {
+			_, err = c.write2(a, b)
+		}
+	} else {
+		_, err = c.write2(a, b)
+	}
+	return err == nil
 }
 
 fn append_hex(dst u8[], v int) -> u8[] {
@@ -443,6 +477,7 @@ pub fn serve_admin(addr str) -> ! {
 }
 
 task admin_accept(l net.Listener) pool 1 {
+	runtime.through_stop() // probes are answered (not ready) until the program exits
 	loop {
 		c, err := l.accept_always()
 		if err != nil {
@@ -458,6 +493,7 @@ task admin_accept(l net.Listener) pool 1 {
 }
 
 task admin_conn(c net.Conn) pool 2 isolate {
+	runtime.through_stop()
 	var rbuf u8[4K]
 	var wbuf u8[8K]
 	n := 0
@@ -507,8 +543,10 @@ pub thread shed_load = false
 
 // serve accepts connections on l and serves each in its own task. Requests are read strictly:
 // a CR or LF outside a CRLF, a header name that isn't a token (`name : v`, folded lines), a
-// Content-Length that isn't plain digits or differs from an earlier one, and Transfer-Encoding all
-// get a 400 and a closed connection. `Expect: 100-continue` is answered before the body is read;
+// Content-Length that isn't plain digits or differs from an earlier one get a 400 and a closed
+// connection, and Transfer-Encoding a 501 (request bodies must have a Content-Length). Empty lines
+// before a request line are skipped, and an absolute-form target (GET http://host/path) is served
+// as its path. `Expect: 100-continue` is answered before the body is read;
 // other expectations get a 417. HTTP/1.0 clients get `Connection: keep-alive` when they ask for it,
 // and a body too long to buffer is sent unframed, ending with the connection, since HTTP/1.0 has
 // no chunked encoding.
@@ -564,12 +602,16 @@ task shed(c net.Conn) pool 16 {
 }
 
 // write_error answers a request that won't be served with status and closes the sending side.
+// It is counted in http_requests_total like a served one.
 fn write_error(c net.Conn, status str) {
+	if code, err := strconv.atoi(status[:3]); err == nil {
+		count_status(code)
+	}
 	var b u8[128]
 	m := append(b[:0], "HTTP/1.1 "...)
 	m = append(m, status...)
 	m = append(m, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"...)
-	c.write(m)
+	send(c, m, m[:0])
 	c.close_write()
 }
 
@@ -620,7 +662,7 @@ task serve_conn(c net.Conn, id int) pool 10000 isolate {
 			if runtime.stopping() {
 				c.close()
 			} else {
-				c.park_idle(id)
+				c.park_idle(id, idle_timeout)
 			}
 			return
 		}
@@ -667,6 +709,7 @@ fn read_more(c net.Conn, rbuf u8[], n int, start time.Time, limit time.Duration)
 fn serve_request(c net.Conn, h HandlerFunc, rbuf u8[], n int, wbuf u8[]) -> (int, bool) {
 	var hbuf u8[header_buffer_size]
 	start := time.now() // the request has started arriving: its read deadlines count from here
+	n = skip_crlfs(rbuf, n)
 	end, scan := header_end(rbuf[:n], 0)
 	while end == -1 {
 		if n == len(rbuf) {
@@ -678,6 +721,9 @@ fn serve_request(c net.Conn, h HandlerFunc, rbuf u8[], n int, wbuf u8[]) -> (int
 			return 0, false
 		}
 		n += m
+		if k := skip_crlfs(rbuf, n); k < n {
+			n, scan = k, 0
+		}
 		end, scan = header_end(rbuf[:n], scan)
 	}
 	if end < 0 {
@@ -724,6 +770,19 @@ fn serve_request(c net.Conn, h HandlerFunc, rbuf u8[], n int, wbuf u8[]) -> (int
 		copy(rbuf, rbuf[total:n])
 		return n - total, true
 	}
+}
+
+// skip_crlfs drops the empty lines at the start of rbuf[:n] (a client may send a CRLF after a
+// body, before its next request) and returns the length left.
+fn skip_crlfs(rbuf u8[], n int) -> int {
+	k := 0
+	while k+1 < n and rbuf[k] == '\r' and rbuf[k+1] == '\n' {
+		k += 2
+	}
+	if k > 0 {
+		copy(rbuf, rbuf[k:n])
+	}
+	return n - k
 }
 
 // header_end scans b from i for the blank line that ends a request head. It returns the index just
@@ -819,6 +878,14 @@ const bad_request = "400 Bad Request"
 
 // parse_request parses a request head (which header_end has checked for stray CRs and LFs). It returns
 // "", or the status to answer with if the request can't be served.
+// absolute_path is the path of an absolute-form target's authority/path (its query cut off).
+fn absolute_path(t str) -> str in t {
+	if i := strings.index_byte(t, '/'); i >= 0 {
+		return t[i:]
+	}
+	return "/"
+}
+
 fn parse_request(head str, r *Request) -> str {
 	line, rest, ok := strings.cut(head, "\r\n")
 	if not ok {
@@ -845,6 +912,12 @@ fn parse_request(head str, r *Request) -> str {
 	r.method = method
 	r.proto = proto
 	path, query, _ := strings.cut(target, "?")
+	// absolute-form (GET http://host/a): what a proxy is sent, which a server must accept too
+	if t, ok := strings.cut_prefix(path, "http://"); ok {
+		path = absolute_path(t)
+	} else if t, ok := strings.cut_prefix(path, "https://"); ok {
+		path = absolute_path(t)
+	}
 	r.path = path
 	r.query = query
 	r.content_length = 0
@@ -883,7 +956,7 @@ fn parse_request(head str, r *Request) -> str {
 				r.keep_alive = true
 			}
 		case strings.equal_fold(name, "Transfer-Encoding"):
-			return bad_request // chunked request bodies are not supported
+			return "501 Not Implemented" // chunked request bodies are not supported
 		case strings.equal_fold(name, "Expect"):
 			if not strings.equal_fold(value, "100-continue") {
 				return "417 Expectation Failed"
@@ -905,12 +978,20 @@ pub fn status_text(code int) -> str {
 		return "Accepted"
 	case 204:
 		return "No Content"
+	case 206:
+		return "Partial Content"
 	case 301:
 		return "Moved Permanently"
 	case 302:
 		return "Found"
+	case 303:
+		return "See Other"
 	case 304:
 		return "Not Modified"
+	case 307:
+		return "Temporary Redirect"
+	case 308:
+		return "Permanent Redirect"
 	case 400:
 		return "Bad Request"
 	case 401:
@@ -921,18 +1002,48 @@ pub fn status_text(code int) -> str {
 		return "Not Found"
 	case 405:
 		return "Method Not Allowed"
+	case 406:
+		return "Not Acceptable"
+	case 408:
+		return "Request Timeout"
 	case 409:
 		return "Conflict"
+	case 410:
+		return "Gone"
+	case 411:
+		return "Length Required"
+	case 412:
+		return "Precondition Failed"
 	case 413:
 		return "Request Entity Too Large"
+	case 414:
+		return "URI Too Long"
+	case 415:
+		return "Unsupported Media Type"
+	case 417:
+		return "Expectation Failed"
 	case 422:
 		return "Unprocessable Entity"
+	case 425:
+		return "Too Early"
+	case 428:
+		return "Precondition Required"
 	case 429:
 		return "Too Many Requests"
+	case 431:
+		return "Request Header Fields Too Large"
 	case 500:
 		return "Internal Server Error"
+	case 501:
+		return "Not Implemented"
+	case 502:
+		return "Bad Gateway"
 	case 503:
 		return "Service Unavailable"
+	case 504:
+		return "Gateway Timeout"
+	case 505:
+		return "HTTP Version Not Supported"
 	}
 	return "Unknown"
 }

@@ -1,0 +1,34 @@
+program
+
+// Words and literals the lexer and parser once got wrong: a hex literal before .. (lexed as a hex
+// float), a member spelled like a keyword at the end of a line (no semicolon after it), and a
+// field named fn (taken for a method).
+enum K { a, case }
+
+struct P {
+	for str
+	fn  int
+}
+
+struct Q {
+	pub fn str
+	x      int
+}
+
+impl P {
+	pub fn get(self) -> int { return self.fn }
+}
+
+fn main() {
+	for i in 0x0..0x3 {
+		println(i)
+	}
+	println(0x1.8p1 == 3.0)
+	p := P{for: "x", fn: 2}
+	s := p.for
+	k := K.case
+	var j K = .case
+	println(s, k == j, p.fn, p.get())
+	q := Q{fn: "q", x: 1}
+	println(q.fn, q.x)
+}

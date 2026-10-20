@@ -1,0 +1,35 @@
+program
+
+// A range's value variable changes every iteration: loop versioning once took it for a fixed
+// value and named it before the loop (C that clang rejected).
+struct Row { cells int[] }
+
+fn offset(xs int[], ys int[]) -> int {
+	s := 0
+	for i, k in xs {
+		s += ys[i+k]
+	}
+	return s
+}
+
+fn diag(rows Row[]) -> int {
+	t := 0
+	for i, r in rows {
+		t += r.cells[i]
+	}
+	return t
+}
+
+fn own(ss int[][]) -> int {
+	t := 0
+	for i, s in ss {
+		t += s[i]
+	}
+	return t
+}
+
+fn main() {
+	println(offset(int[]{1, 1, 0, 0}, int[]{1, 2, 3, 4, 5}))
+	println(diag(Row[]{Row{int[]{1, 2, 3}}, Row{int[]{4, 5, 6}}, Row{int[]{7, 8, 9}}}))
+	println(own(int[][]{int[]{10, 20}, int[]{30, 40}}))
+}

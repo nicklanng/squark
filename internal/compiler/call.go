@@ -47,6 +47,13 @@ func (c *Checker) call(e *CallExpr) {
 		return
 	}
 	sig, ok := fi.T.Underlying().(*Signature)
+	if ok && sig == nil {
+		// a function's signature isn't resolved yet: the call is in a constant, an enum value, an
+		// arena size or a type (resolveDecls), which a call can't be
+		c.errorf(e.P, "%s is not constant", exprString(e))
+		c.invalid(e)
+		return
+	}
 	if !ok {
 		c.errorf(e.P, "invalid operation: cannot call non-function %s (type %s)", exprString(e.Fun), fi.T)
 		c.invalid(e)

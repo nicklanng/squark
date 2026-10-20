@@ -1,0 +1,15 @@
+program
+
+// A backoff whose max is the largest duration: the jitter's range [0, max] once overflowed int and
+// rand panicked.
+use retry, time
+
+fn main() {
+	b := retry.backoff(retry.Policy{attempts: 3, base: 1 << 62, max: 9223372036854775807})
+	ok := true
+	for n in 1..70 {
+		w := b.wait(n)
+		ok = ok and w >= 0 and w <= time.Duration(9223372036854775807)
+	}
+	println(ok)
+}

@@ -21,6 +21,7 @@ const max_name = 255 // an encoded name: length bytes, labels and the root's 0
 const udp_size = 1232 // the UDP reply size offered with EDNS(0), as DNS flag day 2020 recommends
 const type_a = 1
 const type_aaaa = 28
+const type_cname = 5
 
 // Server is a name server from resolv.conf.
 struct Server {
@@ -139,17 +140,19 @@ fn lookup_hosts(name str, out IP[]) -> IP[] in out {
 		if i := strings.index_byte(line, '#'); i >= 0 {
 			line = line[:i]
 		}
-		var fs str[16]
-		words := strings.fields(line, fs[:])
-		if len(words) < 2 {
+		// the address, then any number of names (scanned one at a time: no limit on them)
+		addr, names := next_word(line)
+		if addr == "" or names == "" {
 			continue
 		}
-		ip, ok := parse_ip(words[0])
+		ip, ok := parse_ip(addr)
 		if not ok {
 			continue
 		}
-		for w in words[1:] {
-			if strings.equal_fold(strings.trim_suffix(w, "."), name) {
+		while names != "" {
+			w := ""
+			w, names = next_word(names)
+			if w != "" and strings.equal_fold(strings.trim_suffix(w, "."), name) {
 				out = add(out, ip)
 				break
 			}
@@ -364,8 +367,9 @@ fn exchange(s Server, qname u8[], timeout time.Duration, out IP[]) -> IP[] ! in 
 	var qa, q6 u8[300]
 	id_a := int(sys_random() & 0xffff)
 	id_6 := (id_a + 1 + int(sys_random()%65535)) & 0xffff // never id_a
-	a := build_query(qa[:], id_a, qname, type_a)
-	b := build_query(q6[:], id_6, qname, type_aaaa)
+	a := build_query(qa[:], id_a, qname, type_a, true)
+	b := build_query(q6[:], id_6, qname, type_aaaa, true)
+	plain_a, plain_6 := false, false // asked again without EDNS, after a FORMERR
 	conn, err := dial_proto(s.ip, s.port, 1)
 	if err != nil {
 		return out[:0], NameServer
@@ -411,6 +415,22 @@ fn exchange(s Server, qname u8[], timeout time.Duration, out IP[]) -> IP[] ! in 
 		} else {
 			continue // a reply to something else, or a repeat
 		}
+		// FORMERR: a server that doesn't understand the EDNS record; ask once more without it
+		if msg[3]&0x0f == 1 and msg[2]&0x80 != 0 and not (qtype == type_a and plain_a or qtype == type_aaaa and plain_6) {
+			if qtype == type_a {
+				plain_a, done_a = true, false
+				a = build_query(qa[:], id_a, qname, type_a, false)
+				q = a
+			} else {
+				plain_6, done_6 = true, false
+				b = build_query(q6[:], id_6, qname, type_aaaa, false)
+				q = b
+			}
+			if _, err := conn.write(q); err != nil {
+				failed = true
+			}
+			continue
+		}
 		if msg[2]&0x02 != 0 { // truncated: ask again over TCP
 			m, err := exchange_tcp(s, q, deadline, tcp[:])
 			if err != nil {
@@ -425,6 +445,13 @@ fn exchange(s Server, qname u8[], timeout time.Duration, out IP[]) -> IP[] ! in 
 			continue
 		}
 		out = res
+		if len(out) > 0 and not (done_a and done_6) {
+			// one family has answered: wait only a moment more for the other (its reply may be
+			// lost, and a lookup shouldn't then take the whole timeout)
+			if soon := time.now().add(100 * time.millisecond); soon.before(deadline) {
+				deadline = soon
+			}
+		}
 		if rcode == 3 { // NXDOMAIN
 			missing = true
 		} else if rcode != 0 {
@@ -446,12 +473,20 @@ fn exchange(s Server, qname u8[], timeout time.Duration, out IP[]) -> IP[] ! in 
 // exchange_tcp sends query over TCP and reads the reply into buf; a reply longer than buf is cut
 // short (parse_reply reads the records that fit).
 fn exchange_tcp(s Server, query u8[], deadline time.Time, buf u8[]) -> u8[] ! in buf {
-	conn := dial_proto(s.ip, s.port, 0)!
-	defer conn.close()
+	// the dial and write are bounded by the same deadline as the reads: where TCP/53 is dropped,
+	// the connect would otherwise wait for the system's own timeout (a minute or more)
+	var conn Conn
 	var hdr u8[2]
 	hdr[0] = u8(len(query) >> 8)
 	hdr[1] = u8(len(query))
-	conn.write2(hdr[:], query)!
+	with deadline deadline.sub(time.now()) {
+		conn = dial_proto(s.ip, s.port, 0)!
+		if _, err := conn.write2(hdr[:], query); err != nil {
+			conn.close()
+			return buf[:0], err
+		}
+	}
+	defer conn.close()
 	read_full_by(conn, hdr[:], deadline)!
 	n := min(int(hdr[0])<<8|int(hdr[1]), len(buf))
 	read_full_by(conn, buf[:n], deadline)!
@@ -474,12 +509,32 @@ fn read_full_by(conn Conn, p u8[], deadline time.Time) -> ! {
 
 // build_query writes a query for qname's records of type qtype, recursion desired, with an
 // EDNS(0) record offering udp_size-byte replies.
-fn build_query(dst u8[], id int, qname u8[], qtype int) -> u8[] in dst {
+fn build_query(dst u8[], id int, qname u8[], qtype int, edns bool) -> u8[] in dst {
 	dst = dst[:0]
-	dst = append(dst, u8(id>>8), u8(id), 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 1)
+	extra := u8(0)
+	if edns {
+		extra = 1
+	}
+	dst = append(dst, u8(id>>8), u8(id), 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, extra)
 	dst = append(dst, qname...)
 	dst = append(dst, u8(qtype>>8), u8(qtype), 0, 1)
+	if not edns {
+		return dst
+	}
 	return append(dst, 0, 0, 41, u8(udp_size>>8), u8(udp_size&0xff), 0, 0, 0, 0, 0, 0)
+}
+
+// next_word returns the first word of s (split at spaces and tabs) and what follows it.
+fn next_word(s str) -> (str, str) in s {
+	while len(s) > 0 and (s[0] == ' ' or s[0] == '\t' or s[0] == '\r') {
+		s = s[1:]
+	}
+	for i in 0..len(s) {
+		if s[i] == ' ' or s[i] == '\t' or s[i] == '\r' {
+			return s[:i], s[i:]
+		}
+	}
+	return s, ""
 }
 
 fn u16_at(msg u8[], off int) -> int { return int(msg[off])<<8 | int(msg[off+1]) }
@@ -497,8 +552,43 @@ fn parse_reply(msg u8[], qname u8[], qtype int, out IP[]) -> (IP[], int, bool) i
 	if not ok or off+4 > len(msg) or u16_at(msg, off) != qtype or u16_at(msg, off+2) != 1 {
 		return out, 0, false
 	}
-	off += 4
+	start := off + 4
+	// follow the CNAME chain from qname, in any order: only records owned by its end are answers
+	// (a server's reply may carry others, which aren't for this name)
+	var names u8[max_name][2] // two names: the current target and the next
+	target := qname
+	for hop in 0..8 {
+		next := -1
+		off = start
+		for _ in 0..answers {
+			owner := off
+			off, ok = skip_name(msg, off)
+			if not ok or off+10 > len(msg) {
+				break
+			}
+			typ, class, size := u16_at(msg, off), u16_at(msg, off+2), u16_at(msg, off+8)
+			off += 10
+			if off+size > len(msg) {
+				break
+			}
+			if typ == type_cname and class == 1 and owns(msg, owner, target) {
+				next = off
+				break
+			}
+			off += size
+		}
+		if next < 0 {
+			break
+		}
+		n, ok := read_name(msg, next, names[hop%2][:])
+		if not ok {
+			return out, rcode, true
+		}
+		target = names[hop%2][:n]
+	}
+	off = start
 	for _ in 0..answers {
+		owner := off
 		off, ok = skip_name(msg, off)
 		if not ok or off+10 > len(msg) {
 			break
@@ -510,8 +600,7 @@ fn parse_reply(msg u8[], qname u8[], qtype int, out IP[]) -> (IP[], int, bool) i
 		if off+size > len(msg) {
 			break
 		}
-		// CNAME records lead to these; their names are the CNAME's, not qname
-		if class == 1 and typ == qtype and (typ == type_a and size == 4 or typ == type_aaaa and size == 16) {
+		if class == 1 and typ == qtype and (typ == type_a and size == 4 or typ == type_aaaa and size == 16) and owns(msg, owner, target) {
 			var ip IP
 			copy(ip.b[:], msg[off:off+size])
 			ip.n = size
@@ -520,6 +609,41 @@ fn parse_reply(msg u8[], qname u8[], qtype int, out IP[]) -> (IP[], int, bool) i
 		off += size
 	}
 	return out, rcode, true
+}
+
+// owns reports whether the record at msg[off:] is owned by name (an encoded name).
+fn owns(msg u8[], off int, name u8[]) -> bool {
+	_, ok := match_name(msg, off, name)
+	return ok
+}
+
+// read_name copies the name at msg[off:], following compression pointers, into dst as an encoded
+// name (length bytes, labels, the root's 0) and returns its length.
+fn read_name(msg u8[], off int, dst u8[]) -> (int, bool) {
+	n, jumps := 0, 0
+	loop {
+		if off >= len(msg) {
+			return 0, false
+		}
+		l := int(msg[off])
+		if l&0xc0 == 0xc0 {
+			if off+1 >= len(msg) or jumps == 32 {
+				return 0, false
+			}
+			off = (l&0x3f)<<8 | int(msg[off+1])
+			jumps++
+			continue
+		}
+		if l&0xc0 != 0 or off+1+l > len(msg) or n+1+l > len(dst) {
+			return 0, false
+		}
+		copy(dst[n:], msg[off:off+1+l])
+		n += 1 + l
+		off += 1 + l
+		if l == 0 {
+			return n, true
+		}
+	}
 }
 
 fn lower(c u8) -> u8 {

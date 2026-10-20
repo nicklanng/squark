@@ -542,3 +542,311 @@ func TestServeAdmin(t *testing.T) {
 		t.Errorf("/readyz after set_ready(false): %d %q", c, b)
 	}
 }
+
+// TestGracefulStopCapsTimers (V17): during a graceful stop, I/O that already has a timer (with
+// deadline 60s, read_timeout 60s) also times out at 0.9 × the grace period, so the program stops
+// cleanly; it once kept its own 60s timer and the program was killed at the end of the grace.
+func TestGracefulStopCapsTimers(t *testing.T) {
+	src := `program {
+	shutdown 2s
+}
+
+use net, runtime, time
+
+thread results str chan[2]
+
+fn wait(conn net.Conn, kind int) -> str {
+	var buf u8[16]
+	var err error
+	if kind == 0 {
+		with deadline 60 * time.second {
+			_, err = conn.read(buf[:])
+		}
+	} else {
+		_, err = conn.read_timeout(buf[:], 60 * time.second)
+	}
+	return err.message()
+}
+
+task reader(conn net.Conn, kind int) pool 2 { results <- wait(conn, kind) }
+
+fn run() -> ! {
+	runtime.stop_gracefully()
+	l := net.listen("127.0.0.1:0")!
+	var b u8[32]
+	addr := str(net.append_host_port(b[:0], "127.0.0.1", l.port()))
+	c1 := net.dial(addr)!
+	s1 := l.accept()!
+	c2 := net.dial(addr)!
+	s2 := l.accept()!
+	start reader(c1, 0)
+	start reader(c2, 1)
+	println("ready")
+	println(<-results)
+	println(<-results)
+	s1.close()!
+	s2.close()!
+	return nil
+}
+
+fn main() {
+	if err := run(); err != nil {
+		println(err.message())
+	}
+}
+`
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
+	bin := filepath.Join(dir, "p")
+	if _, err := Build(Options{Dir: dir, Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin)
+	stdout, _ := cmd.StdoutPipe()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill() })
+	sc := bufio.NewScanner(stdout)
+	if !sc.Scan() || sc.Text() != "ready" {
+		t.Fatalf("no ready line: %q %s", sc.Text(), stderr.String())
+	}
+	began := time.Now()
+	cmd.Process.Signal(syscall.SIGTERM)
+	var lines []string
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	err := cmd.Wait()
+	took := time.Since(began)
+	if exitCode(err) != 0 || len(lines) != 2 || lines[0] != "i/o timeout" || lines[1] != "i/o timeout" {
+		t.Errorf("exit %d after %v, output %q, stderr %s", exitCode(err), took, lines, stderr.String())
+	}
+	if took < 1500*time.Millisecond || took > 2*time.Second {
+		t.Errorf("stopped after %v, want about 0.9 × 2s", took)
+	}
+}
+
+// TestHTTPIdleTimeout (V11): connections that send nothing, or go quiet between keep-alive
+// requests, are closed after http.idle_timeout: they once stayed open for ever, and eight of them
+// used up connections 8 so the server answered no one else.
+func TestHTTPIdleTimeout(t *testing.T) {
+	src := `program {
+	connections 8
+}
+
+use http, os, time
+
+fn hi(w *http.ResponseWriter, r *http.Request) {
+	w.text(200, "hi\n")
+}
+
+fn main() {
+	http.idle_timeout = time.second
+	if err := http.listen_and_serve(os.arg(1), hi); err != nil {
+		println("error:", err.message())
+	}
+}
+`
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
+	bin := filepath.Join(dir, "p")
+	if _, err := Build(Options{Dir: dir, Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	_, addr, out, _ := startServer(t, bin)
+	// one keep-alive connection that goes quiet after a request
+	ka, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ka.Close()
+	fmt.Fprintf(ka, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+	if _, err := http.ReadResponse(bufio.NewReader(ka), nil); err != nil {
+		t.Fatal(err)
+	}
+	// and silent ones, up to the connections limit (startServer's probe may still hold one)
+	var silent []net.Conn
+	for i := 0; i < 6; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		silent = append(silent, c)
+	}
+	for i, c := range append(silent, ka) {
+		c.SetReadDeadline(time.Now().Add(4 * time.Second))
+		if n, err := c.Read(make([]byte, 64)); err != io.EOF {
+			t.Fatalf("connection %d: read %d, %v; want EOF once idle_timeout passes\n%s", i, n, err, out.String())
+		}
+	}
+	cl := &http.Client{Timeout: 2 * time.Second}
+	resp, err := cl.Get("http://" + addr + "/")
+	if err != nil {
+		t.Fatalf("after the idle connections closed: %v\n%s", err, out.String())
+	}
+	resp.Body.Close()
+}
+
+// TestHTTPWriteTimeout (V12): a client that requests a large response and doesn't read it is
+// disconnected after http.write_timeout; it once held the only serve_conn task for good, so the
+// next client was never served.
+func TestHTTPWriteTimeout(t *testing.T) {
+	src := `program {
+	pool http.serve_conn 1
+	sockbuf 4K
+}
+
+use http, os, time
+
+fn handle(w *http.ResponseWriter, r *http.Request) {
+	if r.path == "/big" {
+		var chunk u8[4096]
+		for i in 0..2560 {
+			w.write(chunk[:])
+		}
+		return
+	}
+	w.text(200, "small\n")
+}
+
+fn main() {
+	http.write_timeout = 300 * time.millisecond
+	if err := http.listen_and_serve(os.arg(1), handle); err != nil {
+		println("error:", err.message())
+	}
+}
+`
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.sq"), []byte(src), 0o644)
+	bin := filepath.Join(dir, "p")
+	if _, err := Build(Options{Dir: dir, Output: bin}); err != nil {
+		t.Fatal(err)
+	}
+	_, addr, out, _ := startServer(t, bin)
+	stuck, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stuck.Close()
+	stuck.(*net.TCPConn).SetReadBuffer(4096)
+	fmt.Fprintf(stuck, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n") // and never read
+	time.Sleep(200 * time.Millisecond)
+	cl := &http.Client{Timeout: 3 * time.Second}
+	began := time.Now()
+	resp, err := cl.Get("http://" + addr + "/small")
+	if err != nil {
+		t.Fatalf("second client: %v (after %v)\n%s", err, time.Since(began), out.String())
+	}
+	resp.Body.Close()
+}
+
+// TestAdminThroughStop (V28): the admin port answers /readyz (503) until the program exits, even
+// past 0.9 × the grace period, when every other task's I/O times out; it once stopped there.
+func TestAdminThroughStop(t *testing.T) {
+	src := `program {
+	shutdown 2s
+}
+
+use http, os, runtime, time
+
+fn main() {
+	runtime.stop_gracefully()
+	if err := http.serve_admin(os.arg(1)); err != nil {
+		panic(err)
+	}
+	time.sleep(time.hour) // a stop that never finishes
+}
+`
+	bin := buildSource(t, src)
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	admin := l.Addr().String()
+	l.Close()
+	cmd := exec.Command(bin, admin)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	ready := func() (int, error) {
+		resp, err := client.Get("http://" + admin + "/readyz")
+		if err != nil {
+			return 0, err
+		}
+		resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+	for i := 0; ; i++ {
+		if code, err := ready(); err == nil && code == 200 {
+			break
+		}
+		if i == 100 {
+			t.Fatalf("admin port never answered\n%s", out.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	began := time.Now()
+	cmd.Process.Signal(syscall.SIGTERM)
+	time.Sleep(1900*time.Millisecond - time.Since(began)) // past the 1.8s cap, before the 2s exit
+	if code, err := ready(); err != nil || code != 503 {
+		t.Errorf("/readyz at %v into the stop: %d, %v; want 503\n%s", time.Since(began), code, err, out.String())
+	}
+}
+
+// TestWorkersSecondSignal (V29): with workers N, a second SIGTERM during a graceful stop ends the
+// program at once, as with one process; the supervisor once passed on only the first.
+func TestWorkersSecondSignal(t *testing.T) {
+	src := `program {
+	shutdown 6s
+	workers 2
+}
+
+use net, runtime
+
+fn run() -> ! {
+	runtime.stop_gracefully()
+	l := net.listen("127.0.0.1:0")!
+	var b u8[32]
+	c := net.dial(str(net.append_host_port(b[:0], "127.0.0.1", l.port())))!
+	s := l.accept()!
+	println("ready")
+	var buf u8[16]
+	c.read(buf[:])
+	s.close()!
+	return nil
+}
+
+fn main() {
+	if err := run(); err != nil {
+		println(err.message())
+	}
+}
+`
+	bin := buildSource(t, src)
+	cmd := exec.Command(bin)
+	stdout, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	sc := bufio.NewScanner(stdout)
+	for i := 0; i < 2; i++ { // both workers
+		if !sc.Scan() {
+			t.Fatal("no ready line")
+		}
+	}
+	go io.Copy(io.Discard, stdout)
+	cmd.Process.Signal(syscall.SIGTERM)
+	time.Sleep(300 * time.Millisecond)
+	began := time.Now()
+	cmd.Process.Signal(syscall.SIGTERM)
+	err := cmd.Wait()
+	if took := time.Since(began); exitCode(err) != 143 || took > time.Second {
+		t.Errorf("after a second SIGTERM: exit %d after %v, want 143 at once", exitCode(err), took)
+	}
+}

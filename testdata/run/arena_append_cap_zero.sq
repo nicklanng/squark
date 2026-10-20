@@ -1,0 +1,55 @@
+program
+
+// append(...) in a zeroes the capacity it adds: s[:cap(s)] once read stale stack data (and
+// dereferenced it as pointers), both when the slice grew in place and when it was copied.
+//squark:noinline
+fn fill(s int[]) {
+	for i in 0..len(s) {
+		s[i] = 0x4141414141
+	}
+}
+
+//squark:noinline
+fn dirty() -> int {
+	var junk int[4096]
+	fill(junk[:])
+	return junk[4095] & 1
+}
+
+//squark:noinline
+fn grow() {
+	x := 1
+	with arena a 4K {
+		var ps (*int)[]
+		ps = append(ps, &x) in a // a new block
+		ps = append(ps, &x, &x, &x, &x) in a // grows in place
+		var ns int[]
+		ns = append(ns, 1, 2) in a
+		ps = append(ps, &x) in a // ps is no longer on top: copied
+		ns = append(ns, int[]{3, 4, 5}...) in a
+		var ss str[]
+		ss = append(ss, "a") in a
+		nonzero := 0
+		for p in ps[len(ps):cap(ps)] {
+			if p != nil {
+				nonzero++
+			}
+		}
+		for n in ns[len(ns):cap(ns)] {
+			if n != 0 {
+				nonzero++
+			}
+		}
+		for s in ss[len(ss):cap(ss)] {
+			if len(s) != 0 {
+				nonzero++
+			}
+		}
+		println(len(ps), cap(ps) > len(ps), len(ns), cap(ns) > len(ns), len(ss), cap(ss) > len(ss), nonzero)
+	}
+}
+
+fn main() {
+	println(dirty())
+	grow()
+}

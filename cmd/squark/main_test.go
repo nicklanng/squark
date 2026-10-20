@@ -170,3 +170,32 @@ func TestCLIArgs(t *testing.T) {
 		t.Errorf("build hello from its parent: %v %s", err, out)
 	}
 }
+
+// TestCLIFlagsPerCommand (V62): a flag the subcommand doesn't take is an error (exit 2), not
+// silently ignored, and -manifest's value is checked before anything is built.
+func TestCLIFlagsPerCommand(t *testing.T) {
+	bin := squarkBin(t)
+	dir := filepath.Join(t.TempDir(), "p")
+	writeProgram(t, dir, "program\n\nfn main() { println(\"ok\") }\n")
+	out := filepath.Join(t.TempDir(), "out")
+	for _, args := range [][]string{
+		{"run", "-o", out, dir},
+		{"run", "-static", dir},
+		{"check", "-cpu", "bogus", dir},
+		{"doc", "-v", dir},
+		{"build", "-manifest", "nomad", "-o", out, dir},
+	} {
+		cmd := exec.Command(bin, args...)
+		msg, err := cmd.CombinedOutput()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+			t.Errorf("squark %s: %v, %s; want exit 2", strings.Join(args, " "), err, msg)
+		}
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Errorf("a binary was built before -manifest was checked")
+	}
+	if msg, err := exec.Command(bin, "run", "-v", dir).CombinedOutput(); err != nil || !strings.HasSuffix(string(msg), "ok\n") {
+		t.Errorf("squark run -v: %v\n%s", err, msg)
+	}
+}

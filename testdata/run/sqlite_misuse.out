@@ -1,0 +1,6 @@
+failed prepare: true true
+finalize: true true
+copy after finalize: true 0
+stale copy: true true 2
+close: true true true
+prepare after close: true

@@ -16,6 +16,7 @@ type lexer struct {
 	col  int
 
 	insertSemi bool
+	prevTok    Tok // the token before, for a member spelled like a keyword (p.for, .case)
 	errs       ErrorList
 
 	// pragmas collects "//squark:..." comment lines seen since the last token.
@@ -179,11 +180,15 @@ again:
 
 	t := l.scan(p)
 	t.end = l.pos()
+	afterDot := l.prevTok == PERIOD
+	l.prevTok = t.tok
 	switch t.tok {
 	case IDENT, INT, FLOAT, CHAR, STRING, BREAK, CONTINUE, RETURN, INC, DEC, RPAREN, RBRACK, RBRACE, ARENA, BANG, CHAN:
 		l.insertSemi = true
 	default:
-		l.insertSemi = false
+		// a member may be spelled like a keyword (k := K.case): it ends a line like a name
+		_, kw := keywords[t.lit]
+		l.insertSemi = afterDot && kw
 	}
 	if len(l.pragmas) > 0 && t.tok != SEMICOLON {
 		t.pragmas = l.pragmas
@@ -350,7 +355,7 @@ func (l *lexer) number(p Pos) lexToken {
 			}
 		}
 		hexDigits()
-		if hex && (l.peekc() == '.' || l.peekc() == 'p' || l.peekc() == 'P') {
+		if hex && ((l.peekc() == '.' && l.peekAt(1) != '.') || l.peekc() == 'p' || l.peekc() == 'P') { // 0x0..0x3 is a range
 			// hexadecimal float: 0x1.8p3
 			if l.peekc() == '.' {
 				l.next()

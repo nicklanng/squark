@@ -1,0 +1,21 @@
+program
+
+// The storage-copy error's hint fits what is ranged over: a channel's values and a map's elements
+// have no index to take the address of (the hint once said "use &rc[i]" for both).
+struct Reg { m int[int; 4] }
+
+thread rc Reg chan[2]
+thread regs Reg[int; 16]
+thread arr Reg[2]
+
+fn main() {
+	for x in rc { // ERROR "send a pointer to the storage"
+		_ = x
+	}
+	for k, r in regs { // ERROR "map keys to indexes"
+		_, _ = k, r
+	}
+	for i, a in arr { // ERROR "use &arr[i]"
+		_, _ = i, a
+	}
+}

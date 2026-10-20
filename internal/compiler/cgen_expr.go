@@ -1206,7 +1206,12 @@ func (g *gen) tryExpr(e *TryExpr) string {
 	}
 	fmt.Fprintf(&b, "if (__builtin_expect(%s.msg.p != NULL, 0)) { ", errExpr)
 	if g.fn != nil {
+		if len(g.trySaved) > 0 {
+			// returning from inside `v, ok := x in a`: its jmp_buf dies with this frame
+			fmt.Fprintf(&b, "sq_try_leave(%s); ", g.trySaved[0])
+		}
 		b.WriteString(g.unwindPop())
+		b.WriteString(g.deadlineReset())
 		for i := len(g.fn.Defers) - 1; i >= 0; i-- {
 			d := g.fn.Defers[i]
 			fmt.Fprintf(&b, "if (_d%d_on) { %s; } ", d.ID, g.deferCall(d))

@@ -162,6 +162,17 @@ impl Decoder {
 		}
 	}
 
+	// mismatch fails a read that wanted another value than what c starts: Type for a value of
+	// another type, Syntax for anything that starts no value (the input's end, a '}' or ',').
+	fn mismatch(&self, c u8) {
+		switch c {
+		case '{', '[', '"', '-', 't', 'f', 'n', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			self.fail(Type)
+		default:
+			self.fail(Syntax)
+		}
+	}
+
 	fn peek(&self) -> u8 {
 		self.ws()
 		if self.pos >= len(self.data) {
@@ -384,8 +395,8 @@ impl Decoder {
 		if self.err != nil {
 			return false
 		}
-		if self.peek() != '"' {
-			self.fail(Type)
+		if c := self.peek(); c != '"' {
+			self.mismatch(c)
 			return false
 		}
 		self.pos++
@@ -573,7 +584,7 @@ impl Decoder {
 		}
 		c := self.peek()
 		if c != '-' and (c < '0' or c > '9') {
-			self.fail(Type)
+			self.mismatch(c)
 			return 0, false
 		}
 		start := self.pos
@@ -602,7 +613,7 @@ impl Decoder {
 		}
 		c := self.peek()
 		if c != '-' and (c < '0' or c > '9') {
-			self.fail(Type)
+			self.mismatch(c)
 			return 0, false
 		}
 		start := self.pos
@@ -634,7 +645,7 @@ impl Decoder {
 		if self.err == nil and self.literal("false") {
 			return false, true
 		}
-		self.fail(Type)
+		self.mismatch(self.peek())
 		return false, false
 	}
 

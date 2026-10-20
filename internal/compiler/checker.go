@@ -36,8 +36,9 @@ type Checker struct {
 	pkg  *Package
 	errs ErrorList
 
-	fileImports map[string]*Package // imports of the file being checked
-	fileScopes  map[*File]map[string]*Package
+	fileImports   map[string]*Package // imports of the file being checked
+	resolvingVars map[*Var]bool       // package variables whose declared type is being resolved
+	fileScopes    map[*File]map[string]*Package
 
 	// function context
 	fn        *Func
@@ -113,6 +114,9 @@ func Check(prog *Program) error {
 		return ErrorList{{Pos{File: prog.Main.Dir}, "function main is undeclared in the program"}}
 	}
 	prog.MainFunc = main.Func
+	if f := main.Func; f.Extern != "" || f.IsTask || f.Decl == nil || f.Decl.Body == nil {
+		return ErrorList{{main.Pos, "main must be a function with a body: fn main() { ... }"}}
+	}
 	if len(main.Func.Sig.Params) != 0 || len(main.Func.Sig.Results) != 0 {
 		return ErrorList{{main.Pos, "fn main must have no arguments and no return values"}}
 	}
@@ -373,7 +377,16 @@ func (c *Checker) checkConstData(name string, x Expr) {
 func isErrorConstExpr(x Expr) bool {
 	switch e := unparen(x).(type) {
 	case *CallExpr:
-		return e.Builtin == "__error" || isErrorCall(e)
+		if e.Builtin != "__error" && !isErrorCall(e) {
+			return false
+		}
+		// a constant error is static data: its code and message must be constants too
+		for _, a := range e.Args {
+			if a.info().Const == nil {
+				return false
+			}
+		}
+		return true
 	}
 	v := readOnlyVar(x)
 	return v != nil && v.ArenaSize == 0 && !v.Shared
@@ -476,6 +489,9 @@ const MaxPool = 1 << 24
 
 func (c *Checker) constSize(x Expr, what string) (int64, bool) {
 	c.expr(x)
+	if x.info().Mode == ModeInvalid || x.info().T == tInvalid {
+		return 0, false // already reported
+	}
 	v, ok := constInt(x)
 	if !ok || !isInteger(x.info().T) || v < 0 {
 		c.errorf(x.Pos(), "%s must be a non-negative integer constant", what)
@@ -766,7 +782,7 @@ func (c *Checker) resolveDecls(pkg *Package) {
 			lit, _ := d.Value.(*BasicLit)
 			unit := map[string]int64{"ms": 1e6, "s": 1e9, "m": 60e9}[d.Unit]
 			n, err := strconv.ParseInt(lit.Lit, 10, 64)
-			if lit.Kind != INT || unit == 0 || err != nil || n < 1 || n*unit > 3600e9 {
+			if lit.Kind != INT || unit == 0 || err != nil || n < 1 || n > 3600e9/unit { // not n*unit: that can overflow
 				c.errorf(d.P, "shutdown takes a duration from 1ms to 1h: shutdown 20s (or 500ms, 2m)")
 				continue
 			}
@@ -870,7 +886,9 @@ func (c *Checker) globalVarSpec(vs *ValueSpec) {
 		} else {
 			c.assignable(x, t, "variable declaration")
 		}
-		if n.Obj.Var.ConstData {
+		// constant composites, and error constants (const E = error(...), fault E ...): static
+		// data, built from constants only
+		if v := n.Obj.Var; v.ConstData || v.ReadOnly && !v.Shared && isErrorValue(x) {
 			c.checkConstData(n.Name, x)
 		}
 		if n.Obj.Var.Shared && t != tInvalid {
@@ -947,7 +965,7 @@ func (c *Checker) enumMembers(n *Named, ts *TypeSpec) {
 			v = cv
 		}
 		if _, ok := representable(v, n.underlying); !ok {
-			c.errorf(m.Name.P, "enum member %s.%s = %s overflows %s", n.Obj.Name, m.Name.Name, v, n.underlying)
+			c.errorf(m.Name.P, "enum member %s.%s = %s overflows %s", n.Obj.Name, m.Name.Name, constText(v), n.underlying)
 		}
 		if n.EnumMember(m.Name.Name) != nil {
 			c.errorf(m.Name.P, "duplicate enum member %s.%s", n.Obj.Name, m.Name.Name)
@@ -1267,6 +1285,9 @@ func (c *Checker) typExpr1(x Expr) Type {
 		}
 		c.expr(e.Len)
 		cv := e.Len.info().Const
+		if e.Len.info().Mode == ModeInvalid {
+			return tInvalid // already reported
+		}
 		if cv == nil || !isInteger(e.Len.info().T) {
 			c.errorf(e.Len.Pos(), "array length %s must be a constant integer", exprString(e.Len))
 			return tInvalid

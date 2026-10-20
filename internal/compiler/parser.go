@@ -8,7 +8,7 @@ import (
 type parser struct {
 	lx      *lexer
 	tok     lexToken
-	ahead   *lexToken // one token of lookahead (see peek)
+	ahead   []lexToken // tokens of lookahead (see peek)
 	prevEnd Pos       // end of the last token consumed
 	errs    ErrorList
 	exprLev int   // < 0: in control clause (composite literals not allowed)
@@ -41,20 +41,23 @@ func (p *parser) next() {
 	if !(p.tok.tok == SEMICOLON && p.tok.lit == "\n") && p.tok.end.Line > 0 {
 		p.prevEnd = p.tok.end
 	}
-	if p.ahead != nil {
-		p.tok, p.ahead = *p.ahead, nil
+	if len(p.ahead) > 0 {
+		p.tok = p.ahead[0]
+		p.ahead = p.ahead[1:]
 		return
 	}
 	p.tok = p.lx.Next()
 }
 
 // peek returns the token after p.tok.
-func (p *parser) peek() lexToken {
-	if p.ahead == nil {
-		t := p.lx.Next()
-		p.ahead = &t
+func (p *parser) peek() lexToken { return p.peekN(1) }
+
+// peekN returns the nth token after p.tok (1: the next).
+func (p *parser) peekN(n int) lexToken {
+	for len(p.ahead) < n {
+		p.ahead = append(p.ahead, p.lx.Next())
 	}
-	return *p.ahead
+	return p.ahead[n-1]
 }
 
 func (p *parser) errorf(pos Pos, format string, args ...any) {
@@ -146,7 +149,7 @@ func (p *parser) file(path string) *File {
 				continue
 			}
 			if !(p.tok.tok == IDENT && directiveWords[p.tok.lit]) {
-				p.errorf(p.tok.pos, "expected a directive (budget, pool, workers, threads, link, cflags or ldflags), found %s", p.found())
+				p.errorf(p.tok.pos, "expected a directive (budget, pool, workers, threads, shutdown, connections, sockbuf, heap, link, cflags or ldflags), found %s", p.found())
 				panic(bailout{})
 			}
 			f.Directives = append(f.Directives, p.directive())
@@ -534,7 +537,11 @@ func (p *parser) signatureWith(pos Pos, params []*Field) *FuncType {
 		p.errorf(p.tok.pos, "in after the parameters says where results point: the function has none")
 		panic(bailout{})
 	} else if p.startsResultType() {
-		p.errorf(p.tok.pos, "results follow ->: write -> %s", p.found())
+		what := p.found()
+		if p.tok.tok == IDENT {
+			what = p.tok.lit // the type's name, not "identifier int"
+		}
+		p.errorf(p.tok.pos, "results follow ->: write -> %s", what)
 		panic(bailout{})
 	}
 	return ft
@@ -789,16 +796,21 @@ func (p *parser) genDecl(top, pub bool) *GenDecl {
 // atMethod reports whether a method declaration (fn or pub fn) starts here.
 // (In an enum, a member may be called fn: then a comma, a newline, = or } follows it.)
 // Methods are declared only in impl blocks; atMethod finds them elsewhere to say so.
+// atMethod reports whether a struct body continues with a method (fn name(...)) rather than a
+// field named fn ("fn int", "pub fn str").
 func (p *parser) atMethod() bool {
+	k, fn := 0, p.tok.tok == FN // k: tokens before fn
 	if p.tok.tok == PUB {
-		return p.peek().tok == FN
+		k, fn = 1, p.peek().tok == FN
 	}
-	if p.tok.tok != FN {
+	if !fn {
 		return false
 	}
-	switch p.peek().tok {
+	switch p.peekN(k + 1).tok {
 	case COMMA, SEMICOLON, RBRACE, ASSIGN:
 		return false
+	case IDENT:
+		return p.peekN(k+2).tok == LPAREN // fn name(: else a field fn of a named type
 	}
 	return true
 }

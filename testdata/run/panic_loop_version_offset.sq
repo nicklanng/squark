@@ -1,0 +1,27 @@
+program
+
+// An offset that is itself a subtraction (xs[k - z + i]) is range-checked as k - z: the unchecked
+// copy of the loop once checked -z, and read the next package array.
+fn f(xs int[], k int, z int) -> int {
+	s := 0
+	for i := 0; i < len(xs); i++ {
+		s += xs[k - z + i]
+	}
+	return s
+}
+
+fn g(xs int[], k int, z int, n int) -> int {
+	s := 0
+	for i := 0; i < n; i++ {
+		s += xs[k - z + 2*i]
+	}
+	return s
+}
+
+thread data int[4] = int[4]{1, 2, 3, 4}
+thread after int[4] = int[4]{100, 200, 300, 400}
+
+fn main() {
+	println(f(data[:], 1, 1), g(data[:], 3, 2, 2))
+	println(g(data[:], 2, 0, 2))
+}

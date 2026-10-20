@@ -1123,222 +1123,325 @@ essentials are inline. The lifetime checker itself held up: every escape tried w
   `testdata/run/preempt_threads.sq`; TestThreads now expects a handler panic to end only its
   connection (it had expected the process to exit, and passed only when shard ≥1 served /crash:
   the flaky "process did not exit" under gcc).
-- [ ] **V6. Loop versioning: an offset `a - b + i` is range-checked as `-b`** (bug: silent OOB)
+- [x] **V6. Loop versioning: an offset `a - b + i` is range-checked as `-b`** (bug: silent OOB) —
+  fixed: `loopIndex` records the negation (`neg`) instead of inferring it from the offset's shape;
+  test: `testdata/run/panic_loop_version_offset.sq`
   `cgen_loop.go:453` stores `off = ix.X` = `k - z`; `offsetC` (565-573) treats any SUB offset as
   `k*iv - y` and emits `-(z)`. `for i := 0; i < len(xs); i++ { s += xs[k - z + i] }` with k=2,
   z=0 over `int[4]` read the next package array (307); the store form overwrote it. Fix: record
   the negation in `loopIndex` (`off = ix.Y, neg = true`). Test: `panic_loop_version_offset.sq`
   (also `a - b + 2*i`).
-- [ ] **V7. Loop versioning: `len(p.m)` of a map field is taken as a fixed bound** (bug: OOB read)
+- [x] **V7. Loop versioning: `len(p.m)` of a map field is taken as a fixed bound** (bug: OOB read) —
+  fixed: a `len()` bound counts as fixed only for a slice or string; test:
+  `testdata/run/panic_loop_version_maplen.sq`
   `cgen_loop.go:380-384` accepts any `header(x)`; `p.m[1000+i] = 1` in the body grows the map
   and `memSafe` allows it. `for i := 0; i < len(p.m); i++ { p.m[1000+i] = 1; s += xs[i]; ... }`
   read past `xs` (310). Channel views likely too. Fix: accept header bounds only for slices and
   strings. Test: `panic_loop_version_maplen.sq`.
-- [ ] **V8. A `!` return inside `v, ok := x in a` leaves `try_jb` pointing at a dead frame** (bug)
+- [x] **V8. A `!` return inside `v, ok := x in a` leaves `try_jb` pointing at a dead frame** (bug) —
+  fixed: `gen.trySaved` holds the enclosing try regions; a `!` return restores the outermost first;
+  test: `testdata/run/in_try_return.sq`
   `cgen_expr.go:1192` (tryExpr) returns between `sq_try_enter` and `sq_try_leave`. `v, ok :=
   f(true)! + "x" in a` in `h`, then a full arena in the caller's own `v, ok := ... in a`: longjmp
   into h's returned frame, SIGABRT. Fix: a stack of active try regions in `gen`; the early return
   emits `sq_try_leave(outermost saved)` first. Test: `in_try_return.sq` (+ ASan).
-- [ ] **V9. `append(...) in a` leaves the new capacity uninitialized** (bug: garbage pointers)
+- [x] **V9. `append(...) in a` leaves the new capacity uninitialized** (bug: garbage pointers) —
+  fixed: `sq_arena_grow` zeroes the capacity it adds (in place `[old, new)`, copied `[used, new)`);
+  test: `testdata/run/arena_append_cap_zero.sq`
   `sq_arena_grow` (`sq_rt.c`) zeroes neither path; a stack arena is uninitialized memory. `s =
   append(s, &x) in a; t := s[:cap(s)]; *t[1]` dereferenced stale stack data (0x4141414141). Fix:
   zero `[used_bytes, new_bytes)` on copy, `[old_bytes, new_bytes)` in place. Test:
   `arena_append_cap_zero.sq` (pointer, int, string slices; ASan).
-- [ ] **V10. postgres: a long SCRAM nonce from the server panics the client** (bug)
+- [x] **V10. postgres: a long SCRAM nonce from the server panics the client** (bug) — fixed: a nonce
+  that doesn't fit is `Protocol`; test: `TestPostgresHostileNonce` (a fake server in
+  `postgres_fake_test.go`)
   `postgres.sq:722` appends `full_nonce` (up to ~256 B) into `final_bare u8[160]`: "append
   exceeds capacity (need 183, capacity 160)". Fix: `Protocol` error when the nonce doesn't fit
   (or size from `cap(server_first)`). Test: fake server sending a 200-byte nonce extension.
-- [ ] **V11. http: silent and idle keep-alive connections are never closed** (bug: DoS)
+- [x] **V11. http: silent and idle keep-alive connections are never closed** (bug: DoS) — fixed:
+  `http.idle_timeout` (60s): a parked connection records when it expires and the scheduler sweeps
+  about once a second (`idle_sweep`); `Conn.park_idle` takes the timeout; test:
+  `TestHTTPIdleTimeout`
   `http.sq:618-625` parks a quiet connection (`park_idle`, no timer, `sq_rt.c:2072`);
   `read_header_timeout` starts only at the first byte. 30 silent connections under `connections
   32` stopped the server answering; under `ulimit -n 48` new connections were reset. Fix: an idle
   timeout for parked connections (sweep or timer, default ~60s) and the header timeout from
   accept. Test: a 300ms idle timeout; silent and idle keep-alive connections reach EOF in 1s.
-- [ ] **V12. http: writes have no timeout; clients that don't read pin every serve_conn** (bug: DoS)
+- [x] **V12. http: writes have no timeout; clients that don't read pin every serve_conn** (bug: DoS)
+  — fixed: `http.write_timeout` (10s) bounds each response write (`send`); once a write fails the
+  rest of the response is dropped; test: `TestHTTPWriteTimeout`
   `conn.write`/`write2` (`http.sq:278-331`, `write_fd`, `sq_writev2`) wait only for the task's
   deadline, which serve_request doesn't set; with the pool full `start serve_conn` blocks
   accepting. 20 pipelining non-readers hung a pool-16 server (and 2 non-reading scrapers hang the
   admin port). Fix: a write deadline per response (`with deadline` around handler + flushes), close
   on Timeout. Test: pool 1, 300ms write timeout, a 10MB response nobody reads.
-- [ ] **V13. tour: any client can compile and run code by sending `Host: localhost`** (bug: security)
+- [x] **V13. tour: any client can compile and run code by sending `Host: localhost`** (bug:
+  security) — fixed: requests must come from a loopback peer, with the per-launch key (`?k=` in the
+  URL, sent back as X-Squark-Tour); `-http` must be a loopback address; test: `TestHandlerGuards`
   `internal/tour/server.go:85,95` checks only the Host header. With `-http :3999` that is remote
   code execution, and on 127.0.0.1 any local user can do it. Fix: require a loopback
   `RemoteAddr`, refuse (or require a flag for) a non-loopback `-http`, add a per-launch token in
   the URL and the run header. Test: RemoteAddr 203.0.113.7 with `Host: localhost` → 403.
-- [ ] **V14. Calling a function where a constant is evaluated crashes the compiler** (bug)
+- [x] **V14. Calling a function where a constant is evaluated crashes the compiler** (bug) — fixed:
+  a call whose callee has no signature yet is "not constant"; follow-up size errors are skipped;
+  test: `testdata/errors/const_call.sq`
   `const c = f()` (also `enum E { a = f() }`, `struct S { a int[f()] }`, `X: int[f()]`, `arena
   a f()`): nil `*Signature` at `call.go:47/164`, since constants resolve before signatures.
   Expected "f() is not constant". Test: `testdata/errors/const_call.sq`.
-- [ ] **V15. A package variable whose type mentions itself overflows the Go stack** (bug)
+- [x] **V15. A package variable whose type mentions itself overflows the Go stack** (bug) — fixed:
+  `declaredVarType` marks the variable while resolving; test: `testdata/errors/var_type_cycle.sq`
   `thread m int[int; m]`, `thread a int[len(a)]`, `thread a int[..a]`, mutual `len(b)`/`len(a)`,
   `thread int int[int]`: `declaredVarType` (`expr.go:188`) has no in-progress mark. Fix: mark
   before `typExpr`, report the cycle. Test: errors annotations.
-- [ ] **V16. Constant shift counts are unbounded** (bug: compiler panic or OOM)
+- [x] **V16. Constant shift counts are unbounded** (bug: compiler panic or OOM) — fixed: "invalid
+  shift count" above 1100 bits; test: `testdata/errors/shift_const.sq`
   `u16(1 << (1<<63 - 30))` panics in `constant.Shift`; `1 << (1 << 40)` gets the compiler killed
   (`expr.go:1637`). Fix: "invalid shift count" above ~1100. Test: `testdata/errors/shift_const.sq`.
 
 ### P1: wrong results, C compiler failures, broken std
 
-- [ ] **V17. The graceful-stop cap misses I/O that already has a timer** (bug)
+- [x] **V17. The graceful-stop cap misses I/O that already has a timer** (bug) — fixed: `stop_shard`
+  brings an existing timer forward to the cap, and `sq_wait_idle` clamps to the effective deadline;
+  test: `TestGracefulStopCapsTimers`
   `stop_shard` (`sq_rt.c`) caps only tasks with `heap_index < 0`; `sq_wait_idle` ignores
   `stop_cap`. A read under `with deadline 60s` or `read_timeout(.., 60s)` during a stop isn't
   cut at 0.9 × grace, so the program is killed (exit 1). Fix: clamp `wake_at` of waiting tasks to
   the cap (heap_up), and clamp `sq_wait_idle`'s timer to `effective_deadline`. Test: SIGTERM with
   both kinds of read; Timeout at ~0.9 × grace, exit 0.
-- [ ] **V18. With threads, listener backlogs use up `connections N`** (bug)
+- [x] **V18. With threads, listener backlogs use up `connections N`** (bug) — fixed: a listener is
+  charged `listener_share()`: N/16 (at most 128) split across the shards, and released the same;
+  test: `TestListenSharesConnections`
   `sq_listen_tcp` reserves `min(128, N/16)` per listening shard (and on macOS the shards share one
   socket): 16 shards × N/16 = N, so dial and accept fail ("too many connections"). Fix: one
   backlog per address on macOS; split it across shards on Linux; keep the report consistent.
   Test: threads 16, connections 256, all shards listen, dial + accept succeed.
-- [ ] **V19. postgres Pool connections share buffer memory** (bug)
+- [x] **V19. postgres Pool connections share buffer memory** (bug) — fixed: `Pool.init` caps each
+  buffer (3-index slice); test: `TestPostgresPoolBuffers`. (`bufio` and `http_client` extend a
+  caller's buffer to its capacity too, which is their documented use.)
   `Pool.init` (`postgres.sq:865`) slices `mem[i*size:(i+1)*size]` without capping, and `connect`
   (`:378`) extends `buf[:cap(buf)]`: connection 0's buffer covers connection 1's. A query on `a`
   overwrote `b`'s buffered rows. Fix: 3-index slice and/or use `len(buf)`; check `bufio.sq:21`,
   `http_client.sq:103,116` for the same habit. Test: interleaved two-connection fake server.
-- [ ] **V20. sqlite: double finalize/close is use-after-free; a failed prepare gives a NULL handle**
+- [x] **V20. sqlite: double finalize/close is use-after-free; a failed prepare gives a NULL handle**
+  — fixed: wrappers are pooled with a generation, never freed; every method checks it (`misuse`);
+  test: `testdata/run/sqlite_misuse.sq` (also under ASan)
   (bug: memory unsafety via API misuse) `shim.c:227` frees the Stmt, `:127` the DB; `Stmt`/`DB` are
   copyable handles. `st.finalize(); st.finalize()` → SIGSEGV; `st.step()` after a failed
   `prepare` → NULL dereference in C. Fix: `&self` methods that nil the handle, NULL checks
   returning SQLITE_MISUSE in the shim. Test: run test under ASan.
-- [ ] **V21. Loop versioning treats a range's value variable as unchanged** (bug: C compile error)
+- [x] **V21. Loop versioning treats a range's value variable as unchanged** (bug: C compile error) —
+  fixed: the range's value variable is passed to `planLoop` as changed; test:
+  `testdata/run/loop_version_range_value.sq`
   `cgen_loop.go:285-341`: `for i, k in xs { s += ys[i+k] }`, `for i, r in rows { t += r.cells[i] }`
   → "use of undeclared identifier 'k_5'". Fix: pass the range's Key/Value vars to `planLoop` as
   changed. Test: `loop_version_range_value.sq` (offset, slice, field shapes).
-- [ ] **V22. Loop versioning evaluates `len(f())` of an array-returning call an extra time** (bug)
+- [x] **V22. Loop versioning evaluates `len(f())` of an array-returning call an extra time** (bug) —
+  fixed: `len(f())` with a call isn't invariant; test: `testdata/run/loop_version_len_call.sq`
   `cgen_loop.go:371-373` (`case *Array: return true`) puts `(void)f()` in the range test: a loop
   that runs zero times still calls f. Fix: require `!hasCall(arg)`, or emit the constant length.
   Test: `loop_version_len_call.sq` with call counts.
-- [ ] **V23. `break` inside `start ... else { }` is missed by the missing-return check** (bug)
+- [x] **V23. `break` inside `start ... else { }` is missed by the missing-return check** (bug) —
+  fixed: `hasBreak` looks into a start's else block; test: `testdata/errors/start_else_return.sq`
   `hasBreak` (`stmt.go:977`) has no `*GoStmt` case: `loop { start t() else { break } }` as the last
   statement of `fn g() -> int` compiles and falls off the end (printed `00`). Test:
   `testdata/errors/start_else_return.sq`.
-- [ ] **V24. Package faults and error constants accept non-constant codes and messages** (bug: C
+- [x] **V24. Package faults and error constants accept non-constant codes and messages** (bug: C —
+  fixed: error constants are checked as constant data (code and message constants); test:
+  `testdata/errors/fault_not_constant.sq`
   compile error) `fault G n "y"`, `fault H 2 msg()`, `error[2]{error(n, "a"), ...}`:
   `isErrorConstExpr` (`checker.go:373`) and `errorCtor` don't check constness. Test: errors
   annotations.
-- [ ] **V25. `v, ok := x in a` doesn't check that x has a value or a typed constant** (bug)
+- [x] **V25. `v, ok := x in a` doesn't check that x has a value or a typed constant** (bug) — fixed:
+  `c.value` and `defaultUntyped` on x; test: `testdata/errors/in_try_value.sq`
   `rhsTypes` `*InExpr` case (`stmt.go:212`): `v, ok := f(a) in a` with a void f → C error; `v, ok
   := 5 in a; println(v)` → "untyped int"; `1 << 70 in a` accepted. Fix: `c.value(u)` then
   `defaultUntyped`. Test: errors file + run test (`5 true`).
-- [ ] **V26. SQUARK_THREADS raises the thread count past the worst case the program reports**
+- [x] **V26. SQUARK_THREADS raises the thread count past the worst case the program reports** —
+  fixed: SQUARK_THREADS can lower threads N but not raise it, budget or not (spec updated); test:
+  `TestThreadsEnv`
   (bug) Without a budget `threadsMax` isn't set (`driver.go:459`), and `check_limits` runs before
   `threads_from_env`: `threads 2` run with SQUARK_THREADS=8 reports the 2-thread worst case in
   `squark_memory_worst_case_bytes`, the start-up cgroup check and `-manifest`. Fix: clamp to N
   whenever the worst case is known, or scale per-thread costs at run time after resolving.
-- [ ] **V27. The tour lesson budgets/over-budget fails with gcc** (bug: test) gcc's frames are
+- [x] **V27. The tour lesson budgets/over-budget fails with gcc** (bug: test) gcc's frames are —
+  fixed: the solution's pool is 16; test: `CC=gcc scripts/test-linux.sh`
   larger, so the solution's 256 × 44 KiB stacks exceed its 8 MiB budget (fails at `0e8df6b` too).
   Fix: give the lesson headroom that fits both compilers. Test: `CC=gcc scripts/test-linux.sh`.
 
 ### P2: lesser bugs
 
-- [ ] **V28. The admin port stops answering at the stop cap, not at exit** (bug) `accept_always`
+- [x] **V28. The admin port stops answering at the stop cap, not at exit** (bug) `accept_always` —
+  fixed: `runtime.through_stop()` exempts a task from the stop cap; the admin tasks call it; test:
+  `TestAdminThroughStop`
   waits under `stop_cap` (`sq_rt.c:2633`/`1868`): /readyz fails from 0.9 × grace. Fix: exempt the
   admin listener and its connections from the cap. Test: GET /readyz at 0.95 × grace → 503.
-- [ ] **V29. `workers N`: the supervisor swallows a repeated SIGTERM/SIGINT** (bug)
+- [x] **V29. `workers N`: the supervisor swallows a repeated SIGTERM/SIGINT** (bug) — fixed: the
+  supervisor forwards by a signal count; test: `TestWorkersSecondSignal`
   `sq_rt.c:3191` forwards only a different signal; the spec says a second one ends the program at
   once. Fix: forward by count. Test: two SIGTERMs → exit 143 within ~200ms.
-- [ ] **V30. Deferred calls run under the deadline of a `with deadline` block `return` just left**
+- [x] **V30. Deferred calls run under the deadline of a `with deadline` block `return` just left** —
+  fixed: a function with defers and a deadline block saves the entry deadline (`sq_deadline_get`)
+  and restores it before its deferred calls; test: `testdata/run/deadline_defers.sq`
   (bug) `cgen_stmt.go:104-110`: defers run before the block's cleanup. Fix: save `g->deadline` at
   entry of functions with both, restore before running defers. Test: `deadline.sq` cases.
-- [ ] **V31. Isolate unwinding doesn't restore the deadline (or `try_jb`) before deferred calls**
+- [x] **V31. Isolate unwinding doesn't restore the deadline (or `try_jb`) before deferred calls** —
+  fixed: `sq_unwind` records the deadline and `try_jb` and unwinding restores them; test:
+  `testdata/run/deadline_defers.sq`
   (bug) `sq_unwind_resume` longjmps past `sq_deadline_restore`. Fix: record both in `sq_unwind`
   at push, restore before the jump. Test: extend `isolate.sq`.
-- [ ] **V32. `v, ok := x in a` rewrites `__FILE__, __LINE__` by text, string literals too** (bug)
+- [x] **V32. `v, ok := x in a` rewrites `__FILE__, __LINE__` by text, string literals too** (bug) —
+  fixed: `cString` writes the second `_` of `__` as `\137`, so no literal holds the marker; test:
+  `testdata/run/in_try_literal.sq`
   `cgen_stmt.go:324`: `"__FILE__, __LINE__" + s in a` printed `__FILE__, -__LINE_!`. Fix: a gen
   flag so allocation sites emit `-__LINE__`. Test: `in_try_literal.sq`.
-- [ ] **V33. http mux: `path_value`/`query_param` take `len(raw)` of the 16K request arena per call**
+- [x] **V33. http mux: `path_value`/`query_param` take `len(raw)` of the 16K request arena per
+  call** — fixed: the decoded length only, and a path value is decoded once (`Request.decoded`);
+  test: `TestMuxLargeEscapes`
   (bug) `mux.sq:365`: a 9 KB escaped path read twice → "arena scratch is full", no response. Fix:
   allocate the decoded length, decode once. Test: 7–9 KB escaped values read twice → 200.
-- [ ] **V34. metrics: labels over 79 bytes are cut mid-label; HELP isn't escaped** (bug) `char l[80]`
+- [x] **V34. metrics: labels over 79 bytes are cut mid-label; HELP isn't escaped** (bug) `char
+  l[80]` — fixed: registration panics for a name or labels too long; HELP escapes `\` and newlines;
+  test: `testdata/run/metrics_text.sq`, `testdata/run/panic_metrics_labels.sq`
   in `sq_metric_register`, raw HELP in `metrics.sq:174-188`: the whole scrape becomes invalid.
   Fix: panic at registration when it doesn't fit; escape `\` and newline. Test: both cases.
-- [ ] **V35. DNS: A/AAAA records are accepted for any owner name** (bug) `dns.sq:501-521` skips
+- [x] **V35. DNS: A/AAAA records are accepted for any owner name** (bug) `dns.sq:501-521` skips —
+  fixed: `parse_reply` follows the CNAME chain and takes only records owned by its end; test:
+  `TestLookupIP` (stray records)
   owner names and doesn't follow CNAMEs: an unrelated `A 6.6.6.6` was returned for foo.example
   (a self-pointing owner name too). Fix: follow the chain, match owners. Test: `dns_test` modes.
-- [ ] **V36. DNS: the TCP fallback isn't bounded by resolv.conf's timeout** (bug; unverified)
+- [x] **V36. DNS: the TCP fallback isn't bounded by resolv.conf's timeout** (bug; unverified) —
+  fixed: `exchange_tcp`'s dial and write are under the deadline (not reproduced: needs dropped TCP)
   `exchange_tcp` (`dns.sq:449,454`) dials and writes with no deadline: a firewall dropping TCP/53
   stalls lookups for the OS connect timeout. Fix: `with deadline` around the body.
-- [ ] **V37. postgres ignores `sslmode=require`/`verify-full` and sends the password in cleartext**
+- [x] **V37. postgres ignores `sslmode=require`/`verify-full` and sends the password in cleartext**
+  — fixed: an sslmode that needs TLS is `NoTLS`; test: `TestPostgresURL`
   (bug: security) `postgres.sq:331` drops the query string. Fix: `BadURL` unless sslmode is
   absent/disable/allow/prefer. Test: `parse_url` table.
-- [ ] **V38. postgres URLs aren't percent-decoded** (bug) user `my%40user` was sent literally; a
+- [x] **V38. postgres URLs aren't percent-decoded** (bug) user `my%40user` was sent literally; a —
+  fixed: user, password and database are percent-decoded (`parse_url` takes a buffer); test:
+  `TestPostgresURL`
   password with `?` or `#` can't be written. Fix: decode into fixed storage. Test: `parse_url`.
-- [ ] **V39. The no-heap check is a deny-list that misses allocators** (bug) `heapSymbols`
+- [x] **V39. The no-heap check is a deny-list that misses allocators** (bug) `heapSymbols` — fixed:
+  the list has the stdio, directory, path, environment, zone and glibc-internal allocators, and
+  macOS `$` variants match; test: `TestHeapCheck`
   (`driver.go:193`): `reallocf`, `malloc_zone_malloc`, `fopen`, `opendir`, `realpath(p, NULL)`,
   `open_memstream`, `getline` all pass (and likely `__asprintf_chk`). Fix: add them, or an
   allow-list. Test: table test, one C package per symbol.
-- [ ] **V40. The worst case leaves memory out** (bug) shared libraries' data, each scheduler
+- [x] **V40. The worst case leaves memory out** (bug) shared libraries' data, each scheduler —
+  fixed: each thread's scheduler and signal stack, and the watchdog's, are counted; `ldflags -l`
+  libraries are listed as not counted; the both-auto header says per thread; test:
+  `TestWorstCountsThreads` (shared libraries' own data is still not counted)
   thread's own stack (netpoll's frame is 8 KiB), the watchdog's 64 KiB, TLS, and `ldflags "-lfoo"`
   libraries (neither counted nor listed); `workers auto` + `threads auto` "per core" is really per
   core². Fix: per-thread line for scheduler stacks, list `-l` libraries as not counted, reword
   both-auto. Test: FormatMemory cases.
-- [ ] **V41. `f32x4.min()`/`.max()` reduce as a tree; the builtin folds left to right** (bug: spec)
+- [x] **V41. `f32x4.min()`/`.max()` reduce as a tree; the builtin folds left to right** (bug: spec)
+  — fixed: float lanes fold left to right; test: `testdata/run/simd_minmax_nan.sq`
   With a NaN lane they disagree (`{1, nan, 2, 0}.min()` = 1, `min(1, nan, 2, 0)` = 0). Fix: fold
   sequentially for floats, or say tree order in the spec. Test: `simd_values.sq`.
-- [ ] **V42. A hex literal before `..` lexes as a hex float** (bug) `for i in 0x0..0x3` → "mantissa
+- [x] **V42. A hex literal before `..` lexes as a hex float** (bug) `for i in 0x0..0x3` → "mantissa
+  — fixed: `0x0..` isn't a hex float; test: `testdata/run/lexer_edges.sq`
   requires a 'p' exponent" (`lexer.go:353`). Test: `range_hex.sq`.
-- [ ] **V43. A leading zero means octal** (bug: spec) `println(010, 0644)` prints `8 420`
+- [x] **V43. A leading zero means octal** (bug: spec) `println(010, 0644)` prints `8 420` — fixed: a
+  leading zero is an error naming the decimal (and 0o) form; test:
+  `testdata/errors/literal_errors.sq`
   (`expr.go:97`, Go's legacy octal); the spec lists only decimal, 0x, 0o, 0b. Fix: reject
   ("write 0o644"). Test: errors annotation.
-- [ ] **V44. A keyword-spelled member at the end of a line gets no semicolon** (bug) `k := K.case`
+- [x] **V44. A keyword-spelled member at the end of a line gets no semicolon** (bug) `k := K.case` —
+  fixed: after `.` a keyword ends a line like a name; test: `testdata/run/lexer_edges.sq`
   then a newline → "expected ;" (`lexer.go:183`). Fix: after `.`, lex a keyword as IDENT. Test:
   `keyword_members_eol.sq`.
-- [ ] **V45. A struct field named `fn` is taken for a method** (bug) `struct P { fn int }` →
+- [x] **V45. A struct field named `fn` is taken for a method** (bug) `struct P { fn int }` → —
+  fixed: `fn` starts a method only before `name(` (two tokens of lookahead); test:
+  `testdata/run/lexer_edges.sq`
   "methods go in an impl block" (`parser.go:792`). Fix: a method only when `fn NAME (`. Test: run
   test with fields `fn` and `pub fn`.
 
 ### P3: minor / polish
 
-- [ ] **V46. A task holding more than 8 task locks loses the extras on unwind** (bug; unverified)
+- [x] **V46. A task holding more than 8 task locks loses the extras on unwind** (bug; unverified) —
+  fixed: a ninth lock is a fatal error; test: `TestHeldLocksFull`
   `held_add` (`sq_rt.c:1076`) drops locks past `held[8]`. Fix: fatal error when full.
-- [ ] **V47. The start-up CPU-limit warning counts threads wrongly** (bug; unverified, Linux)
+- [x] **V47. The start-up CPU-limit warning counts threads wrongly** (bug; unverified, Linux) —
+  fixed: the start-up check uses SQUARK_THREADS and counts workers auto by CPU (Linux; read, not
+  run)
   ignores SQUARK_THREADS and counts `workers auto` as 1.
-- [ ] **V48. http mux: HEAD goes to a `GET` pattern even when a `HEAD` pattern exists** (bug)
+- [x] **V48. http mux: HEAD goes to a `GET` pattern even when a `HEAD` pattern exists** (bug) —
+  fixed: the request's own method wins a tie; test: `TestHTTPEdges`
   `more_specific` (`mux.sq:254`) ties GET and HEAD. Test: either registration order.
-- [ ] **V49. http mux: `{name...}` passes `..` segments through** (bug: traversal trap) `GET
+- [x] **V49. http mux: `{name...}` passes `..` segments through** (bug: traversal trap) `GET —
+  fixed: the mux answers 400 for a `.` or `..` segment; test: `TestHTTPEdges`
   /files/%2e%2e/%2e%2e/etc` → `../../etc`. Fix: 400 for `.`/`..` segments, or document.
-- [ ] **V50. http: 1xx accepted as a final status; many reason phrases are "Unknown"** (bug)
+- [x] **V50. http: 1xx accepted as a final status; many reason phrases are "Unknown"** (bug) —
+  fixed: 1xx becomes 500; the usual reason phrases are there; test: `TestHTTPEdges`
   `http.sq:157`, `status_text` (`:898`): 408/502/504 (retry's transient codes) print "Unknown".
-- [ ] **V51. http request-line edge cases** (bug: RFC 9112) a leading CRLF → 400; absolute-form
+- [x] **V51. http request-line edge cases** (bug: RFC 9112) a leading CRLF → 400; absolute-form —
+  fixed: leading CRLFs are skipped, absolute-form targets served by path, Transfer-Encoding is 501;
+  test: `TestHTTPEdges`
   target → 404; Transfer-Encoding → 400 rather than 501.
-- [ ] **V52. `http_requests_total` misses requests rejected before the handler** (bug) `reject`
+- [x] **V52. `http_requests_total` misses requests rejected before the handler** (bug) `reject` —
+  fixed: `write_error` counts its status; test: `TestHTTPEdges`
   and the 408 path don't call `count_status`.
-- [ ] **V53. DNS resilience** (bug) a lost AAAA reply waits the full timeout although A answered;
+- [x] **V53. DNS resilience** (bug) a lost AAAA reply waits the full timeout although A answered; —
+  fixed: a 100ms grace for the other family once one answered, FORMERR retried without EDNS, hosts
+  lines scanned without a limit; test: `TestLookupIP`
   FORMERR to EDNS isn't retried without OPT; hosts lines past 15 names are ignored.
-- [ ] **V54. `log.Entry.str` panics when the key needs escaping** (bug) the budget counts
+- [x] **V54. `log.Entry.str` panics when the key needs escaping** (bug) the budget counts — fixed:
+  the key's escaped worst case is budgeted; test: `TestLogEscapedKey`
   `len(k)`, the escaped key is up to 6× longer: "vector is full" (`log.sq:99-110`).
-- [ ] **V55. metrics: a long task name panics `write_text`; a counter and gauge can share a name**
+- [x] **V55. metrics: a long task name panics `write_text`; a counter and gauge can share a name** —
+  fixed: the label is cut to fit; one name has one kind; test: `testdata/run/metrics_text.sq`,
+  `testdata/run/panic_metrics_kind.sq`
   (bug) `var lb u8[96]` (`metrics.sq:146`).
-- [ ] **V56. `retry` wait overflows when `max` is the largest Duration** (bug) `rand.intn(int(
+- [x] **V56. `retry` wait overflows when `max` is the largest Duration** (bug) `rand.intn(int( —
+  fixed: the jitter's range stays within int; test: `testdata/run/retry_max.sq`
   ceiling) + 1)` (`retry.sq:90`) → "invalid argument to Intn".
-- [ ] **V57. postgres: rows over 64 columns fail as "unexpected reply" and close the connection**
+- [x] **V57. postgres: rows over 64 columns fail as "unexpected reply" and close the connection** —
+  fixed: `TooManyColumns`, and the reply is drained so the connection lives (`max_columns`); test:
+  `TestPostgresWideRow`
   (bug) `int[..64]` (`postgres.sq:470`). Fix: document, distinct error, drain to `Z`.
-- [ ] **V58. `time.parse_duration` wraps past 2^63** (bug) `"9223372036854775808ns" × 2` → 0, no
+- [x] **V58. `time.parse_duration` wraps past 2^63** (bug) `"9223372036854775808ns" × 2` → 0, no —
+  fixed: the sum is checked before adding; test: `testdata/run/duration_overflow.sq`
   error (`time.sq:254`).
-- [ ] **V59. SCRAM passwords aren't SASLprep'd** (bug; unverified) non-ASCII passwords that
+- [x] **V59. SCRAM passwords aren't SASLprep'd** (bug; unverified) non-ASCII passwords that — fixed:
+  documented: passwords are used without SASLprep
   SASLprep changes fail against a real server. Fix: implement, or document ASCII only.
-- [ ] **V60. json: truncated input reports `Type`, not `Syntax`** (bug) `{` then `field`, `[1,`
+- [x] **V60. json: truncated input reports `Type`, not `Syntax`** (bug) `{` then `field`, `[1,` —
+  fixed: `mismatch`: Syntax where nothing can start a value; test: `testdata/run/json_truncated.sq`
   then `int` → "unexpected value type". Test: extend `json_strict.sq`.
-- [ ] **V61. The storage-copy hint for a range over a channel or map says "use &rc[i]"** (bug:
+- [x] **V61. The storage-copy hint for a range over a channel or map says "use &rc[i]"** (bug: —
+  fixed: the hint depends on what is ranged over; test: `testdata/errors/range_storage_hint.sq`
   message) `stmt.go:787`.
-- [ ] **V62. CLI flags are silently ignored; -manifest is checked after the build** (bug) one
+- [x] **V62. CLI flags are silently ignored; -manifest is checked after the build** (bug) one —
+  fixed: a flag the subcommand doesn't take exits 2; -manifest is checked first; test:
+  `TestCLIFlagsPerCommand`
   FlagSet for every subcommand (`cmd/squark/main.go:87`): `run -o … -static -manifest bogus`
   runs; `build -manifest nomad` writes the binary, then fails.
 - [x] **V63. The stack-overflow message names `//squark:stack` and blames only C** (bug: message)
   — fixed with V1: "an extern used more stack than its `stack N`; in squark code it is a compiler
   bug".
-- [ ] **V64. README's memory example is stale** (docs) `examples/notes` now reports 113.8 MiB with
+- [x] **V64. README's memory example is stale** (docs) `examples/notes` now reports 113.8 MiB with —
+  fixed: regenerated
   sqlite's heap and the admin pools.
-- [ ] **V65. The spec's keyword list omits `impl`** (docs) §1.
-- [ ] **V66. arm64 `-cpu` above the host dies with SIGILL and no message** (bug) the CPU check is
+- [x] **V65. The spec's keyword list omits `impl`** (docs) §1. — fixed: added
+- [x] **V66. arm64 `-cpu` above the host dies with SIGILL and no message** (bug) the CPU check is —
+  fixed: a constructor compiled for the baseline catches SIGILL and names the CPU (`cpucheck.c`;
+  `-DSQ_CPU` on arm64 too); test: `TestCPUTooNew`
   x86-only. Fix: HWCAP/sysctl check, or document.
-- [ ] **V67. An extern clashing with a libc prototype is blamed on squark** (bug: message)
+- [x] **V67. An extern clashing with a libc prototype is blamed on squark** (bug: message) — fixed:
+  "conflicting types" for a program extern is reported at the extern; test: `TestExternConflict`
   `extern fn getpid() -> int` → "C compiler failed on prog.c (this is a squark compiler bug)".
-- [ ] **V68. tour runs have no concurrency cap or rlimits** (bug; unverified) only compiles are
+- [x] **V68. tour runs have no concurrency cap or rlimits** (bug; unverified) only compiles are —
+  fixed: four runs at once, and only programs whose worst case here is at most 1 GiB; test:
+  `TestRunLimits`
   capped (`run.go:70,170`).
-- [ ] **V69. `extern fn main()` and `task main()` are accepted** (bug) the first fails in clang;
+- [x] **V69. `extern fn main()` and `task main()` are accepted** (bug) the first fails in clang; —
+  fixed: main must be a plain fn with a body; tests: `testdata/errors/main_extern.sq`,
+  `main_task.sq`
   `checker.go:112`.
-- [ ] **V70. Front-end message polish** (bug: messages) `fn f() int` says "write -> identifier
+- [x] **V70. Front-end message polish** (bug: messages) `fn f() int` says "write -> identifier —
+  fixed: all seven; tests: `testdata/errors/syntax_results.sq`, `range_cascade.sq`, the doc changes
+  in `docs/stdlib.md`
   int"; the directive list omits shutdown/connections/sockbuf/heap; `shutdown 3000000000000000ms`
   overflows to negative; overflow errors print 30,000-digit constants; `squark doc` shows `Temp:
   f64` for `Temp: Celsius`; `for i, j in 0..3` and `for x in 0..1.5` cascade; the missing-main
@@ -1392,3 +1495,7 @@ Append one line per work session: date, items closed, anything left half-done.
   the same day (V1 was a hole Q5 opened: guards now match each pool's largest frame). Also found
   while testing on Linux and fixed in `ada69b5`: TestRunASan/isolate's ASan report (the runtime
   now unpoisons a task stack before its longjmps). Next: V6 onward, P0 first.
+- 2026-10-20: section V closed (V6–V70, on branch review-v, merged as one commit). Suite on macOS
+  (with ASan) and Linux (clang, gcc), fuzz 5000 clean. Left as notes: V19's sibling habit in bufio
+  and http_client (documented use), V36 and V47 fixed by reading (need a firewall or a cgroup), V40's
+  shared-library data still uncounted.

@@ -294,6 +294,8 @@ typedef struct sq_pool {
 typedef struct sq_unwind {
 	jmp_buf jb;
 	struct sq_unwind *prev;
+	int64_t deadline; // the task's when the frame was entered: unwinding puts them back
+	void *try_jb;
 } sq_unwind;
 void sq_unwind_push(sq_unwind *u);
 void sq_unwind_pop(sq_unwind *u);
@@ -316,6 +318,7 @@ void sq_gosched(void);
 // with deadline: set the task's deadline for the block; the cleanup restores the outer one
 int64_t sq_deadline_enter(int64_t d);
 void sq_deadline_restore(int64_t *saved);
+int64_t sq_deadline_get(void); // the calling task's with-deadline (for sq_deadline_restore)
 
 // ---- channels ----
 // A task waiting on a channel queues a waiter: one for a send or receive, one per case of a

@@ -51,9 +51,9 @@ fn main() {
 	start reader()
 	runtime.gosched() // the reader's registration for xc is queued, not yet sent
 	xc.close()        // so sending it fails
-	ys.park_idle(2)
+	ys.park_idle(2, 0)
 	for i := 0; i < 300; i++ { // fills the batch: it is sent before the poller runs
-		zs.park_idle(3)
+		zs.park_idle(3, 0)
 	}
 	start idler()
 	yc.write_string("y")

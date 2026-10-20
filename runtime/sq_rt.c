@@ -183,6 +183,7 @@ typedef struct sq_shard {
 #endif
 	int32_t idle_ready[SQ_IDLE_SLOTS]; // see "The idle set" below
 	int64_t idle_head, idle_len, idle_parked;
+	int64_t idle_expiring, idle_max_fd, idle_sweep_at; // idle connections with a timeout (idle_sweep)
 	sq_g *idle_waiter;
 	struct fd_slot *fds;  // per fd: who waits to read and write it (mmap'd, sized by RLIMIT_NOFILE)
 	int64_t nfds;
@@ -316,6 +317,7 @@ static void g_prepare(sq_g *g, void (*entry)(void *), const void *args, size_t a
 	g->try_jb = NULL;
 	g->unwind = NULL;
 	g->unwinding = false;
+	g->through_stop = false;
 	g->nheld = 0;
 }
 
@@ -685,7 +687,11 @@ static SQ_NORETURN void die(const char *file, int line) {
 void sq_unwind_push(sq_unwind *u) {
 	sq_g *g = sq_self->cur_g;
 	u->prev = g ? g->unwind : NULL;
-	if (g) g->unwind = u;
+	if (g) {
+		g->unwind = u;
+		u->deadline = g->deadline;
+		u->try_jb = g->try_jb;
+	}
 }
 
 void sq_unwind_pop(sq_unwind *u) {
@@ -697,12 +703,18 @@ void sq_unwind_resume(void) {
 	sq_g *g = sq_self->cur_g;
 	sq_unwind *u = g->unwind; // never NULL in an isolate task: its entry has the base frame
 	g->unwind = u->prev;
+	// the with deadline blocks and `v, ok := x in a` regions being left would have put these back
+	// (their cleanups don't run on the jump): the frame's deferred calls run with the frame's own
+	g->deadline = u->deadline;
+	g->try_jb = u->try_jb;
 	ASAN_LONGJMP(g, u->jb);
 	_longjmp(u->jb, 1);
 }
 
 void sq_unwind_base(sq_unwind *u) {
 	u->prev = NULL;
+	u->deadline = sq_self->cur_g->deadline;
+	u->try_jb = sq_self->cur_g->try_jb;
 	sq_self->cur_g->unwind = u;
 }
 
@@ -791,12 +803,16 @@ void sq_panic_arena(sq_arena *a, int64_t need, const char *file, int line) {
 
 void *sq_arena_grow(sq_arena *a, void *p, int64_t used_bytes, int64_t old_bytes, int64_t new_bytes, int64_t align, const char *file, int line) {
 	uint8_t *b = p;
+	// the new capacity reads as zero (s[:cap(s)]): arena memory, a stack array, is uninitialized.
+	// In place only [old, new) is new; [used, old) may still be seen through a longer slice.
 	if (b && b + old_bytes == a->base + a->used && b >= a->base && new_bytes - old_bytes <= a->cap - a->used) {
 		a->used += new_bytes - old_bytes; // the block is on top of the arena: extend in place
+		memset(b + old_bytes, 0, (size_t)(new_bytes - old_bytes));
 		return p;
 	}
-	void *np = sq_arena_raw(a, new_bytes, align, file, line);
+	uint8_t *np = sq_arena_raw(a, new_bytes, align, file, line);
 	if (used_bytes > 0) memcpy(np, p, (size_t)used_bytes);
+	memset(np + used_bytes, 0, (size_t)(new_bytes - used_bytes));
 	return np;
 }
 
@@ -814,6 +830,13 @@ static _Thread_local sq_g *helper_g; // a helper thread's detached task (see sq_
 
 static void on_fault(int sig, siginfo_t *si, void *uctx) {
 	(void)uctx;
+#ifdef SQ_CPU
+	if (sig == SIGILL) { // built for a newer CPU than this one (squark build -cpu; see cpucheck.c)
+		exit_flush();
+		err_write("fatal error: illegal instruction: this program was built for " SQ_CPU " CPUs (squark build -cpu " SQ_CPU "), and this CPU lacks an instruction it uses\n");
+		_exit(2);
+	}
+#endif
 	uintptr_t addr = (uintptr_t)si->si_addr;
 	sq_shard *home = sq_self ? sq_self : helper_g ? helper_g->shard : NULL; // a detached task's
 	for (int64_t i = 0; home && i < sq_npools; i++) {
@@ -1093,8 +1116,16 @@ void sq_gmutex_init(sq_gmutex *m) {
 }
 
 // held_add and held_remove keep g's list of the task locks it holds (see sq_unwind_end).
+// held_add records a task lock g holds, so unwinding an isolate task can release it. A lock that
+// couldn't be recorded would stay held for ever after a panic: more is an error.
 static void held_add(sq_g *g, sq_gmutex *m) {
-	if (g && g->nheld < (int)(sizeof g->held / sizeof g->held[0])) g->held[g->nheld++] = m;
+	if (!g) return;
+	if (g->nheld == (int)(sizeof g->held / sizeof g->held[0])) {
+		exit_flush();
+		err_write("fatal error: a task holds more than 8 task locks (sq_gmutex) at once\n");
+		die(NULL, 0);
+	}
+	g->held[g->nheld++] = m;
 }
 
 static void held_remove(sq_g *g, sq_gmutex *m) {
@@ -1749,7 +1780,8 @@ void sq_sleep(int64_t ns) {
 // mmap'd per shard, sized by the open-file limit; only the pages of descriptors in use are touched.
 typedef struct fd_slot {
 	sq_g *rd, *wr;
-	uint8_t read_kind; // see read_needs_poll
+	int64_t idle_until; // in the idle set with a timeout: when the sweep closes it (sq_park_idle)
+	uint8_t read_kind;  // see read_needs_poll
 } fd_slot;
 
 static void fd_table_init(void) {
@@ -1846,7 +1878,7 @@ static void arm_fd(int fd, int mode) {
 // effective_deadline is when g's blocking I/O times out: its with-deadline, or a graceful stop's
 // cap if that is sooner; 0 for never.
 static int64_t effective_deadline(sq_g *g) {
-	int64_t d = g->deadline, cap = atomic_load_explicit(&stop_cap, memory_order_relaxed);
+	int64_t d = g->deadline, cap = g->through_stop ? 0 : atomic_load_explicit(&stop_cap, memory_order_relaxed);
 	return cap && (!d || cap < d) ? cap : d;
 }
 
@@ -2035,6 +2067,8 @@ int64_t sq_deadline_enter(int64_t d) {
 	return saved;
 }
 
+int64_t sq_deadline_get(void) { return sq_self->cur_g ? sq_self->cur_g->deadline : 0; }
+
 void sq_deadline_restore(int64_t *saved) {
 	if (sq_self->cur_g) sq_self->cur_g->deadline = *saved;
 }
@@ -2044,8 +2078,10 @@ int64_t sq_deadline_at(void) { return sq_self->cur_g ? effective_deadline(sq_sel
 
 int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 	sq_g *g = sq_self->cur_g;
+	int64_t at = deadline(grace_ns), dl = effective_deadline(g); // a with deadline or stop cap
+	if (dl && dl < at) at = dl;
 	arm_fd((int)fd, 'r');
-	timer_add(g, deadline(grace_ns));
+	timer_add(g, at);
 	sq_park();
 	if (g->wake == WAKE_FD || g->wake == WAKE_CLOSED) return 0; // closed: the read reports it
 	disarm_fd(g, (int)fd, 'r'); // timed out
@@ -2060,6 +2096,11 @@ int64_t sq_wait_idle(int64_t fd, int64_t grace_ns) {
 
 static void idle_event(int fd, int tag) {
 	__atomic_store_n(&sq_self->idle_parked, sq_self->idle_parked - 1, __ATOMIC_RELAXED);
+	fd_slot *sl = slot(fd);
+	if (sl && sl->idle_until) {
+		sl->idle_until = 0;
+		sq_self->idle_expiring--;
+	}
 	if (sq_self->idle_len == (int64_t)(sizeof sq_self->idle_ready / sizeof sq_self->idle_ready[0])) {
 		sq_panic_cstr("idle connection queue overflow", __FILE__, __LINE__);
 	}
@@ -2073,8 +2114,8 @@ static void idle_event(int fd, int tag) {
 }
 
 // sq_park_idle moves fd into the idle set with tag (0..255) and marks the calling task's stack
-// for release when it exits.
-void sq_park_idle(int64_t fd, int64_t tag) {
+// for release when it exits. If it stays idle for timeout_ns (> 0), the sweep closes it.
+void sq_park_idle(int64_t fd, int64_t tag, int64_t timeout_ns) {
 	sq_g *g = sq_self->cur_g;
 	if (tag < 0 || tag > 255) sq_panic_cstr("idle tag out of range", __FILE__, __LINE__);
 	if (fd >= 1 << 24) sq_panic_cstr("fd too large for the idle set", __FILE__, __LINE__);
@@ -2095,6 +2136,31 @@ void sq_park_idle(int64_t fd, int64_t tag) {
 	g->wait_fd = -1;
 	g->release_stack = true;
 	__atomic_store_n(&sq_self->idle_parked, sq_self->idle_parked + 1, __ATOMIC_RELAXED);
+	if (s && timeout_ns > 0) {
+		if (!s->idle_until) sq_self->idle_expiring++;
+		s->idle_until = deadline(timeout_ns);
+		if (fd > sq_self->idle_max_fd) sq_self->idle_max_fd = fd;
+	}
+}
+
+// idle_sweep closes the idle connections whose timeout has passed, about once a second while
+// there are any (the scheduler's poll wakes up for it): idle keep-alive connections, and ones that
+// never sent anything, would otherwise hold their sockets (and connections N) for ever.
+#define SQ_IDLE_SWEEP_NS 1000000000
+int64_t sq_close(int64_t fd);
+static void idle_sweep(void) {
+	if (sq_self->idle_expiring == 0) return;
+	int64_t now = sq_nanotime();
+	if (now < sq_self->idle_sweep_at) return;
+	sq_self->idle_sweep_at = now + SQ_IDLE_SWEEP_NS;
+	for (int64_t fd = 0; fd <= sq_self->idle_max_fd && sq_self->idle_expiring > 0; fd++) {
+		fd_slot *sl = slot((int)fd);
+		if (!sl || !sl->idle_until || sl->idle_until > now) continue;
+		sl->idle_until = 0;
+		sq_self->idle_expiring--;
+		__atomic_store_n(&sq_self->idle_parked, sq_self->idle_parked - 1, __ATOMIC_RELAXED);
+		sq_close(fd); // also drops its poller registration
+	}
 }
 
 // sq_next_idle returns the next idle connection that has become readable, parking until one does,
@@ -2414,13 +2480,20 @@ int64_t sq_c_heap(const char *lib) {
 	return 0;
 }
 
-// listen_backlog is each listener's backlog: with connections N, part of the N, as the
-// connections queued on it are sockets too.
-static int64_t listen_backlog(int64_t want) {
-	if (sq_max_conns <= 0) return want;
+// listener_share is what a listener is counted as with connections N: the connections queued on
+// it are sockets too. An address gets N/16 (at most 128), split across the shards that each
+// listen on it (threads N), so listening shards don't use up the N between them.
+static int64_t listener_share(void) {
 	int64_t b = sq_max_conns / 16;
 	if (b > 128) b = 128;
-	if (b < 1) b = 1;
+	b /= sq_shard_count > 0 ? sq_shard_count : 1;
+	return b < 1 ? 1 : b;
+}
+
+// listen_backlog is a listener's backlog: the caller's, within its share of connections N.
+static int64_t listen_backlog(int64_t want) {
+	if (sq_max_conns <= 0) return want;
+	int64_t b = listener_share();
 	return b < want ? b : want;
 }
 
@@ -2461,7 +2534,7 @@ static void sock_closed(int fd) {
 	if (!sock_kind || fd < 0 || fd >= sock_kinds) return;
 	uint8_t k = atomic_exchange(&sock_kind[fd], SOCK_NONE);
 	if (k == SOCK_ONE) sock_release(1);
-	else if (k == SOCK_LISTENER) sock_release(listen_backlog(4096));
+	else if (k == SOCK_LISTENER) sock_release(listener_share());
 }
 
 // set_sockbuf applies sockbuf N to a new socket.
@@ -2533,9 +2606,10 @@ static int64_t listen_tcp(sq_string host, int64_t port, int64_t backlog);
 
 int64_t sq_listen_tcp(sq_string host, int64_t port, int64_t backlog) {
 	backlog = listen_backlog(backlog);
-	if (!sock_reserve(backlog)) return -SQ_ETOOMANY;
+	int64_t share = sq_max_conns > 0 ? listener_share() : 0; // what closing it gives back
+	if (!sock_reserve(share)) return -SQ_ETOOMANY;
 	int64_t fd = listen_tcp(host, port, backlog);
-	if (fd < 0) sock_release(backlog);
+	if (fd < 0) sock_release(share);
 	else sock_mark((int)fd, SOCK_LISTENER);
 	return fd;
 }
@@ -2855,6 +2929,7 @@ static void schedule(void) {
 				runq_push(g);
 			} else if ((switches & 63) == 0 && (sq_self->fd_waiters > 0 || sq_self->ntimers > 0 || sq_self->idle_parked > 0)) {
 				fire_timers();
+				idle_sweep();
 				if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0) netpoll(0);
 			}
 		}
@@ -2875,6 +2950,11 @@ static void schedule(void) {
 			// limited: epoll takes an int of milliseconds)
 			if (timeout > SQ_MAX_SLEEP_NS) timeout = SQ_MAX_SLEEP_NS;
 		}
+		if (sq_self->idle_expiring > 0) { // wake for the next sweep
+			int64_t t = sq_self->idle_sweep_at - sq_nanotime();
+			if (t < 0) t = 0;
+			if (timeout < 0 || t < timeout) timeout = t;
+		}
 		if (sq_self->fd_waiters > 0 || sq_self->idle_parked > 0 || sq_self->shared_parked > 0) {
 			netpoll(timeout);
 		} else if (timeout > 0) {
@@ -2882,6 +2962,7 @@ static void schedule(void) {
 			nanosleep(&ts, NULL);
 		}
 		fire_timers();
+		idle_sweep();
 	}
 }
 
@@ -2920,9 +3001,12 @@ static void on_term(int sig) {
 #define SQ_MAX_WORKERS 1024
 int64_t sq_worker_count = 1; // processes running this program
 static pid_t worker_pids[SQ_MAX_WORKERS];
-static volatile sig_atomic_t stop_signal;
+static volatile sig_atomic_t stop_signal, stop_count; // the last stop signal, and how many came
 
-static void on_stop(int sig) { stop_signal = sig; }
+static void on_stop(int sig) {
+	stop_signal = sig;
+	stop_count++;
+}
 static void on_child(int sig) { (void)sig; } // only interrupts sigsuspend
 
 static void err_num(int64_t v) {
@@ -3207,12 +3291,13 @@ static void run_workers(void) {
 	sigaction(SIGCHLD, &sa, NULL);
 	int64_t alive = n;
 	int status = 0;
-	int forwarded = 0;
+	sig_atomic_t forwarded = 0;
 	while (alive > 0) {
-		if (stop_signal && stop_signal != forwarded) {
-			forwarded = stop_signal;
+		// every signal is passed on, a repeat too: a second SIGTERM ends a graceful stop at once
+		if (stop_count != forwarded) {
+			forwarded = stop_count;
 			for (int64_t i = 0; i < n; i++)
-				if (worker_pids[i] > 0) kill(worker_pids[i], forwarded);
+				if (worker_pids[i] > 0) kill(worker_pids[i], stop_signal);
 		}
 		int st;
 		pid_t p = waitpid(-1, &st, WNOHANG);
@@ -3409,10 +3494,16 @@ void sq_stop_gracefully(void) {
 	sigaction(SIGINT, &sa, NULL);
 }
 
+// sq_through_stop exempts the calling task from a graceful stop's I/O cap (runtime.through_stop).
+void sq_through_stop(void) {
+	if (sq_self->cur_g) sq_self->cur_g->through_stop = true;
+}
+
 int64_t sq_stopping(void) { return atomic_load_explicit(&graceful_signal, memory_order_relaxed) != 0; }
 
 // stop_shard runs on each shard once it sees the stop: its tasks blocked in accept return, and
-// those blocked on other I/O get a timer for the stop's cap (later waits check the cap anyway).
+// those blocked on other I/O time out at the stop's cap: a timer for it, or their own timer (a
+// with deadline, a read_timeout) brought forward to it. Later waits check the cap anyway.
 static void stop_shard(void) {
 	sq_self->stop_seen = true;
 	int64_t cap = atomic_load(&stop_cap);
@@ -3420,7 +3511,13 @@ static void stop_shard(void) {
 		sq_pool *p = sq_self->pools[i];
 		for (int64_t k = 0; k < p->count; k++) {
 			sq_g *g = &p->gs[k];
-			if (g->state == G_WAITING && g->wait_fd >= 0 && g->heap_index < 0) timer_add(g, cap);
+			if (g->state != G_WAITING || g->wait_fd < 0 || g->through_stop) continue;
+			if (g->heap_index < 0) {
+				timer_add(g, cap);
+			} else if (g->wake_at > cap) {
+				g->wake_at = cap; // sooner: it moves up the heap
+				heap_up(g->heap_index);
+			}
 		}
 	}
 	while (sq_self->naccepting > 0) {
@@ -3532,17 +3629,24 @@ static void copy_cstr(char *dst, size_t n, sq_string s) {
 }
 
 // sq_metric_register returns the id of the metric named name with these labels (the same id
-// for every call, so each shard's main can register it), or -1 if the table is full, or -2 if
-// it exists with another kind.
+// for every call, so each shard's main can register it), or -1 if the table is full, -2 if the
+// name exists with another kind, or -3 if the name or labels are too long (cut, they would make
+// the whole exposition invalid).
 int64_t sq_metric_register(sq_string name, sq_string labels, sq_string help, int64_t kind) {
 	char n[48], l[80];
+	if (name.len >= (int64_t)sizeof n || labels.len >= (int64_t)sizeof l) return -3;
 	copy_cstr(n, sizeof n, name);
 	copy_cstr(l, sizeof l, labels);
 	pthread_mutex_lock(&metrics_mu);
 	int64_t count = atomic_load(&nmetrics), id = -1;
 	for (int64_t i = 0; i < count; i++) {
-		if (strcmp(metrics[i].name, n) == 0 && strcmp(metrics[i].labels, l) == 0) {
-			id = metrics[i].kind == kind ? i : -2;
+		if (strcmp(metrics[i].name, n) != 0) continue;
+		if (metrics[i].kind != kind) { // one family has one type, whatever the labels
+			id = -2;
+			break;
+		}
+		if (strcmp(metrics[i].labels, l) == 0) {
+			id = i;
 			break;
 		}
 	}
@@ -3686,26 +3790,29 @@ static void *shard_thread(void *arg) {
 	return NULL;
 }
 
-// threads_from_env applies SQUARK_THREADS (like GOMAXPROCS) to a program written for threads.
-static int64_t threads_from_env(int64_t n) {
+// threads_from_env applies SQUARK_THREADS (like GOMAXPROCS) to a program written for threads;
+// quiet: without the warnings (the start-up check asks first, the scheduler again).
+static int64_t threads_from_env(int64_t n, bool quiet) {
 	const char *e = getenv("SQUARK_THREADS");
 	if (!e || !*e) return n;
 	int64_t v = 0;
 	for (const char *p = e; *p; p++) {
 		if (*p < '0' || *p > '9' || v > SQ_MAX_SHARDS) {
-			err_write("squark: ignoring SQUARK_THREADS (want a number from 1 to 1024)\n");
+			if (!quiet) err_write("squark: ignoring SQUARK_THREADS (want a number from 1 to 1024)\n");
 			return n;
 		}
 		v = v * 10 + (*p - '0');
 	}
 	if (v < 1 || v > SQ_MAX_SHARDS) {
-		err_write("squark: ignoring SQUARK_THREADS (want a number from 1 to 1024)\n");
+		if (!quiet) err_write("squark: ignoring SQUARK_THREADS (want a number from 1 to 1024)\n");
 		return n;
 	}
 	if (sq_threads_max > 0 && v > sq_threads_max) {
-		err_write("squark: SQUARK_THREADS is above the threads the memory budget was proven for; using ");
-		err_num(sq_threads_max);
-		err_write("\n");
+		if (!quiet) {
+			err_write("squark: SQUARK_THREADS is above threads N, which the memory worst case was computed for; using ");
+			err_num(sq_threads_max);
+			err_write("\n");
+		}
 		return sq_threads_max;
 	}
 	return v;
@@ -3754,7 +3861,10 @@ int main(int argc, char **argv) {
 	g_argc = argc;
 	g_argv = argv;
 	// the whole process tree shares one cgroup: check it once, before any worker starts
-	check_limits(sq_threads > 0 ? sq_threads * (sq_workers > 0 ? sq_workers : 1) : 0);
+	// the threads that will run: threads N as SQUARK_THREADS may lower it (threads auto, 0, is
+	// one per CPU unless SQUARK_THREADS says otherwise), in each worker (workers auto: per CPU)
+	int64_t threads = sq_threads_env ? threads_from_env(sq_threads, true) : sq_threads;
+	check_limits(threads > 0 ? threads * (sq_workers > 0 ? sq_workers : cpu_count()) : 0);
 	run_workers(); // returns in each worker process (or at once, for a single worker)
 	// shard 0's package variables are mapped like the other shards' (shard_new), not static: a
 	// multi-GiB BSS would collide with the dyld shared region on macOS
@@ -3773,6 +3883,9 @@ int main(int argc, char **argv) {
 	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 	sigaction(SIGSEGV, &sa, NULL);
 	sigaction(SIGBUS, &sa, NULL);
+#ifdef SQ_CPU
+	sigaction(SIGILL, &sa, NULL);
+#endif
 	stackcheck = getenv("SQ_STACKCHECK") != NULL;
 	if (stackcheck) {
 		signal(SIGTERM, on_term);
@@ -3780,7 +3893,7 @@ int main(int argc, char **argv) {
 	}
 	int64_t n = sq_threads;
 	if (n == 0) n = cpu_count(); // threads auto
-	if (sq_threads_env) n = threads_from_env(n);
+	if (sq_threads_env) n = threads_from_env(n, false);
 	if (n > SQ_MAX_SHARDS) n = SQ_MAX_SHARDS;
 	sq_shard_count = n;
 	atomic_store(&live_shards, n);

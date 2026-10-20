@@ -1,0 +1,66 @@
+program
+
+// Deferred calls run with the deadline their function was called with: a return (or a ! return)
+// from inside a with deadline block once ran them under the block's deadline, and so did an
+// isolate task's panic unwinding out of one.
+use runtime, time
+
+fault Bad "bad"
+
+thread done int chan[1]
+
+fn report(where str) {
+	_, ok := runtime.deadline_left()
+	println(where, "deferred call sees a deadline:", ok)
+}
+
+fn plain() {
+	defer report("return")
+	with deadline time.second {
+		return
+	}
+}
+
+fn fails() -> ! {
+	return Bad
+}
+
+fn bang() -> ! {
+	defer report("! return")
+	with deadline time.second {
+		fails()!
+	}
+	return nil
+}
+
+// plain called inside a block: its deferred call keeps the caller's deadline
+fn outer() {
+	defer report("after the block")
+	with deadline time.hour {
+		plain()
+	}
+}
+
+fn inner() {
+	with deadline time.millisecond {
+		panic("boom")
+	}
+}
+
+task work() pool 1 isolate {
+	defer finished()
+	inner()
+}
+
+fn finished() {
+	report("isolate unwind")
+	done <- 1
+}
+
+fn main() {
+	plain()
+	bang()
+	outer()
+	start work()
+	<-done
+}

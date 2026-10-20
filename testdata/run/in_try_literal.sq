@@ -1,0 +1,11 @@
+program
+
+// The allocations of `v, ok := x in a` are marked by rewriting x's C text; a string literal that
+// spells the marker was once rewritten too.
+fn main() {
+	s := "!"
+	with arena a 1K {
+		v, ok := "__FILE__, __LINE__" + s in a
+		println(v, ok)
+	}
+}

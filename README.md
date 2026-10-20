@@ -206,7 +206,7 @@ program {
 Each scheduler thread runs its own copy of `main`, with its own package variables and tasks,
 so nothing needs locks. A package variable says which it is: `thread db sqlite.DB` is one per
 thread, `shared table = make_table()` is one copy, read-only after start-up, and `shared jobs Job
-chan[64]` is a channel between threads. `SQUARK_THREADS=N` overrides the count at run time.
+chan[64]` is a channel between threads. `SQUARK_THREADS=N` sets the count at run time (with `threads N`, at most N).
 Without the directive a program runs on one thread.
 
 ### Memory budgets
@@ -219,14 +219,20 @@ program {
 
 ```
 $ squark build examples/notes
-memory: worst case 97.1 MiB of 128.0 MiB budget
-  code                          112.0 KiB
-  static data                   576.0 KiB   package variables, arenas, channel buffers, task tables
-  task http.serve_conn           96.0 MiB   = 512 × 192.0 KiB stack (proven 187952 B)
-  main task                     144.0 KiB   = 1 × 144.0 KiB stack (proven 132432 B)
-  task http.wake_idle            16.0 KiB   = 1 × 16.0 KiB stack (proven 9328 B)
+memory: worst case 114.0 MiB of 128.0 MiB budget
+  code                          160.0 KiB
+  static data                   654.7 KiB   package variables, arenas, channel buffers, task tables
+  task http.serve_conn           96.0 MiB   = 512 × 192.0 KiB stack (proven 188736 B)
+  task http.admin_conn          320.0 KiB   = 2 × 160.0 KiB stack (proven 155200 B)
+  task http.shed                256.0 KiB   = 16 × 16.0 KiB stack (proven 11952 B)
+  main task                     144.0 KiB   = 1 × 144.0 KiB stack (proven 136112 B)
+  task http.admin_accept         16.0 KiB   = 1 × 16.0 KiB stack (proven 9280 B)
+  task http.wake_idle            16.0 KiB   = 1 × 16.0 KiB stack (proven 9360 B)
   blocking-call helpers         320.0 KiB   = 2 × 160.0 KiB stack: threads that run blocking and detached C calls
-  C libraries                 not counted   sqlite3 manages its own memory
+  scheduler                      64.0 KiB   the scheduler thread's own stack and signal stack
+  watchdog                       64.0 KiB   its thread's stack
+  sockets                     not counted   kernel socket buffers: declare connections N and sockbuf N to count them
+  C library sqlite3              16.0 MiB   its heap limit (heap sqlite3)
 ```
 
 `connections N` and `sockbuf N` add the kernel's socket buffers to it, and `heap sqlite3 N` SQLite's
