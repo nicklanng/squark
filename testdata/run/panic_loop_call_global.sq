@@ -1,0 +1,23 @@
+program
+
+// a call in the loop shrinks the package slice the loop reads
+
+thread store int[4]
+thread pkg int[]
+
+fn shrink() {
+	pkg = pkg[:1]
+}
+
+fn main() {
+	pkg = store[:]
+	sum := 0
+	for i := 0; i < 4; i++ {
+		if i == 2 {
+			shrink()
+		}
+		println("at", i)
+		sum += pkg[i]
+	}
+	println(sum)
+}

@@ -79,10 +79,13 @@ type gen struct {
 	constC        map[*Var]string // their C values, inlined where one constant's initializer uses
 	// another (a const variable isn't a constant expression in C); functions read them by name
 	inConstInit  bool
-	usesGlobals  bool                  // the function being generated reads or writes a package variable
-	addressed    map[*Var]bool         // its locals whose address is taken (see addressedVars)
-	unchecked    map[*IndexExpr]string // indexes a loop's unchecked copy leaves unchecked, and the local holding x's header if any (cgen_loop.go)
-	headerCopies map[hdrKey]string     // in a loop's unchecked copy: the locals holding field and package slices
+	usesGlobals  bool                    // the function being generated reads or writes a package variable
+	addressed    map[*Var]bool           // its locals whose address is taken (see addressedVars)
+	writeMemo    map[*Func]*writeSummary // what each function can write (cgen_alias.go)
+	addrGlobals  map[*Var]bool           // package variables whose address is taken (addressedAnywhere)
+	addrFields   map[fieldKey]bool       // struct fields whose address is taken
+	unchecked    map[*IndexExpr]string   // indexes a loop's unchecked copy leaves unchecked, and the local holding x's header if any (cgen_loop.go)
+	headerCopies map[hdrKey]string       // in a loop's unchecked copy: the locals holding field and package slices
 }
 
 // constValue returns a constant's C value (computed once).

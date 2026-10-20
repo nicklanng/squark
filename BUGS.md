@@ -1447,6 +1447,15 @@ essentials are inline. The lifetime checker itself held up: every escape tried w
   f64` for `Temp: Celsius`; `for i, j in 0..3` and `for x in 0..1.5` cascade; the missing-main
   error is at `dir:0:0`.
 
+## W: found during roadmap sections 4 and 5 (2026-10-20)
+
+- [x] **W1. TestVectorize checked nothing** (test bug; since the syntax change of 2026-10-17) —
+  fixed: it found functions with `^func (\w+)\(`, which no squark file has matched since
+  functions became `fn` (and methods are indented in `impl` blocks), so no function was ever
+  "want: vectorized" and the test passed vacuously. It now matches `fn` (and `pub fn`, indented)
+  and fails if no function wants vectorizing. Every loop it lists still vectorizes. test:
+  `TestVectorize` itself.
+
 ## Progress log
 
 Append one line per work session: date, items closed, anything left half-done.
@@ -1499,3 +1508,4 @@ Append one line per work session: date, items closed, anything left half-done.
   (with ASan) and Linux (clang, gcc), fuzz 5000 clean. Left as notes: V19's sibling habit in bufio
   and http_client (documented use), V36 and V47 fixed by reading (need a firewall or a cgroup), V40's
   shared-library data still uncounted.
+- 2026-10-20: section W opened with W1 (found adding stride loops to testdata/vectorize), fixed.

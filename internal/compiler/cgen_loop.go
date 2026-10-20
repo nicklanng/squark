@@ -15,9 +15,10 @@ import (
 // pointer doesn't change its length.
 //
 // A slice in a struct field (p.data, s.data) or a package variable can change through any store,
-// so its header is copied only when the loop can't change it: no calls, and every store is to a
-// local variable or of a value without references (squark is type-safe, so storing a number can't
-// change a slice header). A nil p skips the unchecked copy, and the checked loop panics as before.
+// so its header is copied only when the loop can't change it: every store is to a local variable
+// or of a value without references (squark is type-safe, so storing a number can't change a slice
+// header), and no function the loop calls can store to that field or variable (cgen_alias.go). A
+// nil p skips the unchecked copy, and the checked loop panics as before.
 
 // loopPlan is what versioning a loop needs: the counter and the indexes the unchecked copy
 // leaves unchecked.
@@ -289,6 +290,7 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, changed []*Var, bounds ...Expr)
 		changes[v] = true
 	}
 	ok, stmts, memSafe := true, 0, !g.fnPreempt
+	calls := newSummary() // what the calls in the body can write
 	store := func(x Expr) {
 		if v := localVar(x); v != nil {
 			changes[v] = true
@@ -334,6 +336,9 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, changed []*Var, bounds ...Expr)
 				ok = false
 			case s.Conversion, s.Builtin == "len", s.Builtin == "cap", s.Builtin == "min", s.Builtin == "max",
 				s.Builtin == "print", s.Builtin == "println", s.Builtin == "panic", s.Builtin == "assert", strings.HasPrefix(s.Builtin, "simd."):
+			case s.Builtin == "" && s.Callee != nil:
+				// a call: what it (and what it calls) can store decides which headers stay
+				calls.merge(g.writes(s.Callee))
 			default:
 				memSafe = false // a call can store anywhere
 			}
@@ -351,7 +356,7 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, changed []*Var, bounds ...Expr)
 			return false
 		}
 		k, ok := headerKey(x)
-		return ok && (k.field < 0 || fixed(k.v))
+		return ok && (k.field < 0 || fixed(k.v)) && g.callSafe(calls, k)
 	}
 	// invariant: an int expression whose value is the same in every iteration and that can be
 	// evaluated before the loop (no calls, so no panics)
@@ -481,6 +486,7 @@ func (g *gen) planLoop(iv *Var, body *BlockStmt, changed []*Var, bounds ...Expr)
 // arguments, C expressions valid before the loop.
 type loopBound struct {
 	fn, a, b string
+	step     int64 // the counter's step, if more than 1 (fn's _step variant takes it)
 }
 
 // versioned emits a loop with counter bound b, as loop() writes it, twice when p plans an
@@ -533,6 +539,10 @@ func (g *gen) versioned(s Stmt, p *loopPlan, b func() loopBound, loop func()) {
 				n = "(" + g.expr(ix.e.X) + ").len"
 			}
 		}
+		if bound.step > 1 {
+			add(fmt.Sprintf("%s_step(%s, %s, %d, %d, %s, %s)", bound.fn, bound.a, bound.b, bound.step, ix.scale, g.offsetC(ix.off, ix.neg), n))
+			continue
+		}
 		add(fmt.Sprintf("%s(%s, %s, %d, %s, %s)", bound.fn, bound.a, bound.b, ix.scale, g.offsetC(ix.off, ix.neg), n))
 	}
 	g.line("if (%s) {", strings.Join(list, " && "))
@@ -581,56 +591,58 @@ func (g *gen) offsetC(off Expr, neg bool) string {
 	return g.coerce(off, tInt)
 }
 
-// forLoopCounter returns the counter of `for i := a; i < b; i++` (or i <= b, b > i, i += 1) or
-// `for i := a; i >= b; i--` (or i > b, b <= i, i -= 1), the bound b, and the runtime test for
-// it (see loopBound), or nil.
-func forLoopCounter(s *ForStmt) (iv *Var, bound Expr, fn string) {
+// forLoopCounter returns the counter of `for i := a; i < b; i++` (or i <= b, b > i, i += k) or
+// `for i := a; i >= b; i--` (or i > b, b <= i, i -= k), for a constant step k > 0, the bound b,
+// the runtime test for it (see loopBound) and the step, or nil.
+func forLoopCounter(s *ForStmt) (iv *Var, bound Expr, fn string, step int64) {
 	init, ok := s.Init.(*AssignStmt)
 	if !ok || init.Tok != DEFINE || len(init.Lhs) != 1 || len(init.NewVars) != 1 || !init.NewVars[0] {
-		return nil, nil, ""
+		return nil, nil, "", 0
 	}
 	iv = localVar(init.Lhs[0])
-	if iv == nil {
-		return nil, nil, ""
+	if iv == nil || basicKind(iv.Type) != Int && basicKind(iv.Type) != Int64 {
+		return nil, nil, "", 0 // a narrower counter wraps sooner than the test assumes
 	}
 	isIV := func(x Expr) bool { return localVar(x) == iv }
 	up := false
+	step = 1
 	switch post := s.Post.(type) {
 	case *IncDecStmt:
 		if !isIV(post.X) {
-			return nil, nil, ""
+			return nil, nil, "", 0
 		}
 		up = post.Tok == INC
 	case *AssignStmt:
-		if v, ok := constInt(post.Rhs[0]); len(post.Lhs) != 1 || !isIV(post.Lhs[0]) || !ok || v != 1 || (post.Tok != ADD_ASSIGN && post.Tok != SUB_ASSIGN) {
-			return nil, nil, ""
+		v, ok := constInt(post.Rhs[0])
+		if len(post.Lhs) != 1 || !isIV(post.Lhs[0]) || !ok || v < 1 || v > 1<<20 || (post.Tok != ADD_ASSIGN && post.Tok != SUB_ASSIGN) {
+			return nil, nil, "", 0
 		}
-		up = post.Tok == ADD_ASSIGN
+		up, step = post.Tok == ADD_ASSIGN, v
 	default:
-		return nil, nil, ""
+		return nil, nil, "", 0
 	}
 	c, ok := unparen(s.Cond).(*BinaryExpr)
 	if !ok {
-		return nil, nil, ""
+		return nil, nil, "", 0
 	}
 	op, b := c.Op, c.Y
 	if isIV(c.Y) && !isIV(c.X) {
 		// b op i: the same as i op' b
 		op, b = map[Tok]Tok{LSS: GTR, LEQ: GEQ, GTR: LSS, GEQ: LEQ}[c.Op], c.X
 	} else if !isIV(c.X) || isIV(c.Y) {
-		return nil, nil, ""
+		return nil, nil, "", 0
 	}
 	switch {
 	case up && op == LSS:
-		return iv, b, "sq_inrange"
+		return iv, b, "sq_inrange", step
 	case up && op == LEQ:
-		return iv, b, "sq_inrange_incl"
+		return iv, b, "sq_inrange_incl", step
 	case !up && op == GEQ:
-		return iv, b, "sq_inrange_down"
+		return iv, b, "sq_inrange_down", step
 	case !up && op == GTR:
-		return iv, b, "sq_inrange_above"
+		return iv, b, "sq_inrange_above", step
 	}
-	return nil, nil, ""
+	return nil, nil, "", 0
 }
 
 func isSliceOrString(t Type) bool {

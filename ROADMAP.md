@@ -322,12 +322,35 @@ Postponed from the SIMD work (2026-10-17).
 
 - [ ] **5.1 AVX2 timing on real x86.** Rosetta and qemu run `-cpu x86-64-v3` binaries but their
   timings don't reflect real hardware: needs an x86-64 machine.
-- [ ] **5.2 Loops with other strides** (`i += 2`, `for i := 0; i < n; i += k` with a constant
-  k): versioned like stride-one loops.
-- [ ] **5.3 Binary growth from loop copies** (about 12%): version only loops whose unchecked copy
-  clang vectorizes or that index enough to matter.
-- [ ] **5.4 Field and package slices in loops that call functions**: prove the call can't change
-  the slice (its callees store nothing into that field or variable).
+- [x] **5.2 Loops with other strides** — done: `for i := a; i < b; i += k` (and `<=`, and `i -= k`
+  down to `>=` / `>`) for a constant k up to 2^20 and an `int` counter. The test before the loop
+  (`sq_inrange_step` and friends) checks each index at the last value the counter takes,
+  `a + (b-1-a)/k*k`, not at b-1 (so `x[i+1]` in a pair loop qualifies), and says no when the step
+  after it would wrap the counter; the unchecked copy then tells clang so (`SQ_ASSUME(i <=
+  INT64_MAX - k)` before the step), without which clang can't count a stepping loop's iterations
+  under `-fwrapv` and vectorizes nothing. Pair loops (`dst[i], dst[i+1]` from `src[i], src[i+1]`)
+  vectorize with interleaved loads and stores; stride-3 stores stay scalar (clang's cost model).
+  tests: `testdata/vectorize` (`pair_sums`, `swap_bytes`), `testdata/run/loop_stride.sq` (up and
+  down, `<`, `<=`, `>=`, `>`, lengths 0-9, a counter near the top of int),
+  `panic_loop_stride.sq`. Also found: TestVectorize had checked nothing since the syntax change
+  (BUGS.md W1).
+- [x] **5.3 Binary growth from loop copies** — measured, nothing to change (2026-10-20). `__text`
+  with and without the copies (macOS arm64): the kernels benchmark 42976 against 39260 bytes
+  (+9.5%) and `testdata/vectorize` +21%, both all loops that the copies make vectorize, which is
+  what they're for; the programs grow 0.4% at most (notes +0.2%, shop +0.2%, jsonq +0.2%, life
+  +0.2%) and kv and chat get smaller. Leaving out loops with calls (which can't vectorize) saves
+  nothing in either kind. The 12% was the kernels' figure.
+- [x] **5.4 Field and package slices in loops that call functions** — done
+  (`internal/compiler/cgen_alias.go`): each function gets a summary of what it and its callees
+  can store outside their own locals (package variables, struct fields by type and field, types
+  stored whole and every type inline in them), or "unknown" for a func value, an extern other
+  than `math`'s, or anything that can park (channel operations, select, start, runtime calls),
+  since another task could then run. A loop keeps a field's or package variable's header across
+  its calls when no callee can store to it and its address isn't taken anywhere in the program
+  (`&b.data` lets `*p = ...` change it unseen; found writing the tests). tests: `testdata/vectorize`
+  (`Buf.clamp_all`, `sum_pkg_scaled`), `testdata/run/loop_calls.sq`, `panic_loop_call_field.sq`,
+  `panic_loop_call_global.sq`, `panic_loop_call_value.sq`, `panic_loop_call_addr.sq` (each
+  callee shrinks the slice mid-loop: the loop still panics at the right iteration).
 - [ ] **5.5 Refresh `bench/results/latest.md`** with a full `bench/run.sh`.
 
 ---

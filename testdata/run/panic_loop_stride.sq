@@ -1,0 +1,13 @@
+program
+
+// a stepping loop that reaches past the end still panics at the iteration that does
+
+fn main() {
+	var xs int[10]
+	sum := 0
+	for i := 0; i < len(xs); i += 3 {
+		println("at", i)
+		sum += xs[i+1]
+	}
+	println(sum)
+}

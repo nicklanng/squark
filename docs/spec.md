@@ -970,16 +970,19 @@ resp := c.get("/notes/1")!       // resp.body and resp.header_value(...) view bu
 - **Loops and SIMD.** clang vectorizes loops, so a loop over slices often runs as SIMD code. A loop
   gets an unchecked copy, which clang can vectorize, when it counts by one (`for i in lo..hi`,
   `for i, x in s`, `for i := a; i < b; i++` with `<=` too, or `for i := a; i >= b; i--` with
-  `>` too). Its body must be at most 40 statements, with no loop, `switch`, `select`, `defer`,
+  `>` too) or steps by a constant (`i += 2`, `i -= 4`; an `int` counter). Its body must be at most 40 statements, with no loop, `switch`, `select`, `defer`,
   `start`, `!`, channel operation or allocation (`make`, `new`, `append`, `in`). The copy drops
   the bounds checks of indexes of the form `x[i]`, `x[i+k]` and `x[i-k]`, or with `c*i` in place
   of `i` for a positive constant `c` (`x[2*i+1]`), where `x` is an array, a pointer to an array,
   or a slice or string that the loop can't change, and `k` is an `int` expression of locals and
   constants that the loop doesn't change. A slice in a local variable qualifies if the loop
   doesn't assign it and its address isn't taken. A slice in a field of a local (`p.data` in a
-  method on `*T`, `s.data`) or in a package variable qualifies if the loop calls no functions
-  (builtins are fine) and stores only into local variables or values without references, so
-  nothing in it can change the slice. A test before the loop runs the unchecked copy only when
+  method on `*T`, `s.data`) or in a package variable qualifies if the loop stores only into local
+  variables or values without references, and nothing it calls can change the slice: no function
+  it calls (or that those call) stores to that field or variable, or to a whole value of that
+  struct type, and none can let another task run (a channel operation, `start`, a runtime or C
+  call other than `math`'s) or is called through a func value; nor is the field's or variable's
+  address taken anywhere in the program. A test before the loop runs the unchecked copy only when
   every index the counter can reach is in range (and `p` isn't nil), so a loop that would go out
   of range still panics at the same iteration. Floating-point sums stay in source order, so they
   don't vectorize: write them with SIMD types (§3).

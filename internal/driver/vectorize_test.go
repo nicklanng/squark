@@ -31,7 +31,7 @@ func TestVectorize(t *testing.T) {
 		want bool
 	}
 	var fns []fn
-	funcRE := regexp.MustCompile(`^func (\w+)\(`)
+	funcRE := regexp.MustCompile(`^\s*(?:pub\s+)?fn (\w+)\(`)
 	want := false
 	sc := bufio.NewScanner(bytes.NewReader(src))
 	for line := 1; sc.Scan(); line++ {
@@ -43,6 +43,15 @@ func TestVectorize(t *testing.T) {
 			fns = append(fns, fn{m[1], line, want})
 			want = false
 		}
+	}
+	wanted := 0
+	for _, f := range fns {
+		if f.want {
+			wanted++
+		}
+	}
+	if wanted == 0 {
+		t.Fatal("no function is marked want: vectorized (does funcRE still match a declaration?)")
 	}
 	var remarks bytes.Buffer
 	if _, err := Build(Options{Dir: dir, Output: filepath.Join(t.TempDir(), "vec"), Remarks: &remarks}); err != nil {

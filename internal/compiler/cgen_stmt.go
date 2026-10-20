@@ -867,15 +867,15 @@ func (g *gen) forStmt(s *ForStmt) {
 		g.hoisted, g.out = prevH, prevOut
 	}
 	var plan *loopPlan
-	iv, bound, fn := forLoopCounter(s)
+	iv, bound, fn, step := forLoopCounter(s)
 	if bound != nil {
 		plan = g.planLoop(iv, s.Body, nil, bound)
 	}
 	g.versioned(s, plan, func() loopBound {
 		if fn == "sq_inrange" || fn == "sq_inrange_incl" {
-			return loopBound{fn, iv.CName, g.coerce(bound, tInt)} // up from i to the bound
+			return loopBound{fn, iv.CName, g.coerce(bound, tInt), step} // up from i to the bound
 		}
-		return loopBound{fn, g.coerce(bound, tInt), iv.CName} // down from i to the bound
+		return loopBound{fn, g.coerce(bound, tInt), iv.CName, step} // down from i to the bound
 	}, func() {
 		g.lineDirective(s.P)
 		g.line("for (;;) {")
@@ -888,6 +888,14 @@ func (g *gen) forStmt(s *ForStmt) {
 		g.close()
 		g.line("sq_cont%d:;", g.label(s))
 		g.preemptCheck()
+		if g.unchecked != nil && step > 1 {
+			// the test before the loop showed the counter stays where stepping can't wrap it
+			if fn == "sq_inrange" || fn == "sq_inrange_incl" {
+				g.line("SQ_ASSUME(%s <= INT64_MAX - %d);", iv.CName, step)
+			} else {
+				g.line("SQ_ASSUME(%s >= INT64_MIN + %d);", iv.CName, step)
+			}
+		}
 		g.out.WriteString(post.String())
 		g.ind--
 		g.line("}")
@@ -986,7 +994,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 				g.line("%s %s = %s;", ct, lo, g.expr(s.Lo))
 			}
 			g.line("%s %s = %s;", ct, n, g.expr(s.X))
-			g.versioned(s, g.planLoop(iv, s.Body, vals), func() loopBound { return loopBound{"sq_inrange", lo, n} }, func() {
+			g.versioned(s, g.planLoop(iv, s.Body, vals), func() loopBound { return loopBound{"sq_inrange", lo, n, 1} }, func() {
 				g.line("for (%s %s = %s; %s < %s; %s++) {", ct, i, lo, i, n, i)
 				g.ind++
 				g.rangeVar(s.Key, s.Define, i, xt)
@@ -998,7 +1006,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 	case *Slice:
 		sl := g.tmp()
 		g.line("%s %s = %s;", g.ctype(xt), sl, g.expr(s.X))
-		g.versioned(s, g.planLoop(iv, s.Body, vals), func() loopBound { return loopBound{"sq_inrange", "0", sl + ".len"} }, func() {
+		g.versioned(s, g.planLoop(iv, s.Body, vals), func() loopBound { return loopBound{"sq_inrange", "0", sl + ".len", 1} }, func() {
 			g.line("for (int64_t %s = 0; %s < %s.len; %s++) {", i, i, sl, i)
 			g.ind++
 			g.rangeVars(s, i, tInt, fmt.Sprintf("%s.p[%s]", sl, i), u.Elem)
@@ -1022,7 +1030,7 @@ func (g *gen) rangeStmt(s *RangeStmt) {
 		}
 		arr := a.(*Array)
 		g.line("%s *%s = %s;", g.ctype(arr), ptr, src)
-		g.versioned(s, g.planLoop(iv, s.Body, vals), func() loopBound { return loopBound{"sq_inrange", "0", fmt.Sprint(arr.Len)} }, func() {
+		g.versioned(s, g.planLoop(iv, s.Body, vals), func() loopBound { return loopBound{"sq_inrange", "0", fmt.Sprint(arr.Len), 1} }, func() {
 			g.line("for (int64_t %s = 0; %s < %d; %s++) {", i, i, arr.Len, i)
 			g.ind++
 			g.rangeVars(s, i, tInt, fmt.Sprintf("%s->a[%s]", ptr, i), arr.Elem)

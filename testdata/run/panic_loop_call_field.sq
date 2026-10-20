@@ -1,0 +1,32 @@
+program
+
+// a call in the loop shrinks the slice the loop reads through a field: the loop must see it and
+// panic when it reads past the new end
+
+struct Buf {
+	data int[]
+}
+
+fn shrink(b *Buf) {
+	b.data = b.data[:1]
+}
+
+impl Buf {
+	fn total(&self) -> int {
+		sum := 0
+		for i := 0; i < 4; i++ {
+			if i == 2 {
+				shrink(self)
+			}
+			println("at", i)
+			sum += self.data[i]
+		}
+		return sum
+	}
+}
+
+fn main() {
+	var store int[4]
+	b := Buf{data: store[:]}
+	println(b.total())
+}

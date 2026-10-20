@@ -1,0 +1,36 @@
+program
+
+// the loop's slice is reachable through a pointer to the field, which a call stores through
+
+struct Buf {
+	data int[]
+}
+
+thread held *(int[])
+
+fn shrink() {
+	*held = (*held)[:1]
+}
+
+impl Buf {
+	fn total(&self) -> int {
+		held = &self.data
+		sum := 0
+		for i := 0; i < 4; i++ {
+			if i == 2 {
+				shrink()
+			}
+			println("at", i)
+			sum += self.data[i]
+		}
+		return sum
+	}
+}
+
+thread store int[4]
+thread b Buf
+
+fn main() {
+	b = Buf{data: store[:]}
+	println(b.total())
+}

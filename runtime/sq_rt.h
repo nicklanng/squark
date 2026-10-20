@@ -150,6 +150,48 @@ static inline bool sq_inrange_above(int64_t lo, int64_t hi, int64_t k, int64_t o
 	if (lo >= hi) return true;
 	return sq_span(lo + 1, hi, k, off, n);
 }
+// SQ_ASSUME tells the C compiler that x holds (the unchecked copy of a stepping loop says its
+// counter can't wrap, so clang can count the iterations).
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_assume)
+#define SQ_ASSUME(x) __builtin_assume(x)
+#endif
+#endif
+#ifndef SQ_ASSUME
+#define SQ_ASSUME(x) do { if (!(x)) __builtin_unreachable(); } while (0)
+#endif
+
+// The same for a counter that steps by step > 1 (i += step, i -= step): it reaches lo + m*step
+// (hi - m*step counting down), not every value up to the bound, so the test is at the last value
+// it takes; it says no when the step after that would overflow the counter, which then wraps.
+static inline bool sq_inrange_step(int64_t lo, int64_t hi, int64_t step, int64_t k, int64_t off, int64_t n) {
+	if (lo >= hi) return true;
+	int64_t d;
+	if (__builtin_sub_overflow(hi - 1, lo, &d)) return false;
+	int64_t last = lo + d / step * step;
+	return last <= INT64_MAX - step && sq_span(lo, last, k, off, n);
+}
+static inline bool sq_inrange_incl_step(int64_t lo, int64_t hi, int64_t step, int64_t k, int64_t off, int64_t n) {
+	if (lo > hi) return true;
+	int64_t d;
+	if (__builtin_sub_overflow(hi, lo, &d)) return false;
+	int64_t last = lo + d / step * step;
+	return last <= INT64_MAX - step && sq_span(lo, last, k, off, n);
+}
+static inline bool sq_inrange_down_step(int64_t lo, int64_t hi, int64_t step, int64_t k, int64_t off, int64_t n) {
+	if (lo > hi) return true;
+	int64_t d;
+	if (__builtin_sub_overflow(hi, lo, &d)) return false;
+	int64_t last = hi - d / step * step;
+	return last >= INT64_MIN + step && sq_span(last, hi, k, off, n);
+}
+static inline bool sq_inrange_above_step(int64_t lo, int64_t hi, int64_t step, int64_t k, int64_t off, int64_t n) {
+	if (lo >= hi) return true;
+	int64_t d;
+	if (__builtin_sub_overflow(hi, lo + 1, &d)) return false;
+	int64_t last = hi - d / step * step;
+	return last >= INT64_MIN + step && sq_span(last, hi, k, off, n);
+}
 
 // SQ_NN checks a pointer before it is dereferenced. A fault would catch most nil dereferences,
 // but not a large offset from nil, and C lets the compiler assume a dereferenced pointer is

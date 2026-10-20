@@ -1,0 +1,44 @@
+program
+
+// A loop over a slice in a field or a package variable keeps its unchecked copy across calls that
+// can't change that slice; these give the same results either way.
+
+struct Buf {
+	data int[]
+}
+
+thread pkg int[]
+thread store int[8]
+thread calls int
+
+fn twice(x int) -> int {
+	calls++ // a package variable, but not pkg
+	return 2 * x
+}
+
+impl Buf {
+	fn total(&self) -> int {
+		sum := 0
+		for i, _ in self.data {
+			sum += twice(self.data[i])
+		}
+		return sum
+	}
+}
+
+fn total_pkg() -> int {
+	sum := 0
+	for i := 0; i < len(pkg); i++ {
+		sum += twice(pkg[i])
+	}
+	return sum
+}
+
+fn main() {
+	for i in 0..8 {
+		store[i] = i
+	}
+	pkg = store[:5]
+	b := Buf{data: store[2:]}
+	println(b.total(), total_pkg(), calls)
+}
