@@ -351,7 +351,11 @@ Postponed from the SIMD work (2026-10-17).
   (`Buf.clamp_all`, `sum_pkg_scaled`), `testdata/run/loop_calls.sq`, `panic_loop_call_field.sq`,
   `panic_loop_call_global.sq`, `panic_loop_call_value.sq`, `panic_loop_call_addr.sq` (each
   callee shrinks the slice mid-loop: the loop still panics at the right iteration).
-- [ ] **5.5 Refresh `bench/results/latest.md`** with a full `bench/run.sh`.
+- [ ] **5.5 Refresh `bench/results/latest.md`** with a full `bench/run.sh`. The kernels now include
+  `pair-sums` (a loop stepping by two; 0.10s against 0.57s before 5.2 and Go's 0.31s, measured
+  by hand). A full run on 2026-10-21 was discarded: the machine was on battery with a load
+  average of 8 (every number, Go's too, about twice the 2026-10-17 run). Run it on mains power
+  with nothing else busy.
 
 ---
 
@@ -380,3 +384,6 @@ Postponed from the SIMD work (2026-10-17).
 - 2026-10-20: 3.5 TLS dropped (not needed). Sections 4 (tooling) and 5 (performance follow-ups)
   added; starting with 4.1.
 - 2026-10-20: 4.1-4.3 done (suite on macOS with ASan, fuzz 5000 clean after 4.1). Next: section 5.
+
+- 2026-10-21: 5.2-5.4 done (suite on macOS with ASan and Linux clang and gcc, fuzz 5000 clean).
+  5.1 needs an x86-64 machine, 5.5 a quiet one.

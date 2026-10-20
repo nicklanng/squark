@@ -91,6 +91,16 @@ fn xor_bytes(dst u8[], a u8[], b u8[]) {
 	}
 }
 
+// pair_sums writes each pair's sum and difference: a loop that steps by two.
+//
+//squark:noinline
+fn pair_sums(dst i32[], src i32[]) {
+	for i := 0; i < len(src)-1; i += 2 {
+		dst[i] = src[i] + src[i+1]
+		dst[i+1] = src[i] - src[i+1]
+	}
+}
+
 // add_rows adds two w-wide row-major matrices row by row, the index offset by the row start.
 //
 //squark:noinline
@@ -221,6 +231,12 @@ fn main() {
 			xor_bytes(u8c[:], u8a[:], u8b[:])
 			check += i64(u8c[r%n])
 			u8a[r%n] = u8(r)
+		}
+	case "pair-sums":
+		for r := 0; r < reps; r++ {
+			pair_sums(i32b[:], i32a[:])
+			check += i64(i32b[r%n])
+			i32a[r%n] = i32(r % 7)
 		}
 	case "add-rows":
 		for r := 0; r < reps; r++ {

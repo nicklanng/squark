@@ -91,6 +91,14 @@ func xorBytes(dst []byte, a []byte, b []byte) {
 }
 
 //go:noinline
+func pairSums(dst []int32, src []int32) {
+	for i := 0; i < len(src)-1; i += 2 {
+		dst[i] = src[i] + src[i+1]
+		dst[i+1] = src[i] - src[i+1]
+	}
+}
+
+//go:noinline
 func addRows(dst []int32, a []int32, b []int32, w int) {
 	rows := len(dst) / w
 	for r := 0; r < rows; r++ {
@@ -191,6 +199,12 @@ func kernel(name string, reps int) {
 			xorBytes(u8c[:], u8a[:], u8b[:])
 			check += int64(u8c[r%kn])
 			u8a[r%kn] = byte(r)
+		}
+	case "pair-sums":
+		for r := 0; r < reps; r++ {
+			pairSums(i32b[:], i32a[:])
+			check += int64(i32b[r%kn])
+			i32a[r%kn] = int32(r % 7)
 		}
 	case "add-rows":
 		for r := 0; r < reps; r++ {

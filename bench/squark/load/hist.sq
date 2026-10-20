@@ -117,4 +117,3 @@ impl Hist {
 		return int(self.sum / self.n)
 	}
 }
-
